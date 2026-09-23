@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 4
+local VERSION = 5
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v4"
+local PROTOCOL = "mine_v5"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -457,10 +457,26 @@ local function bootstrap()
             sleep(0.1)
         end
 
+        local installerReady = false
+        local installerFuelSlot = nil
+
+        local function sendInstallerReady()
+            for i=1,3 do
+                send(cfg.foremanId, {
+                    type="installer_ready",
+                    id=myID,
+                    row=cfg.row
+                })
+                sleep(0.1)
+            end
+        end
+
         local done = false
         while not done do
-            local sender, message = rednet.receive(PROTOCOL, 5)
-            if sender == cfg.foremanId and type(message) == "table" then
+            local sender, message = rednet.receive(PROTOCOL, 1)
+            if not sender and installerReady then
+                sendInstallerReady()
+            elseif sender == cfg.foremanId and type(message) == "table" then
                 if message.type == "commission_refuel" then
                     turtle.select(1)
                     while turtle.getItemCount(1) > 1 and turtle.getFuelLevel() ~= "unlimited" and turtle.getFuelLevel() < MINER_FUEL_TARGET do
@@ -478,28 +494,60 @@ local function bootstrap()
                         sleep(0.1)
                     end
                 elseif message.type == "return_installer" then
-                    turtle.select(1)
-                    if turtle.getItemCount(1) > 0 then
-                        turtle.transferTo(16)
-                    end
-                    turtle.select(1)
-                    if not turtle.digUp() then
-                        error("Cannot break installer drive")
-                    end
-                    for i=1,3 do
-                        send(cfg.foremanId, {
-                            type="installer_ready",
-                            id=myID,
-                            row=cfg.row
-                        })
-                        sleep(0.1)
+                    if not installerReady then
+                        turtle.select(1)
+                        if turtle.getItemCount(1) > 0 then
+                            installerFuelSlot = nil
+                            for slot=16,2,-1 do
+                                if turtle.getItemCount(slot) == 0 then
+                                    installerFuelSlot = slot
+                                    break
+                                end
+                            end
+                            if not installerFuelSlot then
+                                send(cfg.foremanId,{
+                                    type="installer_break_failed",
+                                    id=myID,
+                                    row=cfg.row,
+                                    reason="no_empty_slot"
+                                })
+                            else
+                                turtle.transferTo(installerFuelSlot)
+                            end
+                        end
+                        if turtle.getItemCount(1) == 0 then
+                            turtle.select(1)
+                            if turtle.digUp() then
+                                installerReady = true
+                                sendInstallerReady()
+                            else
+                                send(cfg.foremanId,{
+                                    type="installer_break_failed",
+                                    id=myID,
+                                    row=cfg.row,
+                                    reason="dig_failed"
+                                })
+                                if installerFuelSlot and turtle.getItemCount(installerFuelSlot) > 0 then
+                                    turtle.select(installerFuelSlot)
+                                    turtle.transferTo(1)
+                                    turtle.select(1)
+                                    installerFuelSlot = nil
+                                end
+                            end
+                        end
+                    else
+                        sendInstallerReady()
                     end
                 elseif message.type == "installer_taken" then
-                    turtle.select(16)
-                    if turtle.getItemCount(16) > 0 then
-                        turtle.transferTo(1)
+                    if installerReady then
+                        installerReady = false
+                        if installerFuelSlot and turtle.getItemCount(installerFuelSlot) > 0 then
+                            turtle.select(installerFuelSlot)
+                            turtle.transferTo(1)
+                        end
+                        installerFuelSlot = nil
+                        turtle.select(1)
                     end
-                    turtle.select(1)
                     for i=1,3 do
                         send(cfg.foremanId, {
                             type="installer_returned",
@@ -1073,6 +1121,7 @@ local function runForeman(cfg)
     local peers = {}
     local intents = {}
     local inbox = {}
+    local commissionWave = {}
     local flags = {
         commissionStart=false,
         startMining=false,
@@ -1540,6 +1589,12 @@ local function runForeman(cfg)
                         else
                             flags.commissionStart = true
                         end
+                    elseif message.type == "commission_done" and cfg.master and message.number then
+                        state.groupsCommissioned = state.groupsCommissioned or {}
+                        state.groupsCommissioned[message.number] = true
+                        commissionWave[message.number] = nil
+                        saveState()
+                        pushInbox(sender,message)
                     elseif message.type == "start_mining" then
                         flags.startMining = true
                     elseif message.type == "recall_all" then
@@ -1553,6 +1608,16 @@ local function runForeman(cfg)
             elseif event[1] == "timer" and event[2] == timer then
                 if now() - lastStatus >= STATUS_INTERVAL then
                     sendState("")
+                end
+                if cfg.master then
+                    for n=2,4 do
+                        if commissionWave[n] and cfg.foremen and cfg.foremen[n] then
+                            if not commissionWave[n].lastSend or now() - commissionWave[n].lastSend >= 2 then
+                                send(cfg.foremen[n],{type="commission_start",number=n})
+                                commissionWave[n].lastSend = now()
+                            end
+                        end
+                    end
                 end
                 if number == 1 and dock and dock.holder and dock.holder ~= id then
                     local holder = peers[dock.holder]
@@ -1619,41 +1684,113 @@ local function runForeman(cfg)
             return false
         end
         faceDir(state,DIR_N)
+
         if not turtle.up() then
             return false
         end
+
         turtle.select(diskSlot)
         if turtle.getItemCount(diskSlot) > 0 then
             turtle.down()
             return false
         end
-        if not turtle.suck(1) then
+
+        local diskDeadline = now() + 10
+        while turtle.getItemCount(diskSlot) == 0 and now() < diskDeadline do
+            turtle.suck(1)
+            if turtle.getItemCount(diskSlot) == 0 then
+                sleep(0.25)
+            end
+        end
+
+        if turtle.getItemCount(diskSlot) == 0 then
             turtle.down()
             return false
         end
+
         if not turtle.down() then
             return false
         end
+
         faceDir(state,DIR_N)
-        send(workerId,{type="return_installer"})
-        local _,ready = waitInbox(function(sender,m)
-            return sender==workerId and type(m)=="table" and m.type=="installer_ready"
-        end,15)
-        if not ready then
-            return false
+
+        local ready = nil
+        local lastRequest = 0
+        local lastWarning = now()
+
+        while not ready do
+            if now() - lastRequest >= 1 then
+                send(workerId,{type="return_installer"})
+                lastRequest = now()
+            end
+
+            local _,reply = waitInbox(function(sender,m)
+                return sender==workerId and type(m)=="table" and
+                    (m.type=="installer_ready" or m.type=="installer_break_failed")
+            end,0.5)
+
+            if reply then
+                if reply.type == "installer_ready" then
+                    ready = reply
+                else
+                    state.phase="WAITING_INSTALLER"
+                    saveState()
+                    sendState("Miner-" .. tostring(reply.row) .. " installer retry: " .. tostring(reply.reason))
+                end
+            elseif now() - lastWarning >= 10 then
+                state.phase="WAITING_INSTALLER"
+                saveState()
+                sendState("Waiting for miner to break Disk Drive")
+                lastWarning = now()
+            end
         end
+
         turtle.select(driveSlot)
         if turtle.getItemCount(driveSlot) > 0 then
             return false
         end
-        if not turtle.suck(1) then
-            return false
+
+        lastWarning = now()
+
+        while turtle.getItemCount(driveSlot) == 0 do
+            turtle.suck(1)
+            if turtle.getItemCount(driveSlot) == 0 then
+                send(workerId,{type="return_installer"})
+                if now() - lastWarning >= 10 then
+                    state.phase="WAITING_INSTALLER"
+                    saveState()
+                    sendState("Waiting to pull Disk Drive from miner")
+                    lastWarning = now()
+                end
+                sleep(0.25)
+            end
         end
-        send(workerId,{type="installer_taken"})
-        local _,returned = waitInbox(function(sender,m)
-            return sender==workerId and type(m)=="table" and m.type=="installer_returned"
-        end,10)
-        return returned ~= nil
+
+        local returned = nil
+        local lastTaken = 0
+        lastWarning = now()
+
+        while not returned do
+            if now() - lastTaken >= 1 then
+                send(workerId,{type="installer_taken"})
+                lastTaken = now()
+            end
+
+            local _,reply = waitInbox(function(sender,m)
+                return sender==workerId and type(m)=="table" and m.type=="installer_returned"
+            end,0.5)
+
+            if reply then
+                returned = reply
+            elseif now() - lastWarning >= 10 then
+                state.phase="WAITING_INSTALLER"
+                saveState()
+                sendState("Waiting for miner installer acknowledgement")
+                lastWarning = now()
+            end
+        end
+
+        return true
     end
 
     local function ensureWorkerCoal()
@@ -2343,33 +2480,36 @@ local function runForeman(cfg)
             end
 
             state.groupsCommissioned = state.groupsCommissioned or {}
-            for n=4,2,-1 do
+
+            for n=2,4 do
                 if not state.groupsCommissioned[n] then
-                    if not commandCommission(n) then
-                        state.phase="WAITING_SETUP"
-                        saveState()
-                        sendState("Foreman-" .. tostring(n) .. " commissioning paused")
-                        while not commandCommission(n) do
-                            sendState("Waiting for Foreman-" .. tostring(n) .. " commissioning")
-                            sleep(2)
-                        end
-                    end
-                    state.groupsCommissioned[n]=true
-                    saveState()
+                    commissionWave[n] = commissionWave[n] or {}
+                    send(cfg.foremen[n],{type="commission_start",number=n})
+                    commissionWave[n].lastSend = now()
                 end
             end
+
             if not state.groupsCommissioned[1] then
-                if not commandCommission(1) then
+                state.phase="COMMISSIONING"
+                saveState()
+                sendState("All foremen released for simultaneous commissioning")
+
+                while not commissionAssigned() do
                     state.phase="WAITING_SETUP"
                     saveState()
-                    sendState("Foreman-1 commissioning paused")
-                    while not commandCommission(1) do
-                        sendState("Waiting for Foreman-1 commissioning")
-                        sleep(2)
-                    end
+                    sendState("Foreman-1 commissioning paused, retrying")
+                    sleep(2)
                 end
+
                 state.groupsCommissioned[1]=true
                 saveState()
+            end
+
+            while not (state.groupsCommissioned[2] and state.groupsCommissioned[3] and state.groupsCommissioned[4]) do
+                state.phase="WAITING_SETUP"
+                saveState()
+                sendState("Waiting for all foremen to finish commissioning")
+                sleep(1)
             end
 
             for i=1,3 do
@@ -2704,4 +2844,3 @@ else
         error("Unknown node role")
     end
 end
-
