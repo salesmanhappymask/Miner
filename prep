@@ -1,0 +1,97 @@
+local sourceFile = "mine"
+
+if peripheral.getType("top") ~= "drive" then
+    error("Disk Drive must be directly above turtle")
+end
+
+if not fs.exists(sourceFile) then
+    error("Local mine program not found. Run updater first.")
+end
+
+local f = fs.open(sourceFile, "r")
+local source = f.readAll()
+f.close()
+
+local version = nil
+
+if fs.exists("version") then
+    local vf = fs.open("version", "r")
+    version = vf.readAll()
+    vf.close()
+end
+
+local prepared = 0
+local failed = 0
+
+for slot = 1, 16 do
+    if turtle.getItemCount(slot) > 0 then
+        turtle.select(slot)
+
+        if turtle.dropUp(1) then
+            sleep(0.5)
+
+            if disk.isPresent("top") then
+                local mount = disk.getMountPath("top")
+
+                if mount then
+                    local files = fs.list(mount)
+
+                    for i = 1, #files do
+                        fs.delete(fs.combine(mount, files[i]))
+                    end
+
+                    local out = fs.open(fs.combine(mount, "startup"), "w")
+                    out.write(source)
+                    out.close()
+
+                    if version then
+                        local vo = fs.open(fs.combine(mount, "version"), "w")
+                        vo.write(version)
+                        vo.close()
+                    end
+
+                    disk.setLabel("top", "miner")
+
+                    local check = fs.open(fs.combine(mount, "startup"), "r")
+                    local copied = check.readAll()
+                    check.close()
+
+                    if copied == source then
+                        prepared = prepared + 1
+                        print("Slot " .. slot .. ": OK")
+                    else
+                        failed = failed + 1
+                        print("Slot " .. slot .. ": VERIFY FAILED")
+                    end
+                else
+                    failed = failed + 1
+                    print("Slot " .. slot .. ": NO MOUNT")
+                end
+
+                turtle.select(slot)
+
+                local tries = 0
+
+                while disk.isPresent("top") and tries < 20 do
+                    turtle.suckUp(1)
+                    tries = tries + 1
+                    sleep(0.1)
+                end
+
+                if disk.isPresent("top") then
+                    failed = failed + 1
+                    print("Slot " .. slot .. ": COULD NOT RETRIEVE")
+                end
+            else
+                turtle.select(slot)
+                turtle.suckUp(1)
+            end
+        end
+    end
+end
+
+turtle.select(1)
+
+print("")
+print("Prepared: " .. prepared)
+print("Failed: " .. failed)
