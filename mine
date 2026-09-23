@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 17
+local VERSION = 18
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v17"
+local PROTOCOL = "mine_v18"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -360,6 +360,24 @@ local function selfTargetSlotExcluding(kind,excluded)
     return empty
 end
 
+local function selfEmptySlot()
+    local inv=getSelfInventory()
+    if not inv then
+        return nil
+    end
+
+    local size=inv.getInventorySize()
+
+    for slot=1,size do
+        local ok,item=pcall(inv.getStackInSlot,slot)
+        if ok and not item then
+            return slot
+        end
+    end
+
+    return nil
+end
+
 local function takeNamedIntoSelf(kind, count)
     local moved = 0
     while moved < count do
@@ -686,6 +704,19 @@ local function runMinerCommissioning(cfg)
                 })
 
             elseif message.type=="deploy_miner" then
+                state.dir=DIR_N
+
+                if cfg.tempDeployment then
+                    for i=1,2 do
+                        while not turtle.forward() do
+                            turtle.dig()
+                            turtle.attack()
+                            sleep(0.15)
+                        end
+                    end
+                    cfg.tempDeployment=false
+                end
+
                 cfg.commissioned=true
                 saveTable("node.cfg",cfg)
 
@@ -764,7 +795,7 @@ local function bootstrap()
             homeX = 0,
             homeZ = -(configured.number + 1),
             startX = 1,
-            startZ = 1,
+            startZ = -1,
             startDir = DIR_N,
             master = false
         }
@@ -850,6 +881,7 @@ local function bootstrap()
             row=configured.row,
             foremanId=configured.foremanId,
             foremanNumber=configured.foremanNumber,
+            tempDeployment=configured.tempDeployment and true or false,
             commissioned=false
         }
 
@@ -2364,11 +2396,11 @@ local function runForeman(cfg)
         local targetSlot=nil
 
         if useBootstrapDrive then
-            targetSlot=16
-            if turtle.getItemCount(targetSlot)>0 then
+            targetSlot=selfEmptySlot()
+            if not targetSlot then
                 state.phase="WAITING_INSTALLER"
                 saveState()
-                sendState("Slot 16 must be empty for bootstrap Disk Drive")
+                sendState("No empty slot available for bootstrap Disk Drive")
                 return false
             end
         else
@@ -2486,16 +2518,23 @@ local function runForeman(cfg)
         end
 
         local targetX=row
+        local targetZ=1
         local stagingZ=0
-
-        if not goTo(targetX,stagingZ) then
-            return false
-        end
-
-        faceDir(state,DIR_N)
-        saveState()
+        local temporary=false
 
         if useBootstrapDrive then
+            targetX=1
+            targetZ=-1
+            stagingZ=-2
+            temporary=true
+
+            if not goTo(targetX,stagingZ) then
+                return false
+            end
+
+            faceDir(state,DIR_N)
+            saveState()
+
             if not turtle.up() then
                 return false
             end
@@ -2504,24 +2543,33 @@ local function runForeman(cfg)
                 turtle.down()
                 state.phase="PLACEMENT_ERROR"
                 saveState()
-                sendState("Bootstrap Disk Drive missing above Miner-01")
+                sendState("Bootstrap Disk Drive missing above temporary Miner-01 pad")
                 return false
             end
 
-            if not selfSelectKind("floppy") then
-                turtle.down()
-                return false
-            end
+            if not disk.isPresent("front") then
+                if not selfSelectKind("floppy") then
+                    turtle.down()
+                    state.phase="WAITING_INSTALLER"
+                    saveState()
+                    sendState("Foreman-1 bootstrap floppy missing")
+                    return false
+                end
 
-            if not turtle.drop(1) then
-                turtle.down()
-                return false
+                if not turtle.drop(1) then
+                    turtle.down()
+                    state.phase="WAITING_INSTALLER"
+                    saveState()
+                    sendState("Cannot insert Foreman-1 bootstrap floppy")
+                    return false
+                end
             end
-
-            sleep(0.3)
 
             if not disk.isPresent("front") then
                 turtle.down()
+                state.phase="PLACEMENT_ERROR"
+                saveState()
+                sendState("Bootstrap floppy verification failed before Miner-01")
                 return false
             end
 
@@ -2529,7 +2577,7 @@ local function runForeman(cfg)
                 return false
             end
         else
-            if not placeDriveAndDiskAt(targetX,1) then
+            if not placeDriveAndDiskAt(targetX,targetZ) then
                 return false
             end
         end
@@ -2548,6 +2596,13 @@ local function runForeman(cfg)
             state.phase="PLACEMENT_ERROR"
             saveState()
             sendState("Miner-" .. tostring(row) .. " target already occupied")
+            return false
+        end
+
+        if turtle.detect() then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Miner-" .. tostring(row) .. " target blocked by a non-turtle block")
             return false
         end
 
@@ -2583,7 +2638,8 @@ local function runForeman(cfg)
             role="miner",
             row=row,
             foremanId=id,
-            foremanNumber=number
+            foremanNumber=number,
+            tempDeployment=temporary
         }
 
         local installed=nil
@@ -2649,7 +2705,7 @@ local function runForeman(cfg)
             end
         end
 
-        if not recoverInstaller(workerId,targetX,1,useBootstrapDrive) then
+        if not recoverInstaller(workerId,targetX,targetZ,useBootstrapDrive) then
             state.phase="WAITING_INSTALLER"
             saveState()
             sendState("Installer recovery failed for Miner-" .. tostring(row))
@@ -2871,7 +2927,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v17 Foreman-1",
+                    "Mine v18 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
@@ -2943,46 +2999,90 @@ local function runForeman(cfg)
             return false
         end
 
-        if not goTo(1,0) then
+        if not goTo(1,-2) then
             return false
         end
 
         faceDir(state,DIR_N)
         saveState()
 
+        local groundType=peripheral.getType("front")
+        if groundType=="drive" then
+            turtle.select(selfTargetSlot("disk_drive") or 16)
+            if not turtle.dig() then
+                state.phase="PLACEMENT_ERROR"
+                saveState()
+                sendState("Cannot remove misplaced ground Disk Drive from bootstrap pad")
+                return false
+            end
+            sleep(0.2)
+        elseif frontComputerId() then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Bootstrap pad occupied by a turtle")
+            return false
+        elseif turtle.detect() then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Bootstrap pad blocked at ground level")
+            return false
+        end
+
         if not turtle.up() then
             return false
         end
 
-        if not selfSelectKind("disk_drive") then
-            turtle.down()
-            return false
+        local elevatedType=peripheral.getType("front")
+
+        if elevatedType~="drive" then
+            if turtle.detect() then
+                turtle.down()
+                state.phase="PLACEMENT_ERROR"
+                saveState()
+                sendState("Bootstrap drive position blocked by non-drive block")
+                return false
+            end
+
+            if not selfSelectKind("disk_drive") then
+                turtle.down()
+                return false
+            end
+
+            if not turtle.place() then
+                turtle.down()
+                return false
+            end
+
+            sleep(0.2)
+
+            if peripheral.getType("front")~="drive" then
+                turtle.down()
+                state.phase="PLACEMENT_ERROR"
+                saveState()
+                sendState("Bootstrap Disk Drive verification failed")
+                return false
+            end
         end
 
-        if not turtle.place() then
-            turtle.down()
-            return false
-        end
+        if not disk.isPresent("front") then
+            if not selfSelectKind("floppy") then
+                turtle.down()
+                return false
+            end
 
-        if peripheral.getType("front")~="drive" then
-            turtle.down()
-            return false
-        end
+            if not turtle.drop(1) then
+                turtle.down()
+                return false
+            end
 
-        if not selfSelectKind("floppy") then
-            turtle.down()
-            return false
+            sleep(0.3)
         end
-
-        if not turtle.drop(1) then
-            turtle.down()
-            return false
-        end
-
-        sleep(0.3)
 
         if not disk.isPresent("front") then
             turtle.down()
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Bootstrap floppy verification failed")
             return false
         end
 
@@ -3004,7 +3104,7 @@ local function runForeman(cfg)
             return nil
         end
 
-        if not goTo(1,0) then
+        if not goTo(1,-2) then
             return nil
         end
 
@@ -3162,7 +3262,7 @@ local function runForeman(cfg)
         end
 
         if not state.bootstrapDiskPulled then
-            if not goTo(1,0) then
+            if not goTo(1,-2) then
                 state.phase="WAITING_SETUP"
                 saveState()
                 sendState("Cannot reach bootstrap drive")
@@ -3677,7 +3777,7 @@ end
 local function runMaster()
     local cfg = loadTable("node.cfg")
     if cfg and cfg.version ~= VERSION then
-        error("Old master state detected. Clear node.cfg and foreman state before using v17.")
+        error("Old master state detected. Clear node.cfg and foreman state before using v18.")
     end
     if not cfg then
         cfg = {
@@ -3721,7 +3821,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version ~= VERSION then
-        error("Old mine state detected. Clear node.cfg and old mine state before using v17.")
+        error("Old mine state detected. Clear node.cfg and old mine state before using v18.")
     elseif cfg.role == "miner" then
         if cfg.commissioned then
             runMiner(cfg)
