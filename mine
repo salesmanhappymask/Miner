@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 5
+local VERSION = 6
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v5"
+local PROTOCOL = "mine_v6"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -14,7 +14,7 @@ local MINER_FUEL_TARGET = 1200
 local MINER_SERVICE_RESERVE = 128
 local FOREMAN_FUEL_TARGET = 1200
 local FOREMAN_FUEL_LOW = 250
-local WORKER_SETUP_COAL = 16
+local WORKER_SETUP_COAL = 12
 local STARTING_COAL_STACKS = 8
 
 local DIR_N = 0
@@ -162,19 +162,48 @@ local function findInventorySlot(side, kind)
 end
 
 local function takeNamedFromFront(kind, count, targetSlot)
-    local sourceSlot, inv = findInventorySlot("front", kind)
-    if not sourceSlot then
-        return 0
+    local movedTotal = 0
+
+    while movedTotal < count do
+        local sourceSlot, inv = findInventorySlot("front", kind)
+        if not sourceSlot then
+            break
+        end
+
+        local need = count - movedTotal
+        local moved = 0
+
+        if inv.pushItem then
+            local ok, result = pcall(inv.pushItem, "south", sourceSlot, need, targetSlot)
+            if ok and type(result) == "number" then
+                moved = result
+            end
+        end
+
+        if moved <= 0 then
+            if inv.swapStacks and sourceSlot ~= 1 then
+                local ok = pcall(inv.swapStacks, sourceSlot, 1)
+                if not ok then
+                    break
+                end
+            elseif sourceSlot ~= 1 then
+                break
+            end
+
+            turtle.select(targetSlot)
+            local before = turtle.getItemCount(targetSlot)
+            turtle.suck(need)
+            moved = turtle.getItemCount(targetSlot) - before
+        end
+
+        if moved <= 0 then
+            break
+        end
+
+        movedTotal = movedTotal + moved
     end
-    if inv.swapStacks and sourceSlot ~= 1 then
-        inv.swapStacks(sourceSlot, 1)
-    elseif sourceSlot ~= 1 then
-        return 0
-    end
-    turtle.select(targetSlot)
-    local before = turtle.getItemCount(targetSlot)
-    turtle.suck(count)
-    return turtle.getItemCount(targetSlot) - before
+
+    return movedTotal
 end
 
 local function countNamedFront(kind)
@@ -1793,41 +1822,54 @@ local function runForeman(cfg)
         return true
     end
 
-    local function ensureWorkerCoal()
-        if turtle.getItemCount(4) >= WORKER_SETUP_COAL then
-            return true
-        end
-        if not atFuel() then
-            return false
-        end
-        turtle.select(4)
-        takeNamedFromFront("coal",64,4)
-        releaseDock()
-        return turtle.getItemCount(4) >= WORKER_SETUP_COAL
-    end
+    local function validateCommissionPackage()
+        local remaining = 0
+        state.commissionedRows = state.commissionedRows or {}
 
-    local function loadWorkers()
-        if turtle.getItemCount(5) >= 4 then
+        for row=cfg.rowStart,cfg.rowEnd do
+            if not state.commissionedRows[row] then
+                remaining = remaining + 1
+            end
+        end
+
+        if remaining == 0 then
             return true
         end
-        if not atSupply() then
+
+        if turtle.getItemCount(3) < 1 then
+            state.phase="WAITING_SUPPLIES"
+            saveState()
+            sendState("Missing miner floppy")
             return false
         end
-        turtle.select(5)
-        local need = 4 - turtle.getItemCount(5)
-        local got = takeNamedFromFront("wireless_mining_turtle",need,5)
-        releaseDock()
-        return got >= need
+
+        if turtle.getItemCount(4) < remaining then
+            state.phase="WAITING_SUPPLIES"
+            saveState()
+            sendState("Missing assigned miners")
+            return false
+        end
+
+        if turtle.getItemCount(1) < WORKER_SETUP_COAL * remaining then
+            state.phase="WAITING_SUPPLIES"
+            saveState()
+            sendState("Not enough miner fuel")
+            return false
+        end
+
+        local needsOwnDrive = not (number == 1 and not state.firstInstallerRecovered)
+        if needsOwnDrive and turtle.getItemCount(2) < 1 then
+            state.phase="WAITING_SUPPLIES"
+            saveState()
+            sendState("Missing Disk Drive")
+            return false
+        end
+
+        return true
     end
 
     local function commissionMiner(row,tempDeployment)
-        if not loadOwnFuel() then
-            return false
-        end
-        if not ensureWorkerCoal() then
-            return false
-        end
-        if turtle.getItemCount(5) == 0 and not loadWorkers() then
+        if not validateCommissionPackage() then
             return false
         end
 
@@ -1871,7 +1913,7 @@ local function runForeman(cfg)
             end
         end
 
-        turtle.select(5)
+        turtle.select(4)
         if not turtle.place() then
             state.phase="ERROR"
             saveState()
@@ -1924,7 +1966,7 @@ local function runForeman(cfg)
             return false
         end
 
-        turtle.select(4)
+        turtle.select(1)
         if not turtle.drop(WORKER_SETUP_COAL) then
             return false
         end
@@ -2001,10 +2043,8 @@ local function runForeman(cfg)
         saveState()
         sendState("Commissioning assigned miners")
 
-        if number ~= 1 then
-            if not loadWorkers() then
-                return false
-            end
+        if not validateCommissionPackage() then
+            return false
         end
 
         local first = cfg.rowStart
@@ -2068,22 +2108,79 @@ local function runForeman(cfg)
         return true
     end
 
-    local function masterTakeCoal()
+    local function masterFuelAndLoadCoal()
         if not goTo(-2,0) then
             return false
         end
+
         faceDir(state,DIR_N)
-        local slots = {1,4,5,6,7,8,9,10}
-        for i=1,#slots do
-            turtle.select(slots[i])
-            if turtle.getItemCount(slots[i]) == 0 then
-                local got = takeNamedFromFront("coal",64,slots[i])
-                if got == 0 then
+
+        turtle.select(1)
+        if turtle.getItemCount(1) == 0 then
+            if takeNamedFromFront("coal",64,1) == 0 then
+                return false
+            end
+        end
+
+        useOwnFuel()
+
+        local packageSlots = {9,10,11}
+        for i=1,#packageSlots do
+            local slot = packageSlots[i]
+            turtle.select(slot)
+            if turtle.getItemCount(slot) < 64 then
+                local need = 64 - turtle.getItemCount(slot)
+                if takeNamedFromFront("coal",need,slot) < need then
                     return false
                 end
             end
         end
-        useOwnFuel()
+
+        return true
+    end
+
+    local function masterLoadSupplies()
+        if not goTo(0,0) then
+            return false
+        end
+
+        faceDir(state,DIR_N)
+
+        turtle.select(2)
+        if turtle.getItemCount(2) < 5 then
+            local need = 5 - turtle.getItemCount(2)
+            if takeNamedFromFront("disk_drive",need,2) < need then
+                return false
+            end
+        end
+
+        turtle.select(4)
+        if turtle.getItemCount(4) < 16 then
+            local need = 16 - turtle.getItemCount(4)
+            if takeNamedFromFront("wireless_mining_turtle",need,4) < need then
+                return false
+            end
+        end
+
+        turtle.select(8)
+        if turtle.getItemCount(8) < 3 then
+            local need = 3 - turtle.getItemCount(8)
+            if takeNamedFromFront("narcissistic_wireless_turtle",need,8) < need then
+                return false
+            end
+        end
+
+        local diskSlots = {3,5,6,7}
+        for i=1,#diskSlots do
+            local slot = diskSlots[i]
+            if turtle.getItemCount(slot) == 0 then
+                turtle.select(slot)
+                if takeNamedFromFront("floppy",1,slot) < 1 then
+                    return false
+                end
+            end
+        end
+
         return true
     end
 
@@ -2091,67 +2188,63 @@ local function runForeman(cfg)
         if not goTo(0,0) then
             return false
         end
+
         faceDir(state,DIR_N)
-        turtle.select(2)
-        if turtle.getItemCount(2)==0 then
-            if takeNamedFromFront("disk_drive",1,2)==0 then
-                return false
-            end
-        end
-        turtle.select(3)
-        if turtle.getItemCount(3)==0 then
-            if takeNamedFromFront("floppy",1,3)==0 then
-                return false
-            end
-        end
-        if not placeDriveAndDiskAt(1,-1,2,3) then
+
+        if turtle.getItemCount(2) < 1 or turtle.getItemCount(3) < 1 then
             return false
         end
-        return true
+
+        return placeDriveAndDiskAt(1,-1,2,3)
     end
 
-    local function masterFetchPackage()
-        if not goTo(0,0) then
-            return false
-        end
-        faceDir(state,DIR_N)
-        turtle.select(11)
-        if turtle.getItemCount(11)==0 and takeNamedFromFront("narcissistic_wireless_turtle",1,11)==0 then
-            return false
-        end
-        turtle.select(12)
-        if turtle.getItemCount(12)==0 and takeNamedFromFront("disk_drive",1,12)==0 then
-            return false
-        end
-        turtle.select(13)
-        if turtle.getItemCount(13)==0 and takeNamedFromFront("floppy",1,13)==0 then
-            return false
-        end
-        return true
-    end
+    local function masterCommissionForeman(n)
+        local diskSlot = n + 2
+        local coalSlot = n + 7
 
-    local function masterCommissionForeman(n,coalA,coalB)
-        if not masterFetchPackage() then
+        if turtle.getItemCount(8) < 1 then
             return nil
         end
+
+        if turtle.getItemCount(2) < 1 then
+            return nil
+        end
+
+        if turtle.getItemCount(diskSlot) < 1 then
+            return nil
+        end
+
+        if turtle.getItemCount(4) < 4 then
+            return nil
+        end
+
+        if turtle.getItemCount(coalSlot) < 64 then
+            return nil
+        end
+
         if not goTo(1,-2) then
             return nil
         end
+
         faceDir(state,DIR_N)
-        turtle.select(11)
+        turtle.select(8)
+
         if not turtle.place() then
             return nil
         end
+
         peripheral.call("front","turnOn")
 
         local newId = nil
         local deadline = now()+20
+
         while now()<deadline and not newId do
             local sender = waitForBootstrap(2)
             if sender then
                 newId=sender
             end
         end
+
         if not newId then
             return nil
         end
@@ -2164,15 +2257,18 @@ local function runForeman(cfg)
             rowStart=(n-1)*4+1,
             rowEnd=n*4
         }
+
         send(newId,configurePacket)
 
         local installed=nil
         local installDeadline=now()+20
         local lastConfigure=now()
+
         while now()<installDeadline and not installed do
             local _,reply=waitInbox(function(sender,m)
                 return sender==newId and type(m)=="table" and m.type=="install_ok" and m.number==n
             end,1)
+
             if reply then
                 installed=reply
             elseif now()-lastConfigure>=2 then
@@ -2180,24 +2276,28 @@ local function runForeman(cfg)
                 lastConfigure=now()
             end
         end
+
         if not installed then
             return nil
         end
 
-        turtle.select(coalA)
+        turtle.select(coalSlot)
         if not turtle.drop(64) then
             return nil
         end
-        turtle.select(12)
+
+        turtle.select(2)
         if not turtle.drop(1) then
             return nil
         end
-        turtle.select(13)
+
+        turtle.select(diskSlot)
         if not turtle.drop(1) then
             return nil
         end
-        turtle.select(coalB)
-        if not turtle.drop(64) then
+
+        turtle.select(4)
+        if not turtle.drop(4) then
             return nil
         end
 
@@ -2209,6 +2309,7 @@ local function runForeman(cfg)
         local _,deployed = waitInbox(function(sender,m)
             return sender==newId and type(m)=="table" and m.type=="foreman_deployed" and m.number==n
         end,120)
+
         if not deployed then
             return nil
         end
@@ -2229,13 +2330,24 @@ local function runForeman(cfg)
         end
 
         if not state.initialFuelLoaded then
-            if not masterTakeCoal() then
+            if not masterFuelAndLoadCoal() then
                 state.phase="WAITING_SUPPLIES"
                 saveState()
-                sendState("Need 8 stacks of coal in fuel chest")
+                sendState("Need seed fuel plus four coal stacks total")
                 return false
             end
             state.initialFuelLoaded=true
+            saveState()
+        end
+
+        if not state.initialSuppliesLoaded then
+            if not masterLoadSupplies() then
+                state.phase="WAITING_SUPPLIES"
+                saveState()
+                sendState("Need 5 drives, 4 floppies, 16 miners, and 3 Narcissistic Wireless Turtles")
+                return false
+            end
+            state.initialSuppliesLoaded=true
             saveState()
         end
 
@@ -2250,16 +2362,9 @@ local function runForeman(cfg)
             saveState()
         end
 
-        local fuelSlots = {
-            [2]={4,5},
-            [3]={6,7},
-            [4]={8,9}
-        }
-
         for n=2,4 do
             if not state.foremenReady[n] then
-                local slots=fuelSlots[n]
-                local fid=masterCommissionForeman(n,slots[1],slots[2])
+                local fid=masterCommissionForeman(n)
                 if not fid then
                     state.phase="WAITING_SETUP"
                     saveState()
@@ -2271,11 +2376,6 @@ local function runForeman(cfg)
                 saveTable("node.cfg",cfg)
                 saveState()
             end
-        end
-
-        if turtle.getItemCount(4)==0 and turtle.getItemCount(10)>0 then
-            turtle.select(10)
-            turtle.transferTo(4)
         end
 
         if not state.bootstrapDiskPulled then
@@ -2313,21 +2413,23 @@ local function runForeman(cfg)
         end
 
         if not state.ownInstallerLoaded then
-            if not goTo(0,0) then
-                state.phase="WAITING_SETUP"
+            if turtle.getItemCount(2) < 1 then
+                state.phase="WAITING_SUPPLIES"
                 saveState()
-                sendState("Cannot reach supply chest")
+                sendState("Foreman-1 Disk Drive missing")
                 return false
             end
-            faceDir(state,DIR_N)
-            turtle.select(2)
-            if turtle.getItemCount(2)==0 then
-                if takeNamedFromFront("disk_drive",1,2)==0 then
-                    state.phase="WAITING_SUPPLIES"
-                    saveState()
-                    sendState("Need fifth Disk Drive for Foreman-1")
-                    return false
-                end
+            if turtle.getItemCount(4) < 4 then
+                state.phase="WAITING_SUPPLIES"
+                saveState()
+                sendState("Foreman-1 miners missing")
+                return false
+            end
+            if turtle.getItemCount(3) < 1 then
+                state.phase="WAITING_SUPPLIES"
+                saveState()
+                sendState("Foreman-1 floppy missing")
+                return false
             end
             state.ownInstallerLoaded=true
             saveState()
