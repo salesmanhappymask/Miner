@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 15
+local VERSION = 16
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v15"
+local PROTOCOL = "mine_v16"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -248,6 +248,41 @@ local function selfFindSlot(kind)
         end
     end
     return nil
+end
+
+local function selfFindSlotExcluding(kind,excluded)
+    local inv = getSelfInventory()
+    if not inv then
+        return nil
+    end
+    local size = inv.getInventorySize()
+    for slot=1,size do
+        if slot ~= excluded then
+            local ok,item = pcall(inv.getStackInSlot,slot)
+            if ok and item and matchesItem(item,kind) then
+                return slot,item
+            end
+        end
+    end
+    return nil
+end
+
+local function selfCountExcluding(kind,excluded)
+    local inv = getSelfInventory()
+    if not inv then
+        return 0
+    end
+    local total=0
+    local size=inv.getInventorySize()
+    for slot=1,size do
+        if slot ~= excluded then
+            local ok,item=pcall(inv.getStackInSlot,slot)
+            if ok and item and matchesItem(item,kind) then
+                total=total+tonumber(item.qty or item.size or 1)
+            end
+        end
+    end
+    return total
 end
 
 local function selfCount(kind)
@@ -593,9 +628,6 @@ local function bootstrap()
                         sleep(0.1)
                     end
                     deployed = true
-                elseif message.type == "recall_all" then
-                    os.setComputerLabel(nil)
-                    os.shutdown()
                 end
             end
         end
@@ -654,6 +686,9 @@ local function bootstrap()
             local sender, message = rednet.receive(PROTOCOL, 1)
             if not sender and installerReady then
                 sendInstallerReady()
+            elseif sender == MONITOR_ID and type(message) == "table" and message.type == "recall_all" then
+                os.setComputerLabel(nil)
+                os.shutdown()
             elseif sender == cfg.foremanId and type(message) == "table" then
                 if message.type == "commission_refuel" then
                     turtle.select(1)
@@ -824,7 +859,7 @@ local function runMiner(cfg)
         if not state.request then
             return
         end
-        broadcast({
+        send(cfg.foremanId,{
             type = arrived and "service_arrived" or "service_request",
             row = state.row,
             requestId = state.request.id,
@@ -845,23 +880,22 @@ local function runMiner(cfg)
                 local message = event[3]
                 local protocol = event[4]
                 if protocol == PROTOCOL and type(message) == "table" then
-                    if message.type == "start_mining" then
-                        flags.start = true
-                    elseif message.type == "recall_all" then
-                        flags.recall = true
-                    elseif message.type == "dump_now" and sender == cfg.foremanId and state.request and message.requestId == state.request.id then
-                        flags.dumpNow = true
-                    elseif message.type == "refuel_now" and sender == cfg.foremanId and state.request and message.requestId == state.request.id then
-                        flags.refuelNow = true
-                    elseif message.type == "service_complete" and sender == cfg.foremanId and state.request and message.requestId == state.request.id then
-                        flags.serviceComplete = true
-                    elseif message.type == "foreman_reassign" and message.row == state.row and message.foremanId then
-                        cfg.foremanId = message.foremanId
-                        cfg.foremanNumber = message.foremanNumber
-                        saveTable("node.cfg", cfg)
-                        flags.newForeman = message.foremanId
-                    elseif message.type == "status_query" then
-                        sendState("")
+                    if sender == cfg.foremanId then
+                        if message.type == "start_mining" then
+                            flags.start = true
+                        elseif message.type == "dump_now" and state.request and message.requestId == state.request.id then
+                            flags.dumpNow = true
+                        elseif message.type == "refuel_now" and state.request and message.requestId == state.request.id then
+                            flags.refuelNow = true
+                        elseif message.type == "service_complete" and state.request and message.requestId == state.request.id then
+                            flags.serviceComplete = true
+                        end
+                    elseif sender == MONITOR_ID then
+                        if message.type == "recall_all" then
+                            flags.recall = true
+                        elseif message.type == "status_query" then
+                            sendState("")
+                        end
                     end
                 end
             elseif event[1] == "timer" and event[2] == timer then
@@ -1156,6 +1190,12 @@ local function runMiner(cfg)
         os.shutdown()
     end
 
+    send(cfg.foremanId,{
+        type="miner_runtime_ready",
+        row=state.row,
+        minerId=os.getComputerID()
+    })
+
     local function workLoop()
         if state.complete then
             state.phase = "COMPLETE"
@@ -1221,7 +1261,7 @@ local function runMiner(cfg)
                     state.complete = true
                     state.phase = "COMPLETE"
                     save()
-                    broadcast({
+                    send(cfg.foremanId,{
                         type="miner_complete",
                         row=state.row,
                         minerId=os.getComputerID(),
@@ -1256,7 +1296,7 @@ local function runMiner(cfg)
                     state.complete = true
                     state.phase = "COMPLETE"
                     save()
-                    broadcast({
+                    send(cfg.foremanId,{
                         type="miner_complete",
                         row=state.row,
                         minerId=os.getComputerID(),
@@ -1847,21 +1887,39 @@ local function runForeman(cfg)
         end
 
         for slot=1,16 do
-            local item = selfItem(slot)
-            if item and not isForemanCoreItem(item) then
+            local item=selfItem(slot)
+            local reserved=number==1 and state.bootstrapDrivePending and state.bootstrapDriveSlot==slot
+
+            if item and not reserved and not isForemanCoreItem(item) then
                 turtle.select(slot)
-                while turtle.getItemCount(slot) > 0 do
+                while turtle.getItemCount(slot)>0 do
                     if not turtle.drop() then
-                        state.phase = "ERROR"
-                        saveState()
-                        sendState("Supply chest full")
                         state.phase="DOCK_BLOCKED"
                         saveState()
-                        sendState("Dock operation failed; token retained")
+                        sendState("Supply chest full; dock token retained")
                         return false
                     end
                 end
             end
+        end
+
+        if number==1 and state.bootstrapDrivePending and state.bootstrapDriveSlot then
+            local slot=state.bootstrapDriveSlot
+            local item=selfItem(slot)
+
+            if item and matchesItem(item,"disk_drive") then
+                turtle.select(slot)
+                if not turtle.drop(1) then
+                    state.phase="DOCK_BLOCKED"
+                    saveState()
+                    sendState("Cannot return bootstrap Disk Drive")
+                    return false
+                end
+            end
+
+            state.bootstrapDrivePending=false
+            state.bootstrapDriveSlot=nil
+            saveState()
         end
 
         return exitDockHome()
@@ -1924,7 +1982,7 @@ local function runForeman(cfg)
                         end
                     elseif message.type == "dock_grant" then
                         flags.dockGranted = true
-                    elseif message.type == "commission_start" and message.number == number then
+                    elseif message.type == "commission_start" and message.number == number and sender == cfg.controller then
                         if state.setupDone then
                             send(cfg.controller,{
                                 type="commission_done",
@@ -1933,6 +1991,17 @@ local function runForeman(cfg)
                             })
                         else
                             flags.commissionStart = true
+                        end
+                    elseif message.type == "start_assigned" and sender == cfg.controller then
+                        flags.startMining = true
+                    elseif message.type == "miner_runtime_ready" and message.row and assignedRow(message.row) then
+                        state.minerIds=state.minerIds or {}
+                        if not state.minerIds[message.row] or state.minerIds[message.row]==sender then
+                            state.minerIds[message.row]=sender
+                            saveState()
+                            if state.miningStarted then
+                                send(sender,{type="start_mining"})
+                            end
                         end
                     elseif message.type == "commission_done" and cfg.master and message.number then
                         state.groupsCommissioned = state.groupsCommissioned or {}
@@ -2023,86 +2092,138 @@ local function runForeman(cfg)
     end
 
     local function placeDriveAndDiskAt(tx,tz)
-        if not goTo(tx,tz) then
-            return false
-        end
+        local stagingZ=tz-1
 
-        if not selfSelectKind("disk_drive") then
-            state.phase="WAITING_INSTALLER"
-            saveState()
-            sendState("Disk Drive not found in foreman inventory")
-            return false
-        end
-
-        if not turtle.placeUp() then
-            state.phase="WAITING_INSTALLER"
-            saveState()
-            sendState("Cannot place Disk Drive above target")
-            return false
-        end
-
-        if not selfSelectKind("floppy") then
-            state.phase="WAITING_INSTALLER"
-            saveState()
-            sendState("Miner floppy not found in foreman inventory")
-            return false
-        end
-
-        if not turtle.dropUp(1) then
-            state.phase="WAITING_INSTALLER"
-            saveState()
-            sendState("Cannot insert floppy into Disk Drive")
-            return false
-        end
-
-        sleep(0.2)
-
-        if not disk.isPresent("top") then
-            state.phase="WAITING_INSTALLER"
-            saveState()
-            sendState("Disk Drive verification failed")
-            return false
-        end
-
-        faceDir(state,DIR_S)
-        if not moveStep(DIR_S) then
-            state.phase="WAITING_INSTALLER"
-            saveState()
-            sendState("Cannot clear miner placement square")
+        if not goTo(tx,stagingZ) then
             return false
         end
 
         faceDir(state,DIR_N)
         saveState()
-        return true
+
+        if state.x ~= tx or state.z ~= stagingZ or state.dir ~= DIR_N then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Wrong staging square for Miner-" .. tostring(tx))
+            return false
+        end
+
+        if not turtle.up() then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Cannot rise above staging square for Miner-" .. tostring(tx))
+            return false
+        end
+
+        local reserved=state.bootstrapDrivePending and state.bootstrapDriveSlot or nil
+        local driveSlot=selfFindSlotExcluding("disk_drive",reserved)
+        if not driveSlot then
+            turtle.down()
+            state.phase="WAITING_INSTALLER"
+            saveState()
+            sendState("Operational Disk Drive not found")
+            return false
+        end
+
+        turtle.select(driveSlot)
+        if not turtle.place() then
+            turtle.down()
+            state.phase="WAITING_INSTALLER"
+            saveState()
+            sendState("Cannot place elevated Disk Drive for Miner-" .. tostring(tx))
+            return false
+        end
+
+        if peripheral.getType("front") ~= "drive" then
+            turtle.down()
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Elevated installer is not a Disk Drive")
+            return false
+        end
+
+        if not selfSelectKind("floppy") then
+            turtle.down()
+            state.phase="WAITING_INSTALLER"
+            saveState()
+            sendState("Miner floppy not found")
+            return false
+        end
+
+        if not turtle.drop(1) then
+            turtle.down()
+            state.phase="WAITING_INSTALLER"
+            saveState()
+            sendState("Cannot insert miner floppy")
+            return false
+        end
+
+        sleep(0.2)
+
+        if not disk.isPresent("front") then
+            turtle.down()
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Miner floppy verification failed")
+            return false
+        end
+
+        if not turtle.down() then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Cannot return to staging square")
+            return false
+        end
+
+        faceDir(state,DIR_N)
+        saveState()
+
+        return state.x==tx and state.z==stagingZ and state.dir==DIR_N
     end
 
-    local function recoverInstaller(workerId,tx,tz)
-        if not goTo(tx,tz-1) then
+    local function recoverInstaller(workerId,tx,tz,tempDeployment)
+        local stagingZ=tz-1
+
+        if not goTo(tx,stagingZ) then
             return false
         end
         faceDir(state,DIR_N)
+
+        if frontComputerId() ~= workerId then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Assigned miner not in front during installer recovery")
+            return false
+        end
 
         if not turtle.up() then
             return false
         end
 
-        local floppySlot = selfTargetSlot("floppy")
+        if peripheral.getType("front") ~= "drive" then
+            turtle.down()
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Disk Drive missing above Miner-" .. tostring(tx))
+            return false
+        end
+
+        local floppySlot=selfTargetSlot("floppy")
         if not floppySlot then
             turtle.down()
             return false
         end
 
         turtle.select(floppySlot)
-        local diskDeadline = now() + 10
-        while not matchesItem(selfItem(floppySlot), "floppy") and now() < diskDeadline do
+        local deadline=now()+10
+        while not matchesItem(selfItem(floppySlot),"floppy") and now()<deadline do
             turtle.suck(1)
-            if not matchesItem(selfItem(floppySlot), "floppy") then
+            if not matchesItem(selfItem(floppySlot),"floppy") then
                 sleep(0.25)
             end
         end
 
-        if not matchesItem(selfItem(floppySlot), "floppy") then
+        if not matchesItem(selfItem(floppySlot),"floppy") then
             turtle.down()
             return false
         end
@@ -2113,83 +2234,103 @@ local function runForeman(cfg)
 
         faceDir(state,DIR_N)
 
-        local ready = nil
-        local lastRequest = 0
-        local lastWarning = now()
+        local ready=nil
+        local lastRequest=0
+        local lastWarning=now()
 
         while not ready do
-            if now() - lastRequest >= 1 then
+            if now()-lastRequest>=1 then
                 send(workerId,{type="return_installer"})
-                lastRequest = now()
+                lastRequest=now()
             end
 
-            local _,reply = waitInbox(function(sender,m)
+            local _,reply=waitInbox(function(sender,m)
                 return sender==workerId and type(m)=="table" and
                     (m.type=="installer_ready" or m.type=="installer_break_failed")
             end,0.5)
 
             if reply then
-                if reply.type == "installer_ready" then
-                    ready = reply
+                if reply.type=="installer_ready" then
+                    ready=reply
                 else
                     state.phase="WAITING_INSTALLER"
                     saveState()
-                    sendState("Miner-" .. tostring(reply.row) .. " installer retry: " .. tostring(reply.reason))
+                    sendState("Miner-" .. tostring(tx) .. " installer retry: " .. tostring(reply.reason))
                 end
-            elseif now() - lastWarning >= 10 then
+            elseif now()-lastWarning>=10 then
                 state.phase="WAITING_INSTALLER"
                 saveState()
-                sendState("Waiting for miner to break Disk Drive")
-                lastWarning = now()
+                sendState("Waiting for Miner-" .. tostring(tx) .. " to break Disk Drive")
+                lastWarning=now()
             end
         end
 
-        local driveSlot = selfTargetSlot("disk_drive")
-        if not driveSlot then
-            state.phase="WAITING_INSTALLER"
-            saveState()
-            sendState("No inventory room for recovered Disk Drive")
-            return false
+        local beforeCount=selfCount("disk_drive")
+        local targetSlot=nil
+
+        if tempDeployment then
+            targetSlot=16
+            if turtle.getItemCount(targetSlot)>0 then
+                state.phase="WAITING_INSTALLER"
+                saveState()
+                sendState("Slot 16 must be empty for bootstrap Disk Drive")
+                return false
+            end
+        else
+            targetSlot=selfTargetSlot("disk_drive")
+            if not targetSlot then
+                state.phase="WAITING_INSTALLER"
+                saveState()
+                sendState("No room for recovered Disk Drive")
+                return false
+            end
         end
 
-        turtle.select(driveSlot)
-        lastWarning = now()
+        turtle.select(targetSlot)
+        lastWarning=now()
 
-        while not matchesItem(selfItem(driveSlot), "disk_drive") do
+        while selfCount("disk_drive")<=beforeCount do
             turtle.suck(1)
-            if not matchesItem(selfItem(driveSlot), "disk_drive") then
+
+            if selfCount("disk_drive")<=beforeCount then
                 send(workerId,{type="return_installer"})
-                if now() - lastWarning >= 10 then
+                if now()-lastWarning>=10 then
                     state.phase="WAITING_INSTALLER"
                     saveState()
-                    sendState("Waiting to pull Disk Drive from miner")
-                    lastWarning = now()
+                    sendState("Waiting to receive Disk Drive from Miner-" .. tostring(tx))
+                    lastWarning=now()
                 end
                 sleep(0.25)
             end
         end
 
-        local returned = nil
-        local lastTaken = 0
-        lastWarning = now()
+        if tempDeployment then
+            state.bootstrapDrivePending=true
+            state.bootstrapDriveSlot=targetSlot
+            saveState()
+        end
+
+        local returned=nil
+        local lastTaken=0
+        lastWarning=now()
 
         while not returned do
-            if now() - lastTaken >= 1 then
+            if now()-lastTaken>=1 then
                 send(workerId,{type="installer_taken"})
-                lastTaken = now()
+                lastTaken=now()
             end
 
-            local _,reply = waitInbox(function(sender,m)
+            local _,reply=waitInbox(function(sender,m)
                 return sender==workerId and type(m)=="table" and m.type=="installer_returned"
             end,0.5)
 
             if reply then
-                returned = reply
-            elseif now() - lastWarning >= 10 then
+                returned=reply
+            elseif now()-lastWarning>=10 then
                 state.phase="WAITING_INSTALLER"
                 saveState()
-                sendState("Waiting for miner installer acknowledgement")
-                lastWarning = now()
+                sendState("Waiting for Miner-" .. tostring(tx) .. " installer acknowledgement")
+                lastWarning=now()
             end
         end
 
@@ -2231,10 +2372,11 @@ local function runForeman(cfg)
             return false
         end
 
-        if selfCount("disk_drive") < 1 then
+        local reserved=state.bootstrapDrivePending and state.bootstrapDriveSlot or nil
+        if selfCountExcluding("disk_drive",reserved) < 1 then
             state.phase="WAITING_SUPPLIES"
             saveState()
-            sendState("Missing Disk Drive")
+            sendState("Missing operational Disk Drive")
             return false
         end
 
@@ -2458,7 +2600,7 @@ local function runForeman(cfg)
         saveState()
         sendState("Recovering installer from Miner-" .. tostring(row))
 
-        if not recoverInstaller(workerId,tx,tz) then
+        if not recoverInstaller(workerId,tx,tz,tempDeployment) then
             state.phase="WAITING_INSTALLER"
             saveState()
             sendState("Installer recovery failed")
@@ -2491,19 +2633,26 @@ local function runForeman(cfg)
             end
         end
 
+        state.minerIds=state.minerIds or {}
+        state.minerIds[row]=workerId
+        saveState()
+
         return true
     end
 
     local function returnInstaller()
-        if selfCount("disk_drive")==0 and selfCount("floppy")==0 then
+        local reserved=state.bootstrapDrivePending and state.bootstrapDriveSlot or nil
+
+        if selfCountExcluding("disk_drive",reserved)==0 and selfCount("floppy")==0 then
             return true
         end
+
         if not atSupply() then
             return false
         end
 
-        while selfCount("disk_drive") > 0 do
-            local slot = selfFindSlot("disk_drive")
+        while selfCountExcluding("disk_drive",reserved)>0 do
+            local slot=selfFindSlotExcluding("disk_drive",reserved)
             if not slot then
                 break
             end
@@ -2511,13 +2660,13 @@ local function runForeman(cfg)
             if not turtle.drop() then
                 state.phase="DOCK_BLOCKED"
                 saveState()
-                sendState("Cannot return Disk Drive; dock token retained")
+                sendState("Cannot return operational Disk Drive")
                 return false
             end
         end
 
-        while selfCount("floppy") > 0 do
-            local slot = selfFindSlot("floppy")
+        while selfCount("floppy")>0 do
+            local slot=selfFindSlot("floppy")
             if not slot then
                 break
             end
@@ -2525,7 +2674,7 @@ local function runForeman(cfg)
             if not turtle.drop() then
                 state.phase="DOCK_BLOCKED"
                 saveState()
-                sendState("Cannot return floppy; dock token retained")
+                sendState("Cannot return floppy")
                 return false
             end
         end
@@ -2671,7 +2820,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v15 Foreman-1",
+                    "Mine v16 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
@@ -3006,6 +3155,24 @@ local function runForeman(cfg)
         return true
     end
 
+    local function startAssignedMiners()
+        state.minerIds=state.minerIds or {}
+        state.miningStarted=true
+        saveState()
+
+        for row=cfg.rowStart,cfg.rowEnd do
+            local minerId=state.minerIds[row]
+            if minerId then
+                for i=1,3 do
+                    send(minerId,{type="start_mining"})
+                    sleep(0.1)
+                end
+            end
+        end
+
+        sendState("Assigned miners released")
+    end
+
     local function serviceRequest(req)
         active = req
         saveQueue()
@@ -3137,10 +3304,18 @@ local function runForeman(cfg)
                 sleep(1)
             end
 
-            for i=1,3 do
-                broadcast({type="start_mining"})
-                sleep(0.2)
+            for n=2,4 do
+                local fid=cfg.foremen and cfg.foremen[n]
+                if fid then
+                    for i=1,3 do
+                        send(fid,{type="start_assigned"})
+                        sleep(0.1)
+                    end
+                end
             end
+
+            startAssignedMiners()
+
             state.setupDone=true
             state.phase="IDLE"
             saveState()
@@ -3169,6 +3344,11 @@ local function runForeman(cfg)
         end
 
         while true do
+            if flags.startMining then
+                flags.startMining=false
+                startAssignedMiners()
+            end
+
             if flags.recall then
                 state.phase="RECALL_MODE"
                 saveState()
