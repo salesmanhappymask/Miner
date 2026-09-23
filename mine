@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 20
+local VERSION = 21
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v20"
+local PROTOCOL = "mine_v21"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -48,31 +48,54 @@ local function writeFile(path, data)
     return true
 end
 
-local function saveTable(path, value)
-    local temp = path .. ".new"
-    if not writeFile(temp, textutils.serialize(value)) then
+local function decodeTable(path)
+    if not fs.exists(path) then
+        return nil
+    end
+    local raw=readFile(path)
+    if not raw then
+        return nil
+    end
+    local ok,value=pcall(textutils.unserialize,raw)
+    if not ok or type(value)~="table" then
+        return nil
+    end
+    return value
+end
+
+local function saveTable(path,value)
+    local temp=path .. ".new"
+    local backup=path .. ".bak"
+
+    if not writeFile(temp,textutils.serialize(value)) then
         return false
     end
-    if fs.exists(path) then
-        fs.delete(path)
+
+    if fs.exists(backup) then
+        fs.delete(backup)
     end
-    fs.move(temp, path)
+
+    if fs.exists(path) then
+        fs.move(path,backup)
+    end
+
+    local ok=pcall(fs.move,temp,path)
+    if not ok then
+        if not fs.exists(path) and fs.exists(backup) then
+            pcall(fs.move,backup,path)
+        end
+        return false
+    end
+
     return true
 end
 
 local function loadTable(path)
-    if not fs.exists(path) then
-        return nil
+    local value=decodeTable(path)
+    if value then
+        return value
     end
-    local raw = readFile(path)
-    if not raw then
-        return nil
-    end
-    local ok, value = pcall(textutils.unserialize, raw)
-    if not ok or type(value) ~= "table" then
-        return nil
-    end
-    return value
+    return decodeTable(path .. ".bak")
 end
 
 local function openNetwork()
@@ -474,77 +497,56 @@ local function status(role, state, extra)
     send(MONITOR_ID, p)
 end
 
+local function checkpointPose(role,seq,snapshot,session)
+    send(MONITOR_ID,{
+        type="pose_checkpoint",
+        role=role,
+        id=os.getComputerID(),
+        version=VERSION,
+        session=session,
+        seq=seq or 0,
+        snapshot=snapshot
+    })
+end
+
+local function requestPoseBackup(role,timeout,session)
+    if os.getComputerID()==MONITOR_ID then
+        return nil
+    end
+
+    local id=os.getComputerID()
+    local deadline=now()+(timeout or 5)
+    local lastSend=-10
+
+    while now()<deadline do
+        if now()-lastSend>=1 then
+            send(MONITOR_ID,{
+                type="recovery_request",
+                role=role,
+                id=id,
+                version=VERSION,
+                session=session
+            })
+            lastSend=now()
+        end
+
+        local sender,message=rednet.receive(PROTOCOL,0.2)
+        if sender==MONITOR_ID and type(message)=="table" and
+            message.type=="recovery_state" and message.id==id and
+            message.role==role and message.version==VERSION and message.session==session then
+            return message.snapshot,message.seq
+        end
+    end
+
+    return nil
+end
+
 local function clearAndPrint(lines)
     term.clear()
     term.setCursorPos(1,1)
     for i = 1, #lines do
         print(lines[i])
     end
-end
-
-local function faceDir(state, target)
-    local diff = (target - state.dir) % 4
-    if diff == 1 then
-        turtle.turnRight()
-        state.dir = (state.dir + 1) % 4
-    elseif diff == 2 then
-        turtle.turnRight()
-        turtle.turnRight()
-        state.dir = (state.dir + 2) % 4
-    elseif diff == 3 then
-        turtle.turnLeft()
-        state.dir = (state.dir + 3) % 4
-    end
-end
-
-local function rawMoveForward(state)
-    if not turtle.forward() then
-        return false
-    end
-    if state.dir == DIR_N then
-        state.z = state.z + 1
-    elseif state.dir == DIR_E then
-        state.x = state.x + 1
-    elseif state.dir == DIR_S then
-        state.z = state.z - 1
-    else
-        state.x = state.x - 1
-    end
-    return true
-end
-
-local function simpleMoveTo(state, tx, tz)
-    if state.x < tx then
-        faceDir(state, DIR_E)
-        while state.x < tx do
-            if not rawMoveForward(state) then
-                return false
-            end
-        end
-    elseif state.x > tx then
-        faceDir(state, DIR_W)
-        while state.x > tx do
-            if not rawMoveForward(state) then
-                return false
-            end
-        end
-    end
-    if state.z < tz then
-        faceDir(state, DIR_N)
-        while state.z < tz do
-            if not rawMoveForward(state) then
-                return false
-            end
-        end
-    elseif state.z > tz then
-        faceDir(state, DIR_S)
-        while state.z > tz do
-            if not rawMoveForward(state) then
-                return false
-            end
-        end
-    end
-    return true
 end
 
 local function runMinerCommissioning(cfg)
@@ -570,6 +572,35 @@ local function runMinerCommissioning(cfg)
 
     state.row=cfg.row
     state.phase="COMMISSIONING"
+    state.seq=tonumber(state.seq) or 0
+    state.tempSteps=tonumber(state.tempSteps) or 0
+
+    if state.motionIntent and state.motionIntent.kind=="temp_forward" then
+        local monitorState,monitorSeq=requestPoseBackup("miner",5,cfg.session)
+        local intentSeq=tonumber(state.motionIntent.seq) or (state.seq+1)
+
+        if monitorState and tonumber(monitorSeq or monitorState.seq or 0)>=intentSeq and monitorState.tempSteps then
+            state.tempSteps=monitorState.tempSteps
+            state.seq=tonumber(monitorState.seq) or intentSeq
+            state.motionIntent=nil
+        else
+            local fuelNow=turtle.getFuelLevel()
+            local fuelBefore=state.motionIntent.fuelBefore
+            if type(fuelNow)=="number" and type(fuelBefore)=="number" then
+                if fuelNow<fuelBefore then
+                    state.tempSteps=state.motionIntent.toStep
+                    state.seq=intentSeq
+                else
+                    state.tempSteps=state.motionIntent.fromStep
+                end
+                state.motionIntent=nil
+            else
+                state.recoveryLocked=true
+                state.recoveryReason="Temporary Miner-01 position ambiguous after restart"
+            end
+        end
+    end
+
     saveTable("miner.tmp",state)
 
     local function save()
@@ -703,9 +734,40 @@ local function runMinerCommissioning(cfg)
             elseif message.type=="deploy_miner" then
                 state.dir=DIR_N
 
-                if cfg.tempDeployment then
-                    for i=1,2 do
-                        while not turtle.forward() do
+                if state.recoveryLocked then
+                    status("miner","RECOVERY_LOCK",{
+                        row=cfg.row,
+                        foreman=cfg.foremanNumber,
+                        recovery=state.recoveryReason,
+                        message="Temporary deployment halted rather than guessing position"
+                    })
+                elseif cfg.tempDeployment then
+                    while state.tempSteps<2 do
+                        local intent={
+                            kind="temp_forward",
+                            seq=state.seq+1,
+                            fuelBefore=turtle.getFuelLevel(),
+                            fromStep=state.tempSteps,
+                            toStep=state.tempSteps+1
+                        }
+                        state.motionIntent=intent
+                        save()
+
+                        if turtle.forward() then
+                            state.tempSteps=intent.toStep
+                            state.seq=intent.seq
+                            checkpointPose("miner",state.seq,{
+                                row=cfg.row,
+                                session=cfg.session,
+                                tempSteps=state.tempSteps,
+                                seq=state.seq,
+                                phase="COMMISSIONING"
+                            },cfg.session)
+                            state.motionIntent=nil
+                            save()
+                        else
+                            state.motionIntent=nil
+                            save()
                             turtle.dig()
                             turtle.attack()
                             sleep(0.15)
@@ -714,6 +776,14 @@ local function runMinerCommissioning(cfg)
                     cfg.tempDeployment=false
                 end
 
+                if state.recoveryLocked then
+                    ack({
+                        type="miner_deploy_blocked",
+                        id=os.getComputerID(),
+                        row=cfg.row,
+                        reason=state.recoveryReason
+                    })
+                else
                 cfg.commissioned=true
                 saveTable("node.cfg",cfg)
 
@@ -739,6 +809,7 @@ local function runMinerCommissioning(cfg)
 
                 sleep(0.5)
                 os.reboot()
+                end
             end
         end
     end
@@ -794,7 +865,8 @@ local function bootstrap()
             startX = 1,
             startZ = -1,
             startDir = DIR_N,
-            master = false
+            master = false,
+            session = configured.session
         }
         saveTable("node.cfg", cfg)
         os.setComputerLabel("Foreman-" .. tostring(cfg.number))
@@ -813,20 +885,103 @@ local function bootstrap()
             local sender, message = rednet.receive(PROTOCOL, 5)
             if sender == configured.controller and type(message) == "table" then
                 if message.type == "deploy_foreman" and message.target == myID then
-                    local state = {
-                        x = cfg.startX,
-                        z = cfg.startZ,
-                        dir = cfg.startDir,
-                        phase = "DEPLOYING",
-                        number = cfg.number
+                    local statePath="foreman" .. tostring(cfg.number) .. ".tmp"
+                    local state={
+                        x=cfg.startX,
+                        z=cfg.startZ,
+                        y=0,
+                        dir=cfg.startDir,
+                        phase="DEPLOYING",
+                        number=cfg.number,
+                        setupDone=false,
+                        session=cfg.session,
+                        seq=0
                     }
+
+                    saveTable(statePath,state)
+                    checkpointPose("foreman",state.seq,state,cfg.session)
                     selfRefuelTo(FOREMAN_FUEL_TARGET)
-                    local function deployStep(directionName)
-                        local attempts = 0
-                        while not rawMoveForward(state) do
-                            attempts = attempts + 1
-                            if attempts == 1 or attempts % 10 == 0 then
-                                send(configured.controller, {
+
+                    local function saveDeploy()
+                        saveTable(statePath,state)
+                    end
+
+                    local function checkpointDeploy()
+                        local snapshot=textutils.unserialize(textutils.serialize(state))
+                        snapshot.motionIntent=nil
+                        snapshot.turnIntent=nil
+                        checkpointPose("foreman",state.seq,snapshot,cfg.session)
+                    end
+
+                    local function deployTurn(right)
+                        local from=state.dir
+                        local to=right and ((from+1)%4) or ((from+3)%4)
+                        local intent={seq=state.seq+1,from=from,to=to}
+                        state.turnIntent=intent
+                        saveDeploy()
+
+                        local ok
+                        if right then ok=turtle.turnRight() else ok=turtle.turnLeft() end
+                        if not ok then
+                            state.turnIntent=nil
+                            saveDeploy()
+                            return false
+                        end
+
+                        state.dir=to
+                        state.seq=intent.seq
+                        checkpointDeploy()
+                        state.turnIntent=nil
+                        saveDeploy()
+                        return true
+                    end
+
+                    local function deployFace(target)
+                        while state.dir~=target do
+                            local diff=(target-state.dir)%4
+                            if diff==3 then
+                                if not deployTurn(false) then return false end
+                            else
+                                if not deployTurn(true) then return false end
+                            end
+                        end
+                        return true
+                    end
+
+                    local function deployForward(directionName)
+                        local attempts=0
+                        while true do
+                            local tx=state.x
+                            local tz=state.z
+                            if state.dir==DIR_N then tz=tz+1
+                            elseif state.dir==DIR_E then tx=tx+1
+                            elseif state.dir==DIR_S then tz=tz-1
+                            else tx=tx-1 end
+
+                            local intent={
+                                seq=state.seq+1,
+                                fuelBefore=turtle.getFuelLevel(),
+                                from={x=state.x,z=state.z,y=0,dir=state.dir},
+                                to={x=tx,z=tz,y=0,dir=state.dir}
+                            }
+                            state.motionIntent=intent
+                            saveDeploy()
+
+                            if turtle.forward() then
+                                state.x=tx
+                                state.z=tz
+                                state.seq=intent.seq
+                                checkpointDeploy()
+                                state.motionIntent=nil
+                                saveDeploy()
+                                return true
+                            end
+
+                            state.motionIntent=nil
+                            saveDeploy()
+                            attempts=attempts+1
+                            if attempts==1 or attempts%10==0 then
+                                send(configured.controller,{
                                     type="foreman_deploy_blocked",
                                     id=myID,
                                     number=cfg.number,
@@ -837,37 +992,30 @@ local function bootstrap()
                             sleep(0.5)
                         end
                     end
-                    local laneX = cfg.number
-                    faceDir(state, DIR_E)
-                    while state.x < laneX do
-                        deployStep("east")
-                    end
-                    faceDir(state, DIR_S)
-                    while state.z > cfg.homeZ do
-                        deployStep("south")
-                    end
-                    faceDir(state, DIR_W)
-                    while state.x > cfg.homeX do
-                        deployStep("west")
-                    end
-                    faceDir(state, DIR_N)
-                    saveTable("foreman" .. tostring(cfg.number) .. ".tmp", {
-                        x=state.x,
-                        z=state.z,
-                        y=0,
-                        dir=state.dir,
-                        phase="WAITING_SETUP",
-                        setupDone=false
-                    })
+
+                    local laneX=cfg.number
+                    deployFace(DIR_E)
+                    while state.x<laneX do deployForward("east") end
+                    deployFace(DIR_S)
+                    while state.z>cfg.homeZ do deployForward("south") end
+                    deployFace(DIR_W)
+                    while state.x>cfg.homeX do deployForward("west") end
+                    deployFace(DIR_N)
+
+                    state.phase="WAITING_SETUP"
+                    state.setupDone=false
+                    checkpointDeploy()
+                    saveDeploy()
+
                     for i=1,3 do
-                        send(configured.controller, {
+                        send(configured.controller,{
                             type="foreman_deployed",
                             id=myID,
                             number=cfg.number
                         })
                         sleep(0.1)
                     end
-                    deployed = true
+                    deployed=true
                 end
             end
         end
@@ -880,6 +1028,7 @@ local function bootstrap()
             foremanId=configured.foremanId,
             foremanNumber=configured.foremanNumber,
             tempDeployment=configured.tempDeployment and true or false,
+            session=configured.session,
             commissioned=false
         }
 
@@ -923,22 +1072,127 @@ local function runMiner(cfg)
         error("Wireless modem not found")
     end
 
-    local path = "miner.tmp"
-    local state = loadTable(path) or {
-        row=cfg.row,
-        depth=0,
-        pos=0,
-        dir=DIR_N,
-        phase="WAITING",
-        request=nil,
-        requestSeq=0,
-        resumeDepth=0,
-        resumePos=0,
-        resumeDir=DIR_N,
-        complete=false
-    }
+    local path="miner.tmp"
+    local state=loadTable(path)
 
-    state.row = cfg.row
+    if not state then
+        local monitorState=requestPoseBackup("miner",5,cfg.session)
+        state=monitorState or {
+            row=cfg.row,
+            x=cfg.row,
+            y=0,
+            z=0,
+            depth=0,
+            pos=0,
+            dir=DIR_N,
+            phase="RECOVERY_LOCK",
+            request=nil,
+            requestSeq=0,
+            resumeDepth=0,
+            resumePos=0,
+            resumeDir=DIR_N,
+            complete=false,
+            seq=0
+        }
+        state.recoveryLocked=true
+        state.recoveryReason=monitorState and
+            "Local miner state missing; monitor backup retained for manual recovery" or
+            "Local miner state missing and monitor has no backup"
+        state.phase="RECOVERY_LOCK"
+        saveTable(path,state)
+    end
+
+    state.row=cfg.row
+    state.session=cfg.session
+    state.seq=tonumber(state.seq) or 0
+    state.x=tonumber(state.x) or cfg.row
+    state.y=tonumber(state.y) or -(tonumber(state.depth) or 0)
+    state.z=tonumber(state.z) or (tonumber(state.pos) or 0)
+    state.depth=-state.y
+    state.pos=state.z
+    state.resumeX=tonumber(state.resumeX) or cfg.row
+    state.resumeY=tonumber(state.resumeY) or -(tonumber(state.resumeDepth) or 0)
+    state.resumeZ=tonumber(state.resumeZ) or (tonumber(state.resumePos) or 0)
+    state.resumeDir=tonumber(state.resumeDir) or DIR_N
+
+    local function poseValid()
+        return state.x==cfg.row and state.y<=0 and state.z>=0 and state.z<=15 and
+            state.dir>=DIR_N and state.dir<=DIR_W
+    end
+
+    local function applySnapshot(snapshot)
+        if not snapshot or snapshot.row~=cfg.row then
+            return false
+        end
+        state=snapshot
+        state.row=cfg.row
+        state.seq=tonumber(state.seq) or 0
+        state.x=tonumber(state.x) or cfg.row
+        state.y=tonumber(state.y) or -(tonumber(state.depth) or 0)
+        state.z=tonumber(state.z) or (tonumber(state.pos) or 0)
+        state.depth=-state.y
+        state.pos=state.z
+        state.resumeX=tonumber(state.resumeX) or cfg.row
+        state.resumeY=tonumber(state.resumeY) or -(tonumber(state.resumeDepth) or 0)
+        state.resumeZ=tonumber(state.resumeZ) or (tonumber(state.resumePos) or 0)
+        state.resumeDir=tonumber(state.resumeDir) or DIR_N
+        return true
+    end
+
+    if state.motionIntent or state.turnIntent then
+        local monitorState,monitorSeq=requestPoseBackup("miner",5,cfg.session)
+        local intent=state.motionIntent or state.turnIntent
+        local intentSeq=tonumber(intent.seq) or (state.seq+1)
+
+        if monitorState and tonumber(monitorSeq or monitorState.seq or 0)>=intentSeq then
+            applySnapshot(monitorState)
+            state.motionIntent=nil
+            state.turnIntent=nil
+            saveTable(path,state)
+        elseif state.motionIntent then
+            local fuelNow=turtle.getFuelLevel()
+            local fuelBefore=state.motionIntent.fuelBefore
+            local moved=nil
+
+            if type(fuelNow)=="number" and type(fuelBefore)=="number" then
+                moved=fuelNow<fuelBefore
+            elseif type(fuelBefore)=="number" and fuelBefore<=0 then
+                moved=false
+            end
+
+            if moved==nil then
+                state.recoveryLocked=true
+                state.recoveryReason="Position ambiguous after interrupted movement"
+                state.phase="RECOVERY_LOCK"
+            else
+                local pose=moved and state.motionIntent.to or state.motionIntent.from
+                state.x=pose.x
+                state.y=pose.y
+                state.z=pose.z
+                state.dir=pose.dir
+                state.depth=-state.y
+                state.pos=state.z
+                if moved then
+                    state.seq=intentSeq
+                end
+                state.motionIntent=nil
+            end
+            saveTable(path,state)
+        else
+            state.recoveryLocked=true
+            state.recoveryReason="Facing ambiguous after interrupted turn"
+            state.phase="RECOVERY_LOCK"
+            saveTable(path,state)
+        end
+    end
+
+    if not poseValid() then
+        state.recoveryLocked=true
+        state.recoveryReason="Saved miner pose is outside its legal shaft"
+        state.phase="RECOVERY_LOCK"
+        saveTable(path,state)
+    end
+
     local flags = {
         start=false,
         recall=false,
@@ -951,17 +1205,53 @@ local function runMiner(cfg)
     local lastRequest = 0
 
     local function save()
-        saveTable(path, state)
+        state.depth=-state.y
+        state.pos=state.z
+        saveTable(path,state)
+    end
+
+    local function minerSnapshot()
+        return {
+            row=state.row,
+            session=cfg.session,
+            x=state.x,
+            y=state.y,
+            z=state.z,
+            depth=state.depth,
+            pos=state.pos,
+            dir=state.dir,
+            phase=state.phase,
+            request=state.request,
+            requestSeq=state.requestSeq,
+            resumeX=state.resumeX,
+            resumeY=state.resumeY,
+            resumeZ=state.resumeZ,
+            resumeDepth=state.resumeDepth,
+            resumePos=state.resumePos,
+            resumeDir=state.resumeDir,
+            complete=state.complete,
+            seq=state.seq
+        }
+    end
+
+    local function checkpoint()
+        checkpointPose("miner",state.seq,minerSnapshot(),cfg.session)
     end
 
     local function sendState(message)
         status("miner",state.phase,{
             row=state.row,
             foreman=cfg.foremanNumber,
+            x=state.x,
+            y=state.y,
+            z=state.z,
+            dir=state.dir,
+            seq=state.seq,
             depth=state.depth,
             pos=state.pos,
             fuel=turtle.getFuelLevel(),
             request=state.request and state.request.kind or nil,
+            recovery=state.recoveryReason,
             message=message or ""
         })
         lastStatus = now()
@@ -1031,72 +1321,193 @@ local function runMiner(cfg)
         end
     end
 
+    local function beginTranslation(kind,toX,toY,toZ)
+        if toX~=cfg.row or toY>0 or toZ<0 or toZ>15 then
+            state.recoveryLocked=true
+            state.recoveryReason="Movement would leave assigned miner shaft"
+            state.phase="RECOVERY_LOCK"
+            save()
+            sendState(state.recoveryReason)
+            return nil
+        end
+
+        local intent={
+            kind=kind,
+            seq=state.seq+1,
+            fuelBefore=turtle.getFuelLevel(),
+            from={x=state.x,y=state.y,z=state.z,dir=state.dir},
+            to={x=toX,y=toY,z=toZ,dir=state.dir}
+        }
+        state.motionIntent=intent
+        save()
+        return intent
+    end
+
+    local function finishTranslation(intent,critical)
+        state.x=intent.to.x
+        state.y=intent.to.y
+        state.z=intent.to.z
+        state.dir=intent.to.dir
+        state.seq=intent.seq
+        state.depth=-state.y
+        state.pos=state.z
+
+        if critical or state.seq%5==0 then
+            checkpoint()
+        end
+
+        state.motionIntent=nil
+        save()
+    end
+
+    local function cancelTranslation()
+        state.motionIntent=nil
+        save()
+    end
+
+    local function attemptForward()
+        local nx=state.x
+        local nz=state.z
+
+        if state.dir==DIR_N then
+            nz=nz+1
+        elseif state.dir==DIR_E then
+            nx=nx+1
+        elseif state.dir==DIR_S then
+            nz=nz-1
+        else
+            nx=nx-1
+        end
+
+        local intent=beginTranslation("forward",nx,state.y,nz)
+        if not intent then return false end
+        if not turtle.forward() then
+            cancelTranslation()
+            return false
+        end
+
+        finishTranslation(intent,false)
+        return true
+    end
+
+    local function attemptUp()
+        local intent=beginTranslation("up",state.x,state.y+1,state.z)
+        if not intent then return false end
+        if not turtle.up() then
+            cancelTranslation()
+            return false
+        end
+        finishTranslation(intent,true)
+        return true
+    end
+
+    local function attemptDown()
+        local intent=beginTranslation("down",state.x,state.y-1,state.z)
+        if not intent then return false end
+        if not turtle.down() then
+            cancelTranslation()
+            return false
+        end
+        finishTranslation(intent,true)
+        return true
+    end
+
+    local function turnStep(right)
+        local from=state.dir
+        local to=right and ((from+1)%4) or ((from+3)%4)
+        local intent={
+            seq=state.seq+1,
+            from=from,
+            to=to
+        }
+        state.turnIntent=intent
+        save()
+
+        local ok
+        if right then
+            ok=turtle.turnRight()
+        else
+            ok=turtle.turnLeft()
+        end
+
+        if not ok then
+            state.turnIntent=nil
+            save()
+            return false
+        end
+
+        state.dir=to
+        state.seq=intent.seq
+        checkpoint()
+        state.turnIntent=nil
+        save()
+        return true
+    end
+
+    local function face(target)
+        while state.dir~=target do
+            local diff=(target-state.dir)%4
+            if diff==3 then
+                if not turnStep(false) then return false end
+            else
+                if not turnStep(true) then return false end
+            end
+        end
+        return true
+    end
+
     local function digForward()
-        while not turtle.forward() do
-            if flags.recall then
+        while not attemptForward() do
+            if state.recoveryLocked or flags.recall then
                 return false
             end
             turtle.dig()
             turtle.attack()
             sleep(0.15)
         end
-        if state.dir == DIR_N then
-            state.pos = state.pos + 1
-        elseif state.dir == DIR_S then
-            state.pos = state.pos - 1
-        end
-        save()
         return true
     end
 
     local function moveUp()
-        while not turtle.up() do
-            if flags.recall then
+        if state.y>=0 then
+            return false
+        end
+        while not attemptUp() do
+            if state.recoveryLocked or flags.recall then
                 return false
             end
             turtle.digUp()
             turtle.attackUp()
             sleep(0.15)
         end
-        state.depth = state.depth - 1
-        save()
         return true
     end
 
     local function moveDownExisting()
-        while not turtle.down() do
-            if flags.recall then
+        while not attemptDown() do
+            if state.recoveryLocked or flags.recall then
                 return false
             end
             turtle.digDown()
             turtle.attackDown()
             sleep(0.15)
         end
-        state.depth = state.depth + 1
-        save()
         return true
     end
 
     local function descendMine()
-        for i = 1, 5 do
-            if flags.recall then
+        for i=1,5 do
+            if state.recoveryLocked or flags.recall then
                 return false
             end
             turtle.digDown()
-            if turtle.down() then
-                state.depth = state.depth + 1
-                save()
+            if attemptDown() then
                 return true
             end
             turtle.attackDown()
             sleep(0.15)
         end
         return false
-    end
-
-    local function face(target)
-        faceDir(state,target)
-        save()
     end
 
     local function inventoryFull()
@@ -1109,7 +1520,7 @@ local function runMiner(cfg)
     end
 
     local function distanceHome()
-        return state.depth + state.pos
+        return (-state.y) + state.z
     end
 
     local function neededService()
@@ -1130,69 +1541,117 @@ local function runMiner(cfg)
     end
 
     local function goHome(recordResume)
+        if state.recoveryLocked or not poseValid() then
+            state.phase="RECOVERY_LOCK"
+            state.recoveryReason=state.recoveryReason or "Unsafe miner pose; refusing automatic return"
+            save()
+            sendState(state.recoveryReason)
+            return false
+        end
+
         if recordResume then
-            state.resumeDepth = state.depth
-            state.resumePos = state.pos
-            state.resumeDir = state.dir
+            state.resumeX=state.x
+            state.resumeY=state.y
+            state.resumeZ=state.z
+            state.resumeDepth=-state.y
+            state.resumePos=state.z
+            state.resumeDir=state.dir
             save()
         end
-        while state.depth > 0 do
+
+        while state.y<0 do
             if not moveUp() then
-                break
+                return false
             end
         end
-        face(DIR_S)
-        while state.pos > 0 do
-            while not turtle.forward() do
-                if flags.recall then
-                    break
-                end
-                turtle.dig()
-                turtle.attack()
-                sleep(0.15)
-            end
-            if flags.recall and not turtle.detect() then
-                return
-            end
-            state.pos = state.pos - 1
+
+        if state.y~=0 then
+            state.recoveryLocked=true
+            state.recoveryReason="Miner attempted to return above surface origin"
+            state.phase="RECOVERY_LOCK"
             save()
+            sendState(state.recoveryReason)
+            return false
         end
-        face(DIR_N)
+
+        if not face(DIR_S) then
+            return false
+        end
+
+        while state.z>0 do
+            if not digForward() then
+                return false
+            end
+        end
+
+        if state.z~=0 or state.x~=cfg.row then
+            state.recoveryLocked=true
+            state.recoveryReason="Miner return ended outside its home coordinate"
+            state.phase="RECOVERY_LOCK"
+            save()
+            sendState(state.recoveryReason)
+            return false
+        end
+
+        if not face(DIR_N) then
+            return false
+        end
+
+        checkpoint()
+        return true
     end
 
     local function returnToMine()
-        face(DIR_N)
-        while state.pos < state.resumePos do
-            while not turtle.forward() do
-                turtle.dig()
-                turtle.attack()
-                sleep(0.15)
-            end
-            state.pos = state.pos + 1
-            save()
+        if state.recoveryLocked then
+            return false
         end
-        while state.depth < state.resumeDepth do
+
+        if not face(DIR_N) then
+            return false
+        end
+
+        while state.z<state.resumeZ do
+            if not digForward() then
+                return false
+            end
+        end
+
+        while state.y>state.resumeY do
             if not moveDownExisting() then
                 return false
             end
         end
-        face(state.resumeDir)
-        state.phase = "MINING"
-        state.request = nil
+
+        if state.x~=state.resumeX or state.y~=state.resumeY or state.z~=state.resumeZ then
+            state.recoveryLocked=true
+            state.recoveryReason="Miner could not reconstruct saved work position"
+            state.phase="RECOVERY_LOCK"
+            save()
+            sendState(state.recoveryReason)
+            return false
+        end
+
+        if not face(state.resumeDir) then
+            return false
+        end
+
+        state.phase="MINING"
+        state.request=nil
         save()
+        checkpoint()
         sendState("Resumed")
         return true
     end
 
     local function faceForeman()
-        for i = 1,4 do
-            local ok, id = pcall(peripheral.call,"front","getID")
-            if ok and id == cfg.foremanId then
+        for i=1,4 do
+            local ok,frontId=pcall(peripheral.call,"front","getID")
+            if ok and frontId==cfg.foremanId then
                 return true
             end
-            turtle.turnRight()
-            state.dir = (state.dir + 1) % 4
-            save()
+            if not turnStep(true) then
+                return false
+            end
         end
         return false
     end
@@ -1222,34 +1681,63 @@ local function runMiner(cfg)
         end
     end
 
-    local function service(kind, finalService)
-        state.requestSeq = (state.requestSeq or 0) + 1
-        state.request = {
-            id = tostring(os.getComputerID()) .. ":" .. tostring(state.requestSeq),
-            kind = kind
-        }
-        state.phase = "RETURNING_SERVICE"
-        save()
-        requestPacket(false)
-        sendState("Service requested")
+    local function service(kind,finalService,resumeExisting)
+        if not resumeExisting then
+            state.requestSeq=(state.requestSeq or 0)+1
+            state.request={
+                id=tostring(os.getComputerID()) .. ":" .. tostring(state.requestSeq),
+                kind=kind,
+                finalService=finalService and true or false
+            }
+            state.phase="RETURNING_SERVICE"
+            save()
+            requestPacket(false)
+            sendState("Service requested")
 
-        goHome(true)
+            if not goHome(true) then
+                return false
+            end
+        else
+            if not state.request then
+                state.recoveryLocked=true
+                state.recoveryReason="Service phase exists without a persisted request"
+                state.phase="RECOVERY_LOCK"
+                save()
+                return false
+            end
 
-        state.phase = "WAITING_SERVICE"
+            kind=state.request.kind or kind
+            finalService=state.request.finalService and true or false
+
+            if state.phase=="RETURNING_SERVICE" then
+                if not goHome(false) then
+                    return false
+                end
+            elseif state.phase~="WAITING_SERVICE" then
+                state.recoveryLocked=true
+                state.recoveryReason="Unexpected persisted service phase"
+                state.phase="RECOVERY_LOCK"
+                save()
+                return false
+            end
+        end
+
+        state.phase="WAITING_SERVICE"
         save()
+        checkpoint()
         requestPacket(true)
         sendState("Waiting for Foreman-" .. tostring(cfg.foremanNumber))
 
-        flags.dumpNow = false
-        flags.refuelNow = false
-        flags.serviceComplete = false
+        flags.dumpNow=false
+        flags.refuelNow=false
+        flags.serviceComplete=false
 
         while not flags.serviceComplete do
             if flags.recall then
                 return false
             end
             if flags.refuelNow then
-                flags.refuelNow = false
+                flags.refuelNow=false
                 refuelSelf()
                 send(cfg.foremanId,{
                     type="refuel_complete",
@@ -1259,7 +1747,7 @@ local function runMiner(cfg)
                 })
             end
             if flags.dumpNow then
-                flags.dumpNow = false
+                flags.dumpNow=false
                 if dumpItems() then
                     send(cfg.foremanId,{
                         type="dump_complete",
@@ -1277,38 +1765,79 @@ local function runMiner(cfg)
             sleep(0.1)
         end
 
-        flags.serviceComplete = false
-        state.request = nil
-        if finalService then
-            state.phase = "COMPLETE"
+        flags.serviceComplete=false
+        local wasFinal=state.request.finalService and true or false
+        state.request=nil
+
+        if wasFinal then
+            state.phase="COMPLETE"
             face(DIR_N)
             save()
+            checkpoint()
             sendState("Final dump complete")
             return true
         end
-        state.phase = "RETURNING_MINE"
+
+        state.phase="RETURNING_MINE"
         save()
         return returnToMine()
     end
 
     local function recall()
-        flags.recall = false
-        state.phase = "RECALLING"
+        flags.recall=false
+
+        if state.recoveryLocked then
+            state.phase="RECOVERY_LOCK"
+            save()
+            while true do
+                sendState("Recall refused: " .. tostring(state.recoveryReason or "position uncertain"))
+                sleep(5)
+            end
+        end
+
+        state.phase="RECALLING"
         save()
         sendState("Returning for cleanup")
-        goHome(false)
-        face(DIR_N)
-        state.phase = "HOME"
+
+        if not goHome(false) then
+            state.phase="RECOVERY_LOCK"
+            state.recoveryLocked=true
+            state.recoveryReason=state.recoveryReason or "Recall could not prove home position"
+            save()
+            while true do
+                sendState(state.recoveryReason)
+                sleep(5)
+            end
+        end
+
+        if not face(DIR_N) then
+            return false
+        end
+
+        if state.x~=cfg.row or state.y~=0 or state.z~=0 or state.dir~=DIR_N then
+            state.phase="RECOVERY_LOCK"
+            state.recoveryLocked=true
+            state.recoveryReason="Recall home verification failed"
+            save()
+            while true do
+                sendState(state.recoveryReason)
+                sleep(5)
+            end
+        end
+
+        state.phase="HOME"
         save()
+        checkpoint()
         send(MONITOR_ID,{
             type="recall_home",
             row=state.row,
             id=os.getComputerID()
         })
-        status("miner","HOME",{row=state.row,message="Label cleared, shutting down"})
+        status("miner","HOME",{row=state.row,x=state.x,y=state.y,z=state.z,dir=state.dir,message="Label cleared, shutting down"})
         os.setComputerLabel(nil)
         sleep(0.5)
         os.shutdown()
+        return true
     end
 
     send(cfg.foremanId,{
@@ -1318,6 +1847,18 @@ local function runMiner(cfg)
     })
 
     local function workLoop()
+        if state.recoveryLocked then
+            state.phase="RECOVERY_LOCK"
+            save()
+            checkpoint()
+            while true do
+                sendState("Movement locked: " .. tostring(state.recoveryReason or "pose uncertain"))
+                sleep(5)
+            end
+        end
+
+        checkpoint()
+
         if state.complete then
             state.phase = "COMPLETE"
             save()
@@ -1340,8 +1881,8 @@ local function runMiner(cfg)
         end
 
         if state.phase == "WAITING_SERVICE" or state.phase == "RETURNING_SERVICE" then
-            local kind = state.request and state.request.kind or "DUMP"
-            service(kind)
+            local kind=state.request and state.request.kind or "DUMP"
+            service(kind,state.request and state.request.finalService,true)
         elseif state.phase == "RETURNING_MINE" then
             returnToMine()
         elseif state.phase == "MINING" then
@@ -1462,34 +2003,92 @@ local function runForeman(cfg)
     local id = os.getComputerID()
     local statePath = "foreman" .. tostring(number) .. ".tmp"
     local queuePath = "foreman" .. tostring(number) .. "_queue.tmp"
-    local state=loadTable(statePath) or {
-        x=cfg.homeX,
-        z=cfg.homeZ,
-        y=0,
-        dir=DIR_N,
-        phase=cfg.master and "MASTER_SETUP" or "WAITING_SETUP",
-        setupDone=false
-    }
+    local state=loadTable(statePath)
 
-    if state.y==nil then
-        state.y=0
+    if not state then
+        local monitorState=requestPoseBackup("foreman",5,cfg.session)
+        state=monitorState or {
+            number=number,
+            x=cfg.homeX,
+            z=cfg.homeZ,
+            y=0,
+            dir=DIR_N,
+            phase="RECOVERY_LOCK",
+            setupDone=false,
+            seq=0
+        }
+        state.recoveryLocked=true
+        state.recoveryReason=monitorState and
+            "Local foreman state missing; monitor backup retained for manual recovery" or
+            "Local foreman state missing and monitor has no backup"
+        state.phase="RECOVERY_LOCK"
+        saveTable(statePath,state)
     end
 
-    if type(state.verticalIntent)=="table" then
-        local fuelNow=turtle.getFuelLevel()
-        local fuelBefore=state.verticalIntent.fuelBefore
+    state.session=cfg.session
+    state.y=tonumber(state.y) or 0
+    state.seq=tonumber(state.seq) or 0
+    state.dir=tonumber(state.dir) or DIR_N
 
-        if type(fuelNow)=="number" and type(fuelBefore)=="number" then
-            if fuelNow<fuelBefore then
-                state.y=state.verticalIntent.to
-            else
-                state.y=state.verticalIntent.from
-            end
+    local function foremanPoseValid()
+        return state.x>=-3 and state.x<=17 and state.z>=-6 and state.z<=2 and
+            state.y>=0 and state.y<=1 and state.dir>=DIR_N and state.dir<=DIR_W
+    end
+
+    if state.motionIntent or state.verticalIntent or state.turnIntent then
+        local monitorState,monitorSeq=requestPoseBackup("foreman",5,cfg.session)
+        local intent=state.motionIntent or state.verticalIntent or state.turnIntent
+        local intentSeq=tonumber(intent.seq) or (state.seq+1)
+
+        if monitorState and tonumber(monitorSeq or monitorState.seq or 0)>=intentSeq then
+            state=monitorState
+            state.motionIntent=nil
             state.verticalIntent=nil
+            state.turnIntent=nil
+            saveTable(statePath,state)
+        elseif state.turnIntent then
+            state.recoveryLocked=true
+            state.recoveryReason="Facing ambiguous after interrupted turn"
+            state.phase="RECOVERY_LOCK"
             saveTable(statePath,state)
         else
-            state.phase="VERTICAL_ERROR"
+            local moveIntent=state.motionIntent or state.verticalIntent
+            local fuelNow=turtle.getFuelLevel()
+            local fuelBefore=moveIntent.fuelBefore
+            local moved=nil
+
+            if type(fuelNow)=="number" and type(fuelBefore)=="number" then
+                moved=fuelNow<fuelBefore
+            elseif type(fuelBefore)=="number" and fuelBefore<=0 then
+                moved=false
+            end
+
+            if moved==nil then
+                state.recoveryLocked=true
+                state.recoveryReason="Position ambiguous after interrupted foreman movement"
+                state.phase="RECOVERY_LOCK"
+            elseif state.motionIntent then
+                local pose=moved and state.motionIntent.to or state.motionIntent.from
+                state.x=pose.x
+                state.z=pose.z
+                state.y=pose.y
+                state.dir=pose.dir
+                if moved then state.seq=intentSeq end
+                state.motionIntent=nil
+            else
+                state.y=moved and state.verticalIntent.to or state.verticalIntent.from
+                if moved then state.seq=intentSeq end
+                state.verticalIntent=nil
+            end
+            saveTable(statePath,state)
         end
+    end
+
+    if not foremanPoseValid() then
+        state.recoveryLocked=true
+        state.recoveryReason="Saved foreman pose is outside the operating area"
+        state.phase="RECOVERY_LOCK"
+        saveTable(statePath,state)
     end
 
     local qdata = loadTable(queuePath) or {queue={},active=nil,resolved={}}
@@ -1517,6 +2116,64 @@ local function runForeman(cfg)
         saveTable(statePath,state)
     end
 
+    local function foremanSnapshot()
+        local raw=textutils.serialize(state)
+        local snapshot=textutils.unserialize(raw)
+        snapshot.motionIntent=nil
+        snapshot.verticalIntent=nil
+        snapshot.turnIntent=nil
+        return snapshot
+    end
+
+    local function checkpointForeman()
+        checkpointPose("foreman",state.seq,foremanSnapshot(),cfg.session)
+    end
+
+    local function turnQuarter(right)
+        local from=state.dir
+        local to=right and ((from+1)%4) or ((from+3)%4)
+        local intent={seq=state.seq+1,from=from,to=to}
+        state.turnIntent=intent
+        saveState()
+
+        local ok
+        if right then
+            ok=turtle.turnRight()
+        else
+            ok=turtle.turnLeft()
+        end
+
+        if not ok then
+            state.turnIntent=nil
+            saveState()
+            return false
+        end
+
+        state.dir=to
+        state.seq=intent.seq
+        checkpointForeman()
+        state.turnIntent=nil
+        saveState()
+        return true
+    end
+
+    local function faceTracked(target)
+        if state.recoveryLocked then
+            return false
+        end
+
+        while state.dir~=target do
+            local diff=(target-state.dir)%4
+            if diff==3 then
+                if not turnQuarter(false) then return false end
+            else
+                if not turnQuarter(true) then return false end
+            end
+        end
+
+        return true
+    end
+
     local function saveQueue()
         saveTable(queuePath,{queue=queue,active=active,resolved=resolved})
     end
@@ -1535,7 +2192,10 @@ local function runForeman(cfg)
             x=state.x,
             z=state.z,
             y=state.y,
+            dir=state.dir,
+            seq=state.seq,
             queue=#queue + (active and 1 or 0),
+            recovery=state.recoveryReason,
             message=message or ""
         })
         lastStatus = now()
@@ -1714,6 +2374,10 @@ local function runForeman(cfg)
     end
 
     local function moveVertical(targetY)
+        if state.recoveryLocked then
+            return false
+        end
+
         if targetY~=0 and targetY~=1 then
             state.phase="VERTICAL_ERROR"
             saveState()
@@ -1723,11 +2387,13 @@ local function runForeman(cfg)
 
         while state.y<targetY do
             state.phase="MOVING_UP"
-            state.verticalIntent={
+            local intent={
+                seq=state.seq+1,
                 from=state.y,
                 to=state.y+1,
                 fuelBefore=turtle.getFuelLevel()
             }
+            state.verticalIntent=intent
             saveState()
 
             if not turtle.up() then
@@ -1738,18 +2404,22 @@ local function runForeman(cfg)
                 return false
             end
 
-            state.y=state.y+1
+            state.y=intent.to
+            state.seq=intent.seq
+            checkpointForeman()
             state.verticalIntent=nil
             saveState()
         end
 
         while state.y>targetY do
             state.phase="MOVING_DOWN"
-            state.verticalIntent={
+            local intent={
+                seq=state.seq+1,
                 from=state.y,
                 to=state.y-1,
                 fuelBefore=turtle.getFuelLevel()
             }
+            state.verticalIntent=intent
             saveState()
 
             if not turtle.down() then
@@ -1760,7 +2430,9 @@ local function runForeman(cfg)
                 return false
             end
 
-            state.y=state.y-1
+            state.y=intent.to
+            state.seq=intent.seq
+            checkpointForeman()
             state.verticalIntent=nil
             saveState()
         end
@@ -1797,8 +2469,9 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,targetDir)
-        saveState()
+        if not faceTracked(targetDir) then
+            return false
+        end
         local tx = state.x
         local tz = state.z
         if targetDir == DIR_N then
@@ -1809,6 +2482,15 @@ local function runForeman(cfg)
             tz = tz - 1
         else
             tx = tx - 1
+        end
+
+        if tx<-3 or tx>17 or tz<-6 or tz>2 then
+            state.recoveryLocked=true
+            state.recoveryReason="Foreman movement would leave operating area"
+            state.phase="RECOVERY_LOCK"
+            saveState()
+            sendState(state.recoveryReason)
+            return false
         end
 
         local attempts = 0
@@ -1825,10 +2507,22 @@ local function runForeman(cfg)
                 intents[id] = {number=number,x=tx,z=tz,lastSeen=now()}
                 sleep(MOVE_RESERVE_TIME)
                 if not occupied(tx,tz) and not lowerIntentWins(tx,tz) then
+                    local intent={
+                        seq=state.seq+1,
+                        fuelBefore=turtle.getFuelLevel(),
+                        from={x=state.x,z=state.z,y=state.y,dir=state.dir},
+                        to={x=tx,z=tz,y=state.y,dir=state.dir}
+                    }
+                    state.motionIntent=intent
+                    saveState()
+
                     if turtle.forward() then
-                        state.x = tx
-                        state.z = tz
-                        intents[id] = nil
+                        state.x=tx
+                        state.z=tz
+                        state.seq=intent.seq
+                        intents[id]=nil
+                        checkpointForeman()
+                        state.motionIntent=nil
                         saveState()
                         broadcast({
                             type="foreman_position",
@@ -1840,6 +2534,9 @@ local function runForeman(cfg)
                             phase=state.phase
                         })
                         return true
+                    else
+                        state.motionIntent=nil
+                        saveState()
                     end
                 end
             end
@@ -1853,6 +2550,9 @@ local function runForeman(cfg)
     end
 
     local function goTo(tx,tz)
+        if state.recoveryLocked then
+            return false
+        end
         if not ensureGroundLevel() then
             return false
         end
@@ -2007,7 +2707,7 @@ local function runForeman(cfg)
         if not goPrivateHome() then
             return false
         end
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
         state.phase = "IDLE"
         saveState()
         sendState("Waiting")
@@ -2040,7 +2740,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
         saveState()
         return true
     end
@@ -2059,7 +2759,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
         saveState()
         return true
     end
@@ -2089,7 +2789,7 @@ local function runForeman(cfg)
         if not exitDockToLane() then
             return false
         end
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
         state.phase="IDLE"
         saveState()
         sendState("Waiting")
@@ -2324,7 +3024,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
         saveState()
         return true
     end
@@ -2343,7 +3043,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
         saveState()
 
         if peripheral.getType("front")=="drive" then
@@ -2378,7 +3078,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
         state.phase="PLACING_INSTALLER"
         saveState()
 
@@ -2452,7 +3152,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
         saveState()
 
         if not verifyGroundFrontNoDrive() then
@@ -2504,7 +3204,7 @@ local function runForeman(cfg)
                 return false
             end
 
-            faceDir(state,DIR_N)
+            faceTracked(DIR_N)
             if not verifyGroundFrontNoDrive() then
                 state.phase="VERTICAL_ERROR"
                 saveState()
@@ -2532,7 +3232,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
 
         if frontComputerId()~=workerId then
             state.phase="PLACEMENT_ERROR"
@@ -2545,7 +3245,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
         state.phase="RETRIEVING_FLOPPY"
         saveState()
 
@@ -2588,7 +3288,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
 
         if peripheral.getType("front")=="drive" then
             state.phase="VERTICAL_ERROR"
@@ -2769,14 +3469,14 @@ local function runForeman(cfg)
                 end
             end
 
-            faceDir(state,DIR_N)
+            faceTracked(DIR_N)
             saveState()
 
             if not ensureInstallerLevel() then
                 return false
             end
 
-            faceDir(state,DIR_N)
+            faceTracked(DIR_N)
 
             if peripheral.getType("front")~="drive" then
                 ensureGroundLevel()
@@ -2816,7 +3516,7 @@ local function runForeman(cfg)
                 return false
             end
 
-            faceDir(state,DIR_N)
+            faceTracked(DIR_N)
         else
             if state.x~=targetX or state.z~=stagingZ then
                 state.phase="PLACEMENT_ERROR"
@@ -2834,7 +3534,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
 
         if state.x~=targetX or state.z~=stagingZ or state.y~=0 or state.dir~=DIR_N then
             state.phase="PLACEMENT_ERROR"
@@ -2895,7 +3595,8 @@ local function runForeman(cfg)
             row=row,
             foremanId=id,
             foremanNumber=number,
-            tempDeployment=temporary
+            tempDeployment=temporary,
+            session=cfg.session
         }
 
         local installed=nil
@@ -2996,7 +3697,7 @@ local function runForeman(cfg)
             state.firstInstallerRecovered=true
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
         state.phase="MINER_COMMISSIONED"
         saveState()
         return true
@@ -3146,7 +3847,7 @@ local function runForeman(cfg)
                 if not goTo(firstPending,0) then
                     return false
                 end
-                faceDir(state,DIR_N)
+                faceTracked(DIR_N)
                 saveState()
             end
         end
@@ -3164,7 +3865,7 @@ local function runForeman(cfg)
                         if not goTo(row,0) then
                             return false
                         end
-                        faceDir(state,DIR_N)
+                        faceTracked(DIR_N)
                         saveState()
                     end
 
@@ -3196,7 +3897,7 @@ local function runForeman(cfg)
                         end
                     end
 
-                    faceDir(state,DIR_N)
+                    faceTracked(DIR_N)
                     saveState()
 
                     if state.x~=nextRow or state.z~=0 or state.dir~=DIR_N then
@@ -3247,7 +3948,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v20 Foreman-1",
+                    "Mine v21 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
@@ -3268,7 +3969,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
 
         if not refuelAtFrontTo(FOREMAN_FUEL_TARGET) then
             return false
@@ -3289,7 +3990,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
 
         local needDrives = 5 - selfCount("disk_drive")
         if needDrives > 0 and takeNamedIntoSelf("disk_drive",needDrives) < needDrives then
@@ -3327,7 +4028,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
         saveState()
 
         if peripheral.getType("front")=="drive" then
@@ -3358,7 +4059,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
 
         if peripheral.getType("front")~="drive" then
             if turtle.detect() then
@@ -3414,7 +4115,7 @@ local function runForeman(cfg)
             return false
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
 
         if peripheral.getType("front")=="drive" then
             state.phase="VERTICAL_ERROR"
@@ -3440,7 +4141,7 @@ local function runForeman(cfg)
             return nil
         end
 
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
         saveState()
 
         if frontComputerId() then
@@ -3476,7 +4177,8 @@ local function runForeman(cfg)
             role="foreman",
             number=n,
             rowStart=(n-1)*4+1,
-            rowEnd=n*4
+            rowEnd=n*4,
+            session=cfg.session
         }
 
         local installed=nil
@@ -3603,7 +4305,7 @@ local function runForeman(cfg)
             if not ensureGroundLevel() then
                 return false
             end
-            faceDir(state,DIR_N)
+            faceTracked(DIR_N)
             if not ensureInstallerLevel() then
                 state.phase="WAITING_SETUP"
                 saveState()
@@ -3717,7 +4419,7 @@ local function runForeman(cfg)
         if not goTo(req.row,0) then
             return false
         end
-        faceDir(state,DIR_N)
+        faceTracked(DIR_N)
         saveState()
 
         if req.service == "REFUEL" or req.service == "BOTH" then
@@ -3774,6 +4476,47 @@ local function runForeman(cfg)
     end
 
     local function workLoop()
+        if state.recoveryLocked then
+            state.phase="RECOVERY_LOCK"
+            saveState()
+            checkpointForeman()
+            while true do
+                sendState("Movement locked: " .. tostring(state.recoveryReason or "pose uncertain"))
+                sleep(5)
+            end
+        end
+
+        checkpointForeman()
+
+        if state.phase=="DEPLOYING" then
+            if not goTo(cfg.homeX,cfg.homeZ) then
+                state.phase="RECOVERY_LOCK"
+                state.recoveryLocked=true
+                state.recoveryReason="Could not resume interrupted foreman deployment"
+                saveState()
+                checkpointForeman()
+                while true do
+                    sendState(state.recoveryReason)
+                    sleep(5)
+                end
+            end
+
+            faceTracked(DIR_N)
+            state.phase="WAITING_SETUP"
+            state.setupDone=false
+            saveState()
+            checkpointForeman()
+
+            for i=1,3 do
+                send(cfg.controller,{
+                    type="foreman_deployed",
+                    id=id,
+                    number=number
+                })
+                sleep(0.1)
+            end
+        end
+
         if cfg.master and not state.masterSetupDone then
             while not state.masterSetupDone do
                 if masterSetup() then
@@ -3915,11 +4658,18 @@ local function runMonitor()
     local mon = peripheral.wrap("right")
     mon.setTextScale(0.5)
 
-    local data = loadTable("monitor.tmp") or {
-        foremen={},
-        miners={},
-        recall={active=false,home={}}
-    }
+    local data=loadTable("monitor.tmp")
+    if not data or data.version~=VERSION then
+        data={
+            version=VERSION,
+            foremen={},
+            miners={},
+            recall={active=false,home={}},
+            authority={}
+        }
+        saveTable("monitor.tmp",data)
+    end
+    data.authority=data.authority or {}
     local input = ""
     local lastQuery = 0
     local lastRecall = 0
@@ -3958,8 +4708,8 @@ local function runMonitor()
             local text
             local c=colors.white
             if f then
-                text=string.format("F%d %-10s Rows %02d-%02d Q:%s",n,tostring(f.state or "?"),(n-1)*4+1,n*4,tostring(f.queue or 0))
-                if now()-(f.lastSeen or 0)>15 then
+                text=string.format("F%d %-8s @%s,%s,%s Q:%s",n,tostring(f.state or "?"),tostring(f.x or "?"),tostring(f.y or "?"),tostring(f.z or "?"),tostring(f.queue or 0))
+                if now()-(f.lastSeen or 0)>15 or f.state=="RECOVERY_LOCK" then
                     c=colors.red
                 end
             else
@@ -3983,8 +4733,8 @@ local function runMonitor()
             local c=colors.white
             if m then
                 line1=string.format("%02d %-12s",row,tostring(m.state or "?"))
-                line2=string.format("D:%s P:%s F:%s",tostring(m.depth or "?"),tostring(m.pos or "?"),tostring(m.fuel or "?"))
-                if now()-(m.lastSeen or 0)>20 then
+                line2=string.format("X:%s Y:%s Z:%s",tostring(m.x or m.row or "?"),tostring(m.y or "?"),tostring(m.z or m.pos or "?"))
+                if now()-(m.lastSeen or 0)>20 or m.state=="RECOVERY_LOCK" then
                     c=colors.red
                 elseif m.state=="WAITING_SERVICE" then
                     c=colors.orange
@@ -4058,6 +4808,37 @@ local function runMonitor()
                     end
                     save()
                     drawMonitor()
+                elseif message.type=="pose_checkpoint" and sender==message.id and
+                    message.version==VERSION and message.role and message.snapshot then
+                    local key=tostring(message.role) .. ":" .. tostring(message.id) .. ":" .. tostring(message.session or "")
+                    local existing=data.authority[key]
+                    local incoming=tonumber(message.seq) or 0
+                    local current=existing and (tonumber(existing.seq) or 0) or -1
+                    if incoming>=current then
+                        data.authority[key]={
+                            version=VERSION,
+                            session=message.session,
+                            seq=incoming,
+                            snapshot=message.snapshot,
+                            lastSeen=now()
+                        }
+                        save()
+                    end
+                elseif message.type=="recovery_request" and sender==message.id and
+                    message.version==VERSION and message.role then
+                    local key=tostring(message.role) .. ":" .. tostring(message.id) .. ":" .. tostring(message.session or "")
+                    local entry=data.authority[key]
+                    if entry and entry.version==VERSION then
+                        send(sender,{
+                            type="recovery_state",
+                            role=message.role,
+                            id=message.id,
+                            version=VERSION,
+                            session=message.session,
+                            seq=entry.seq,
+                            snapshot=entry.snapshot
+                        })
+                    end
                 elseif message.type=="recall_home" and message.row then
                     data.recall.home[message.row]=true
                     if data.miners[message.row] then
@@ -4110,12 +4891,14 @@ local function runMonitor()
 end
 
 local function runMaster()
-    local cfg = loadTable("node.cfg")
-    if cfg and cfg.version ~= VERSION then
-        error("Old master state detected. Clear node.cfg and foreman state before using v20.")
+    local cfg=loadTable("node.cfg")
+    local newMaster=false
+    if cfg and cfg.version~=VERSION then
+        error("Old master state detected. Clear node.cfg and foreman state before using v21.")
     end
     if not cfg then
-        cfg = {
+        newMaster=true
+        cfg={
             version=VERSION,
             role="foreman",
             number=1,
@@ -4128,13 +4911,14 @@ local function runMaster()
             startZ=0,
             startDir=DIR_N,
             master=true,
+            session=tostring(os.getComputerID()) .. ":" .. tostring(os.time()) .. ":" .. tostring(os.clock()),
             foremen={[1]=os.getComputerID()}
         }
         saveTable("node.cfg",cfg)
     end
     os.setComputerLabel("Foreman-1")
-    local state = loadTable("foreman1.tmp")
-    if not state then
+    local state=loadTable("foreman1.tmp")
+    if not state and newMaster then
         saveTable("foreman1.tmp",{
             x=0,
             z=0,
@@ -4142,7 +4926,9 @@ local function runMaster()
             dir=DIR_N,
             phase="MASTER_SETUP",
             setupDone=false,
-            masterSetupDone=false
+            masterSetupDone=false,
+            session=cfg.session,
+            seq=0
         })
     end
     runForeman(cfg)
@@ -4157,7 +4943,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version ~= VERSION then
-        error("Old mine state detected. Clear node.cfg and old mine state before using v20.")
+        error("Old mine state detected. Clear node.cfg and old mine state before using v21.")
     elseif cfg.role == "miner" then
         if cfg.commissioned then
             runMiner(cfg)
