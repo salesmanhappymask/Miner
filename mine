@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 14
+local VERSION = 15
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v14"
+local PROTOCOL = "mine_v15"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -1993,11 +1993,33 @@ local function runForeman(cfg)
         end
     end
 
-    local function waitForBootstrap(timeout)
-        local sender,message = waitInbox(function(_,m)
-            return type(m)=="table" and m.type=="bootstrap_ready"
+    local function waitForBootstrap(expectedId,timeout)
+        local sender,message = waitInbox(function(sender,m)
+            return sender==expectedId and type(m)=="table" and m.type=="bootstrap_ready"
         end,timeout)
         return sender,message
+    end
+
+    local function frontComputerId()
+        local ok,id = pcall(peripheral.call,"front","getID")
+        if ok and type(id)=="number" then
+            return id
+        end
+        return nil
+    end
+
+    local function verifyMinerStaging(tx,tz)
+        if state.x ~= tx or state.z ~= tz-1 then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Wrong miner staging square: expected " .. tostring(tx) .. "," .. tostring(tz-1) ..
+                " got " .. tostring(state.x) .. "," .. tostring(state.z))
+            return false
+        end
+
+        faceDir(state,DIR_N)
+        saveState()
+        return true
     end
 
     local function placeDriveAndDiskAt(tx,tz)
@@ -2229,9 +2251,16 @@ local function runForeman(cfg)
 
         if not tempDeployment then
             if not placeDriveAndDiskAt(tx,tz) then
-                state.phase="ERROR"
+                state.phase="WAITING_INSTALLER"
                 saveState()
                 sendState("Cannot place installer for Miner-" .. tostring(row))
+                return false
+            end
+
+            if state.x ~= tx or state.z ~= tz-1 or state.dir ~= DIR_N then
+                state.phase="PLACEMENT_ERROR"
+                saveState()
+                sendState("Installer placement ended on wrong staging square for Miner-" .. tostring(row))
                 return false
             end
         else
@@ -2261,6 +2290,26 @@ local function runForeman(cfg)
             if not turtle.down() then
                 return false
             end
+
+            if state.x ~= 1 or state.z ~= -2 then
+                state.phase="PLACEMENT_ERROR"
+                saveState()
+                sendState("Foreman-1 bootstrap miner staging position is wrong")
+                return false
+            end
+            faceDir(state,DIR_N)
+            saveState()
+        end
+
+        if not verifyMinerStaging(tx,tz) then
+            return false
+        end
+
+        if frontComputerId() then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Miner target already occupied at row " .. tostring(row))
+            return false
         end
 
         if not selfSelectKind("wireless_mining_turtle") then
@@ -2269,26 +2318,54 @@ local function runForeman(cfg)
             sendState("Wireless Mining Turtle not found")
             return false
         end
+
         if not turtle.place() then
-            state.phase="ERROR"
+            state.phase="PLACEMENT_ERROR"
             saveState()
             sendState("Cannot place Miner-" .. tostring(row))
             return false
         end
 
-        peripheral.call("front","turnOn")
+        sleep(0.2)
+
+        local expectedWorkerId = frontComputerId()
+        if not expectedWorkerId then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Placed Miner-" .. tostring(row) .. " but cannot verify it in front")
+            return false
+        end
+
+        local turnedOn = pcall(peripheral.call,"front","turnOn")
+        if not turnedOn then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Verified Miner-" .. tostring(row) .. " but cannot turn it on")
+            return false
+        end
+
+        state.phase="WAITING_MINER_BOOT"
+        saveState()
+        sendState("Waiting for verified Miner-" .. tostring(row) .. " ID " .. tostring(expectedWorkerId))
+
         local workerId = nil
-        local deadline = now() + 20
+        local deadline = now() + 30
+        local lastWake = now()
+
         while now() < deadline and not workerId do
-            local sender = waitForBootstrap(2)
-            if sender then
+            local sender = waitForBootstrap(expectedWorkerId,1)
+            if sender == expectedWorkerId then
                 workerId = sender
+            elseif now() - lastWake >= 3 then
+                pcall(peripheral.call,"front","turnOn")
+                lastWake = now()
             end
         end
+
         if not workerId then
-            state.phase="ERROR"
+            state.phase="WAITING_MINER_BOOT"
             saveState()
-            sendState("Miner bootstrap timeout")
+            sendState("Verified Miner-" .. tostring(row) .. " did not bootstrap")
             return false
         end
 
@@ -2318,6 +2395,17 @@ local function runForeman(cfg)
             end
         end
         if not installed then
+            state.phase="WAITING_MINER_BOOT"
+            saveState()
+            sendState("Miner-" .. tostring(row) .. " did not confirm installation")
+            return false
+        end
+
+        local stillFront = frontComputerId()
+        if stillFront ~= workerId then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Miner-" .. tostring(row) .. " moved or wrong turtle is in front before fueling")
             return false
         end
 
@@ -2347,11 +2435,23 @@ local function runForeman(cfg)
             end,0.5)
 
             if reply then
-                fueled = reply
+                if reply.fuel == "unlimited" or tonumber(reply.fuel) and tonumber(reply.fuel) > 0 then
+                    fueled = reply
+                else
+                    sendState("Miner-" .. tostring(row) .. " acknowledged fuel but reports zero")
+                end
             elseif now() - refuelWarning >= 10 then
                 sendState("Still waiting for Miner-" .. tostring(row) .. " fuel acknowledgement")
                 refuelWarning = now()
             end
+        end
+
+        local beforeRecovery = frontComputerId()
+        if beforeRecovery ~= workerId then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Miner-" .. tostring(row) .. " is not in expected position before installer recovery")
+            return false
         end
 
         state.phase="RECOVERING_INSTALLER"
@@ -2571,7 +2671,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v14 Foreman-1",
+                    "Mine v15 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
@@ -2676,19 +2776,36 @@ local function runForeman(cfg)
             return nil
         end
 
-        peripheral.call("front","turnOn")
+        sleep(0.2)
+
+        local expectedForemanId = frontComputerId()
+        if not expectedForemanId then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Placed Foreman-" .. tostring(n) .. " but cannot verify it in front")
+            return nil
+        end
+
+        pcall(peripheral.call,"front","turnOn")
 
         local newId = nil
-        local deadline = now()+20
+        local deadline = now()+30
+        local lastWake = now()
 
         while now()<deadline and not newId do
-            local sender = waitForBootstrap(2)
-            if sender then
+            local sender = waitForBootstrap(expectedForemanId,1)
+            if sender == expectedForemanId then
                 newId=sender
+            elseif now()-lastWake>=3 then
+                pcall(peripheral.call,"front","turnOn")
+                lastWake=now()
             end
         end
 
         if not newId then
+            state.phase="WAITING_SETUP"
+            saveState()
+            sendState("Verified Foreman-" .. tostring(n) .. " did not bootstrap")
             return nil
         end
 
