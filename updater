@@ -1,1 +1,31 @@
+local base = "https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
 
+local files = {
+    "mine",
+    "startup",
+    "version"
+}
+
+for i = 1, #files do
+    local name = files[i]
+    local h = http.get(base .. name)
+
+    if not h then
+        error("Failed to download " .. name)
+    end
+
+    local data = h.readAll()
+    h.close()
+
+    if fs.exists(name) then
+        fs.delete(name)
+    end
+
+    local f = fs.open(name, "w")
+    f.write(data)
+    f.close()
+
+    print("Updated " .. name)
+end
+
+print("Update complete")
