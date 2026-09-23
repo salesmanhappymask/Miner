@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 12
+local VERSION = 13
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v12"
+local PROTOCOL = "mine_v13"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -13,7 +13,8 @@ local MOVE_RETRY_LIMIT = 30
 local MINER_FUEL_TARGET = 1200
 local MINER_SERVICE_RESERVE = 128
 local FOREMAN_FUEL_TARGET = 1200
-local FOREMAN_FUEL_LOW = 250
+local COAL_FUEL_VALUE = 80
+local FOREMAN_FUEL_LOW = 500
 local WORKER_SETUP_COAL = 15
 
 local DIR_N = 0
@@ -180,10 +181,24 @@ local function takeNamedFromFront(kind, count, targetSlot)
         end
 
         turtle.select(targetSlot)
-        local before = turtle.getItemCount(targetSlot)
-        turtle.suck(count - movedTotal)
-        local moved = turtle.getItemCount(targetSlot) - before
 
+        local maxSize = 64
+        local current = turtle.getItemCount(targetSlot)
+        local free = maxSize - current
+        if free <= 0 then
+            break
+        end
+
+        local request = math.min(count - movedTotal, free, 64)
+        local before = current
+
+        if request <= 0 then
+            break
+        end
+
+        turtle.suck(request)
+
+        local moved = turtle.getItemCount(targetSlot) - before
         if moved <= 0 then
             break
         end
@@ -1573,7 +1588,29 @@ local function runForeman(cfg)
     end
 
     local function useOwnFuel()
-        return selfRefuelTo(FOREMAN_FUEL_TARGET)
+        if turtle.getFuelLevel() == "unlimited" then
+            return true
+        end
+
+        local fuel = turtle.getFuelLevel()
+        if fuel > FOREMAN_FUEL_LOW then
+            return true
+        end
+
+        local piecesNeeded = math.ceil((FOREMAN_FUEL_TARGET - fuel) / COAL_FUEL_VALUE)
+
+        for i=1,piecesNeeded do
+            local slot = selfFindSlot("coal")
+            if not slot then
+                return false
+            end
+            turtle.select(slot)
+            if not turtle.refuel(1) then
+                return false
+            end
+        end
+
+        return turtle.getFuelLevel() >= FOREMAN_FUEL_TARGET
     end
 
     local function refuelAtFrontTo(target)
@@ -1581,14 +1618,23 @@ local function runForeman(cfg)
             return true
         end
 
-        while turtle.getFuelLevel() < target do
-            if selfCount("coal") == 0 then
+        local fuel = turtle.getFuelLevel()
+        if fuel >= target then
+            return true
+        end
+
+        local piecesNeeded = math.ceil((target - fuel) / COAL_FUEL_VALUE)
+
+        for i=1,piecesNeeded do
+            local slot = selfFindSlot("coal")
+
+            if not slot then
                 if takeNamedIntoSelf("coal",1) < 1 then
                     return false
                 end
+                slot = selfFindSlot("coal")
             end
 
-            local slot = selfFindSlot("coal")
             if not slot then
                 return false
             end
@@ -1599,7 +1645,7 @@ local function runForeman(cfg)
             end
         end
 
-        return true
+        return turtle.getFuelLevel() >= target
     end
 
     local function goDockBypass(targetX)
@@ -1743,8 +1789,11 @@ local function runForeman(cfg)
             return true
         end
 
-        useOwnFuel()
-        if turtle.getFuelLevel() >= FOREMAN_FUEL_LOW then
+        if turtle.getFuelLevel() > FOREMAN_FUEL_LOW then
+            return true
+        end
+
+        if useOwnFuel() then
             return true
         end
 
@@ -1755,6 +1804,9 @@ local function runForeman(cfg)
         local ok = refuelAtFrontTo(FOREMAN_FUEL_TARGET)
 
         if not ok then
+            state.phase="WAITING_FUEL"
+            saveState()
+            sendState("Unable to reach foreman fuel target")
             return false
         end
 
@@ -2446,7 +2498,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v12 Foreman-1",
+                    "Mine v13 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
