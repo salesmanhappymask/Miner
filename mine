@@ -1,1 +1,2707 @@
+local MASTER_FOREMAN = 0
+
+local VERSION = 4
+local MONITOR_ID = 34
+local PROTOCOL = "mine_v4"
+local WORKER_COUNT = 16
+local FOREMAN_COUNT = 4
+local REQUEST_REPEAT = 10
+local STATUS_INTERVAL = 5
+local PEER_INTERVAL = 2
+local MOVE_RESERVE_TIME = 0.2
+local MOVE_RETRY_LIMIT = 30
+local MINER_FUEL_TARGET = 1200
+local MINER_SERVICE_RESERVE = 128
+local FOREMAN_FUEL_TARGET = 1200
+local FOREMAN_FUEL_LOW = 250
+local WORKER_SETUP_COAL = 16
+local STARTING_COAL_STACKS = 8
+
+local DIR_N = 0
+local DIR_E = 1
+local DIR_S = 2
+local DIR_W = 3
+
+local SIDES = {"left","right","top","bottom","front","back"}
+
+local function now()
+    return os.clock()
+end
+
+local function readFile(path)
+    local f = fs.open(path, "r")
+    if not f then
+        return nil
+    end
+    local data = f.readAll()
+    f.close()
+    return data
+end
+
+local function writeFile(path, data)
+    local f = fs.open(path, "w")
+    if not f then
+        return false
+    end
+    f.write(data)
+    f.close()
+    return true
+end
+
+local function saveTable(path, value)
+    local temp = path .. ".new"
+    if not writeFile(temp, textutils.serialize(value)) then
+        return false
+    end
+    if fs.exists(path) then
+        fs.delete(path)
+    end
+    fs.move(temp, path)
+    return true
+end
+
+local function loadTable(path)
+    if not fs.exists(path) then
+        return nil
+    end
+    local raw = readFile(path)
+    if not raw then
+        return nil
+    end
+    local ok, value = pcall(textutils.unserialize, raw)
+    if not ok or type(value) ~= "table" then
+        return nil
+    end
+    return value
+end
+
+local function openNetwork()
+    local opened = false
+    for i = 1, #SIDES do
+        local side = SIDES[i]
+        if peripheral.getType(side) == "modem" then
+            rednet.open(side)
+            opened = true
+        end
+    end
+    return opened
+end
+
+local function send(id, packet)
+    if id and id ~= os.getComputerID() then
+        rednet.send(id, packet, PROTOCOL)
+    end
+end
+
+local function broadcast(packet)
+    rednet.broadcast(packet, PROTOCOL)
+end
+
+local function lower(value)
+    return string.lower(tostring(value or ""))
+end
+
+local function itemText(item)
+    if type(item) ~= "table" then
+        return ""
+    end
+    return lower(item.name) .. " " .. lower(item.rawName)
+end
+
+local function matchesItem(item, kind)
+    local text = itemText(item)
+    if kind == "coal" then
+        return string.find(text, "coal", 1, true) ~= nil
+    elseif kind == "disk_drive" then
+        return string.find(text, "disk drive", 1, true) ~= nil or string.find(text, "diskdrive", 1, true) ~= nil
+    elseif kind == "floppy" then
+        return string.find(text, "floppy", 1, true) ~= nil or (string.find(text, "disk", 1, true) ~= nil and string.find(text, "drive", 1, true) == nil)
+    elseif kind == "wireless_mining_turtle" then
+        return string.find(text, "turtle", 1, true) ~= nil and string.find(text, "wireless", 1, true) ~= nil and string.find(text, "mining", 1, true) ~= nil
+    elseif kind == "narcissistic_wireless_turtle" then
+        return string.find(text, "narcissistic wireless turtle", 1, true) ~= nil
+    end
+    return false
+end
+
+local function wrapInventory(side)
+    local p = peripheral.wrap(side)
+    if not p or not p.getInventorySize or not p.getStackInSlot then
+        return nil
+    end
+    return p
+end
+
+local function scanInventory(side)
+    local inv = wrapInventory(side)
+    if not inv then
+        return nil, "No OpenPeripheral inventory on " .. side
+    end
+    local size = inv.getInventorySize()
+    local items = {}
+    for slot = 1, size do
+        local ok, item = pcall(inv.getStackInSlot, slot)
+        if ok and item then
+            items[slot] = item
+        end
+    end
+    return items, inv
+end
+
+local function findInventorySlot(side, kind)
+    local items, inv = scanInventory(side)
+    if not items then
+        return nil, inv
+    end
+    for slot, item in pairs(items) do
+        if matchesItem(item, kind) then
+            return slot, inv, item
+        end
+    end
+    return nil, inv
+end
+
+local function takeNamedFromFront(kind, count, targetSlot)
+    local sourceSlot, inv = findInventorySlot("front", kind)
+    if not sourceSlot then
+        return 0
+    end
+    if inv.swapStacks and sourceSlot ~= 1 then
+        inv.swapStacks(sourceSlot, 1)
+    elseif sourceSlot ~= 1 then
+        return 0
+    end
+    turtle.select(targetSlot)
+    local before = turtle.getItemCount(targetSlot)
+    turtle.suck(count)
+    return turtle.getItemCount(targetSlot) - before
+end
+
+local function countNamedFront(kind)
+    local items = scanInventory("front")
+    if not items then
+        return 0
+    end
+    local total = 0
+    for _, item in pairs(items) do
+        if matchesItem(item, kind) then
+            total = total + tonumber(item.qty or item.size or 1)
+        end
+    end
+    return total
+end
+
+local function status(role, state, extra)
+    local p = {
+        type = "status",
+        role = role,
+        state = state,
+        id = os.getComputerID(),
+        label = os.getComputerLabel() or "",
+        version = VERSION
+    }
+    if extra then
+        for k, v in pairs(extra) do
+            p[k] = v
+        end
+    end
+    send(MONITOR_ID, p)
+end
+
+local function clearAndPrint(lines)
+    term.clear()
+    term.setCursorPos(1,1)
+    for i = 1, #lines do
+        print(lines[i])
+    end
+end
+
+local function faceDir(state, target)
+    local diff = (target - state.dir) % 4
+    if diff == 1 then
+        turtle.turnRight()
+        state.dir = (state.dir + 1) % 4
+    elseif diff == 2 then
+        turtle.turnRight()
+        turtle.turnRight()
+        state.dir = (state.dir + 2) % 4
+    elseif diff == 3 then
+        turtle.turnLeft()
+        state.dir = (state.dir + 3) % 4
+    end
+end
+
+local function rawMoveForward(state)
+    if not turtle.forward() then
+        return false
+    end
+    if state.dir == DIR_N then
+        state.z = state.z + 1
+    elseif state.dir == DIR_E then
+        state.x = state.x + 1
+    elseif state.dir == DIR_S then
+        state.z = state.z - 1
+    else
+        state.x = state.x - 1
+    end
+    return true
+end
+
+local function simpleMoveTo(state, tx, tz)
+    if state.x < tx then
+        faceDir(state, DIR_E)
+        while state.x < tx do
+            if not rawMoveForward(state) then
+                return false
+            end
+        end
+    elseif state.x > tx then
+        faceDir(state, DIR_W)
+        while state.x > tx do
+            if not rawMoveForward(state) then
+                return false
+            end
+        end
+    end
+    if state.z < tz then
+        faceDir(state, DIR_N)
+        while state.z < tz do
+            if not rawMoveForward(state) then
+                return false
+            end
+        end
+    elseif state.z > tz then
+        faceDir(state, DIR_S)
+        while state.z > tz do
+            if not rawMoveForward(state) then
+                return false
+            end
+        end
+    end
+    return true
+end
+
+local function bootstrap()
+    if not openNetwork() then
+        error("Wireless modem not found")
+    end
+
+    local myID = os.getComputerID()
+    local configured = nil
+    local lastHello = 0
+
+    while not configured do
+        if now() - lastHello >= 2 then
+            broadcast({
+                type = "bootstrap_ready",
+                id = myID
+            })
+            status("bootstrap", "WAITING", {message="Waiting for configuration"})
+            lastHello = now()
+        end
+        local sender, message = rednet.receive(PROTOCOL, 2)
+        if sender and type(message) == "table" and message.type == "configure" and message.target == myID then
+            configured = message
+            configured.controller = sender
+        elseif sender and type(message) == "table" and message.type == "recall_all" then
+            os.setComputerLabel(nil)
+            os.shutdown()
+        end
+    end
+
+    local source = readFile("/disk/startup") or readFile("disk/startup")
+    if not source then
+        error("Cannot read /disk/startup")
+    end
+
+    if not writeFile("mine", source) then
+        error("Cannot write mine")
+    end
+    if readFile("mine") ~= source then
+        error("Installed mine failed verification")
+    end
+    if not writeFile("startup", 'shell.run("mine")') then
+        error("Cannot write startup")
+    end
+
+    if configured.role == "foreman" then
+        local cfg = {
+            version = VERSION,
+            role = "foreman",
+            number = configured.number,
+            controller = configured.controller,
+            rowStart = configured.rowStart,
+            rowEnd = configured.rowEnd,
+            homeX = 0,
+            homeZ = -(configured.number + 1),
+            startX = 1,
+            startZ = -1,
+            startDir = DIR_N,
+            master = false
+        }
+        saveTable("node.cfg", cfg)
+        os.setComputerLabel("Foreman-" .. tostring(cfg.number))
+        for i=1,3 do
+            send(configured.controller, {
+                type = "install_ok",
+                id = myID,
+                role = "foreman",
+                number = cfg.number
+            })
+            sleep(0.1)
+        end
+
+        local deployed = false
+        while not deployed do
+            local sender, message = rednet.receive(PROTOCOL, 5)
+            if sender == configured.controller and type(message) == "table" then
+                if message.type == "deploy_foreman" and message.target == myID then
+                    local state = {
+                        x = cfg.startX,
+                        z = cfg.startZ,
+                        dir = cfg.startDir,
+                        phase = "DEPLOYING",
+                        number = cfg.number
+                    }
+                    turtle.select(1)
+                    while turtle.getItemCount(1) > 1 and turtle.getFuelLevel() ~= "unlimited" and turtle.getFuelLevel() < FOREMAN_FUEL_TARGET do
+                        if not turtle.refuel(1) then
+                            break
+                        end
+                    end
+                    local function deployStep(directionName)
+                        local attempts = 0
+                        while not rawMoveForward(state) do
+                            attempts = attempts + 1
+                            if attempts == 1 or attempts % 10 == 0 then
+                                send(configured.controller, {
+                                    type="foreman_deploy_blocked",
+                                    id=myID,
+                                    number=cfg.number,
+                                    direction=directionName,
+                                    attempts=attempts
+                                })
+                            end
+                            sleep(0.5)
+                        end
+                    end
+                    local laneX = cfg.number
+                    faceDir(state, DIR_E)
+                    while state.x < laneX do
+                        deployStep("east")
+                    end
+                    faceDir(state, DIR_S)
+                    while state.z > cfg.homeZ do
+                        deployStep("south")
+                    end
+                    faceDir(state, DIR_W)
+                    while state.x > cfg.homeX do
+                        deployStep("west")
+                    end
+                    faceDir(state, DIR_N)
+                    saveTable("foreman" .. tostring(cfg.number) .. ".tmp", {
+                        x=state.x,
+                        z=state.z,
+                        dir=state.dir,
+                        phase="WAITING_SETUP",
+                        setupDone=false
+                    })
+                    for i=1,3 do
+                        send(configured.controller, {
+                            type="foreman_deployed",
+                            id=myID,
+                            number=cfg.number
+                        })
+                        sleep(0.1)
+                    end
+                    deployed = true
+                elseif message.type == "recall_all" then
+                    os.setComputerLabel(nil)
+                    os.shutdown()
+                end
+            end
+        end
+        os.reboot()
+    elseif configured.role == "miner" then
+        local cfg = {
+            version = VERSION,
+            role = "miner",
+            row = configured.row,
+            foremanId = configured.foremanId,
+            foremanNumber = configured.foremanNumber,
+            tempDeployment = configured.tempDeployment and true or false
+        }
+        saveTable("node.cfg", cfg)
+        os.setComputerLabel(string.format("Miner-%02d", cfg.row))
+        local state = {
+            row=cfg.row,
+            depth=0,
+            pos=0,
+            dir=DIR_N,
+            phase="COMMISSIONING",
+            request=nil,
+            requestSeq=0,
+            resumeDepth=0,
+            resumePos=0,
+            resumeDir=DIR_N,
+            complete=false
+        }
+        saveTable("miner.tmp", state)
+        for i=1,3 do
+            send(configured.controller, {
+                type="install_ok",
+                id=myID,
+                role="miner",
+                row=cfg.row
+            })
+            sleep(0.1)
+        end
+
+        local done = false
+        while not done do
+            local sender, message = rednet.receive(PROTOCOL, 5)
+            if sender == cfg.foremanId and type(message) == "table" then
+                if message.type == "commission_refuel" then
+                    turtle.select(1)
+                    while turtle.getItemCount(1) > 1 and turtle.getFuelLevel() ~= "unlimited" and turtle.getFuelLevel() < MINER_FUEL_TARGET do
+                        if not turtle.refuel(1) then
+                            break
+                        end
+                    end
+                    for i=1,3 do
+                        send(cfg.foremanId, {
+                            type="commission_refueled",
+                            id=myID,
+                            row=cfg.row,
+                            fuel=turtle.getFuelLevel()
+                        })
+                        sleep(0.1)
+                    end
+                elseif message.type == "return_installer" then
+                    turtle.select(1)
+                    if turtle.getItemCount(1) > 0 then
+                        turtle.transferTo(16)
+                    end
+                    turtle.select(1)
+                    if not turtle.digUp() then
+                        error("Cannot break installer drive")
+                    end
+                    for i=1,3 do
+                        send(cfg.foremanId, {
+                            type="installer_ready",
+                            id=myID,
+                            row=cfg.row
+                        })
+                        sleep(0.1)
+                    end
+                elseif message.type == "installer_taken" then
+                    turtle.select(16)
+                    if turtle.getItemCount(16) > 0 then
+                        turtle.transferTo(1)
+                    end
+                    turtle.select(1)
+                    for i=1,3 do
+                        send(cfg.foremanId, {
+                            type="installer_returned",
+                            id=myID,
+                            row=cfg.row
+                        })
+                        sleep(0.1)
+                    end
+                elseif message.type == "deploy_miner" then
+                    state.dir = DIR_N
+                    if cfg.tempDeployment then
+                        for i = 1, 2 do
+                            if not turtle.forward() then
+                                error("Miner temporary deployment path blocked")
+                            end
+                        end
+                    end
+                    state.depth = 0
+                    state.pos = 0
+                    state.dir = DIR_N
+                    state.phase = "WAITING"
+                    saveTable("miner.tmp", state)
+                    for i=1,3 do
+                        send(cfg.foremanId, {
+                            type="miner_deployed",
+                            id=myID,
+                            row=cfg.row
+                        })
+                        sleep(0.1)
+                    end
+                    status("miner","WAITING",{row=cfg.row,foreman=cfg.foremanNumber,message="Ready"})
+                    done = true
+                elseif message.type == "recall_all" then
+                    os.setComputerLabel(nil)
+                    os.shutdown()
+                end
+            end
+        end
+        os.reboot()
+    else
+        error("Unknown configured role")
+    end
+end
+
+local function runMiner(cfg)
+    if not openNetwork() then
+        error("Wireless modem not found")
+    end
+
+    local path = "miner.tmp"
+    local state = loadTable(path) or {
+        row=cfg.row,
+        depth=0,
+        pos=0,
+        dir=DIR_N,
+        phase="WAITING",
+        request=nil,
+        requestSeq=0,
+        resumeDepth=0,
+        resumePos=0,
+        resumeDir=DIR_N,
+        complete=false
+    }
+
+    state.row = cfg.row
+    local flags = {
+        start=false,
+        recall=false,
+        dumpNow=false,
+        refuelNow=false,
+        serviceComplete=false,
+        newForeman=nil
+    }
+    local lastStatus = 0
+    local lastRequest = 0
+
+    local function save()
+        saveTable(path, state)
+    end
+
+    local function sendState(message)
+        status("miner",state.phase,{
+            row=state.row,
+            foreman=cfg.foremanNumber,
+            depth=state.depth,
+            pos=state.pos,
+            fuel=turtle.getFuelLevel(),
+            request=state.request and state.request.kind or nil,
+            message=message or ""
+        })
+        lastStatus = now()
+    end
+
+    local function requestPacket(arrived)
+        if not state.request then
+            return
+        end
+        broadcast({
+            type = arrived and "service_arrived" or "service_request",
+            row = state.row,
+            requestId = state.request.id,
+            service = state.request.kind,
+            minerId = os.getComputerID(),
+            foremanNumber = cfg.foremanNumber,
+            fuel = turtle.getFuelLevel()
+        })
+        lastRequest = now()
+    end
+
+    local function networkLoop()
+        local timer = os.startTimer(1)
+        while true do
+            local event = {os.pullEvent()}
+            if event[1] == "rednet_message" then
+                local sender = event[2]
+                local message = event[3]
+                local protocol = event[4]
+                if protocol == PROTOCOL and type(message) == "table" then
+                    if message.type == "start_mining" then
+                        flags.start = true
+                    elseif message.type == "recall_all" then
+                        flags.recall = true
+                    elseif message.type == "dump_now" and sender == cfg.foremanId and state.request and message.requestId == state.request.id then
+                        flags.dumpNow = true
+                    elseif message.type == "refuel_now" and sender == cfg.foremanId and state.request and message.requestId == state.request.id then
+                        flags.refuelNow = true
+                    elseif message.type == "service_complete" and sender == cfg.foremanId and state.request and message.requestId == state.request.id then
+                        flags.serviceComplete = true
+                    elseif message.type == "foreman_reassign" and message.row == state.row and message.foremanId then
+                        cfg.foremanId = message.foremanId
+                        cfg.foremanNumber = message.foremanNumber
+                        saveTable("node.cfg", cfg)
+                        flags.newForeman = message.foremanId
+                    elseif message.type == "status_query" then
+                        sendState("")
+                    end
+                end
+            elseif event[1] == "timer" and event[2] == timer then
+                if state.request and now() - lastRequest >= REQUEST_REPEAT then
+                    requestPacket(state.phase == "WAITING_SERVICE")
+                end
+                if now() - lastStatus >= STATUS_INTERVAL then
+                    sendState("")
+                end
+                timer = os.startTimer(1)
+            end
+        end
+    end
+
+    local function digForward()
+        while not turtle.forward() do
+            if flags.recall then
+                return false
+            end
+            turtle.dig()
+            turtle.attack()
+            sleep(0.15)
+        end
+        if state.dir == DIR_N then
+            state.pos = state.pos + 1
+        elseif state.dir == DIR_S then
+            state.pos = state.pos - 1
+        end
+        save()
+        return true
+    end
+
+    local function moveUp()
+        while not turtle.up() do
+            if flags.recall then
+                return false
+            end
+            turtle.digUp()
+            turtle.attackUp()
+            sleep(0.15)
+        end
+        state.depth = state.depth - 1
+        save()
+        return true
+    end
+
+    local function moveDownExisting()
+        while not turtle.down() do
+            if flags.recall then
+                return false
+            end
+            turtle.digDown()
+            turtle.attackDown()
+            sleep(0.15)
+        end
+        state.depth = state.depth + 1
+        save()
+        return true
+    end
+
+    local function descendMine()
+        for i = 1, 5 do
+            if flags.recall then
+                return false
+            end
+            turtle.digDown()
+            if turtle.down() then
+                state.depth = state.depth + 1
+                save()
+                return true
+            end
+            turtle.attackDown()
+            sleep(0.15)
+        end
+        return false
+    end
+
+    local function face(target)
+        faceDir(state,target)
+        save()
+    end
+
+    local function inventoryFull()
+        for slot = 2,16 do
+            if turtle.getItemCount(slot) == 0 then
+                return false
+            end
+        end
+        return true
+    end
+
+    local function distanceHome()
+        return state.depth + state.pos
+    end
+
+    local function neededService()
+        local dump = inventoryFull()
+        local fuel = turtle.getFuelLevel()
+        local refuel = false
+        if fuel ~= "unlimited" then
+            refuel = fuel <= distanceHome() + MINER_SERVICE_RESERVE
+        end
+        if dump and refuel then
+            return "BOTH"
+        elseif dump then
+            return "DUMP"
+        elseif refuel then
+            return "REFUEL"
+        end
+        return nil
+    end
+
+    local function goHome(recordResume)
+        if recordResume then
+            state.resumeDepth = state.depth
+            state.resumePos = state.pos
+            state.resumeDir = state.dir
+            save()
+        end
+        while state.depth > 0 do
+            if not moveUp() then
+                break
+            end
+        end
+        face(DIR_S)
+        while state.pos > 0 do
+            while not turtle.forward() do
+                if flags.recall then
+                    break
+                end
+                turtle.dig()
+                turtle.attack()
+                sleep(0.15)
+            end
+            if flags.recall and not turtle.detect() then
+                return
+            end
+            state.pos = state.pos - 1
+            save()
+        end
+        face(DIR_N)
+    end
+
+    local function returnToMine()
+        face(DIR_N)
+        while state.pos < state.resumePos do
+            while not turtle.forward() do
+                turtle.dig()
+                turtle.attack()
+                sleep(0.15)
+            end
+            state.pos = state.pos + 1
+            save()
+        end
+        while state.depth < state.resumeDepth do
+            if not moveDownExisting() then
+                return false
+            end
+        end
+        face(state.resumeDir)
+        state.phase = "MINING"
+        state.request = nil
+        save()
+        sendState("Resumed")
+        return true
+    end
+
+    local function faceForeman()
+        for i = 1,4 do
+            local ok, id = pcall(peripheral.call,"front","getID")
+            if ok and id == cfg.foremanId then
+                return true
+            end
+            turtle.turnRight()
+            state.dir = (state.dir + 1) % 4
+            save()
+        end
+        return false
+    end
+
+    local function dumpItems()
+        if not faceForeman() then
+            return false
+        end
+        for slot=2,16 do
+            turtle.select(slot)
+            while turtle.getItemCount(slot) > 0 do
+                if not turtle.drop() then
+                    sleep(0.2)
+                end
+            end
+        end
+        turtle.select(1)
+        return true
+    end
+
+    local function refuelSelf()
+        turtle.select(1)
+        while turtle.getItemCount(1) > 1 and turtle.getFuelLevel() ~= "unlimited" and turtle.getFuelLevel() < MINER_FUEL_TARGET do
+            if not turtle.refuel(1) then
+                break
+            end
+        end
+    end
+
+    local function service(kind, finalService)
+        state.requestSeq = (state.requestSeq or 0) + 1
+        state.request = {
+            id = tostring(os.getComputerID()) .. ":" .. tostring(state.requestSeq),
+            kind = kind
+        }
+        state.phase = "RETURNING_SERVICE"
+        save()
+        requestPacket(false)
+        sendState("Service requested")
+
+        goHome(true)
+
+        state.phase = "WAITING_SERVICE"
+        save()
+        requestPacket(true)
+        sendState("Waiting for Foreman-" .. tostring(cfg.foremanNumber))
+
+        flags.dumpNow = false
+        flags.refuelNow = false
+        flags.serviceComplete = false
+
+        while not flags.serviceComplete do
+            if flags.recall then
+                return false
+            end
+            if flags.refuelNow then
+                flags.refuelNow = false
+                refuelSelf()
+                send(cfg.foremanId,{
+                    type="refuel_complete",
+                    row=state.row,
+                    requestId=state.request.id,
+                    fuel=turtle.getFuelLevel()
+                })
+            end
+            if flags.dumpNow then
+                flags.dumpNow = false
+                if dumpItems() then
+                    send(cfg.foremanId,{
+                        type="dump_complete",
+                        row=state.row,
+                        requestId=state.request.id
+                    })
+                else
+                    send(cfg.foremanId,{
+                        type="service_not_adjacent",
+                        row=state.row,
+                        requestId=state.request.id
+                    })
+                end
+            end
+            sleep(0.1)
+        end
+
+        flags.serviceComplete = false
+        state.request = nil
+        if finalService then
+            state.phase = "COMPLETE"
+            face(DIR_N)
+            save()
+            sendState("Final dump complete")
+            return true
+        end
+        state.phase = "RETURNING_MINE"
+        save()
+        return returnToMine()
+    end
+
+    local function recall()
+        flags.recall = false
+        state.phase = "RECALLING"
+        save()
+        sendState("Returning for cleanup")
+        goHome(false)
+        face(DIR_N)
+        state.phase = "HOME"
+        save()
+        send(MONITOR_ID,{
+            type="recall_home",
+            row=state.row,
+            id=os.getComputerID()
+        })
+        status("miner","HOME",{row=state.row,message="Label cleared, shutting down"})
+        os.setComputerLabel(nil)
+        sleep(0.5)
+        os.shutdown()
+    end
+
+    local function workLoop()
+        if state.complete then
+            state.phase = "COMPLETE"
+            save()
+        end
+
+        while state.phase == "WAITING" and not flags.start do
+            if flags.recall then
+                recall()
+            end
+            sleep(0.1)
+        end
+
+        if state.phase == "COMPLETE" then
+            while true do
+                if flags.recall then
+                    recall()
+                end
+                sleep(0.2)
+            end
+        end
+
+        if state.phase == "WAITING_SERVICE" or state.phase == "RETURNING_SERVICE" then
+            local kind = state.request and state.request.kind or "DUMP"
+            service(kind)
+        elseif state.phase == "RETURNING_MINE" then
+            returnToMine()
+        else
+            state.phase = "MINING"
+            save()
+        end
+
+        while true do
+            if flags.recall then
+                recall()
+            end
+
+            local kind = neededService()
+            if kind then
+                if not service(kind) then
+                    recall()
+                end
+            end
+
+            if state.dir == DIR_N then
+                while state.pos < 15 do
+                    if flags.recall then
+                        recall()
+                    end
+                    local s = neededService()
+                    if s then
+                        service(s)
+                    end
+                    if not digForward() then
+                        recall()
+                    end
+                end
+                if not descendMine() then
+                    sendState("Bedrock reached")
+                    if not service("DUMP", true) then
+                        recall()
+                    end
+                    state.complete = true
+                    state.phase = "COMPLETE"
+                    save()
+                    broadcast({
+                        type="miner_complete",
+                        row=state.row,
+                        minerId=os.getComputerID(),
+                        foremanNumber=cfg.foremanNumber
+                    })
+                    while true do
+                        if flags.recall then
+                            recall()
+                        end
+                        sleep(0.2)
+                    end
+                end
+                face(DIR_S)
+            else
+                while state.pos > 0 do
+                    if flags.recall then
+                        recall()
+                    end
+                    local s = neededService()
+                    if s then
+                        service(s)
+                    end
+                    if not digForward() then
+                        recall()
+                    end
+                end
+                if not descendMine() then
+                    sendState("Bedrock reached")
+                    if not service("DUMP", true) then
+                        recall()
+                    end
+                    state.complete = true
+                    state.phase = "COMPLETE"
+                    save()
+                    broadcast({
+                        type="miner_complete",
+                        row=state.row,
+                        minerId=os.getComputerID(),
+                        foremanNumber=cfg.foremanNumber
+                    })
+                    while true do
+                        if flags.recall then
+                            recall()
+                        end
+                        sleep(0.2)
+                    end
+                end
+                face(DIR_N)
+            end
+        end
+    end
+
+    parallel.waitForAny(networkLoop, workLoop)
+end
+
+local function runForeman(cfg)
+    if not openNetwork() then
+        error("Wireless modem not found")
+    end
+
+    local number = cfg.number
+    local id = os.getComputerID()
+    local statePath = "foreman" .. tostring(number) .. ".tmp"
+    local queuePath = "foreman" .. tostring(number) .. "_queue.tmp"
+    local state = loadTable(statePath) or {
+        x=cfg.homeX,
+        z=cfg.homeZ,
+        dir=DIR_N,
+        phase=cfg.master and "MASTER_SETUP" or "WAITING_SETUP",
+        setupDone=false
+    }
+    local qdata = loadTable(queuePath) or {queue={},active=nil,resolved={}}
+    local queue = qdata.queue or {}
+    local active = qdata.active
+    local resolved = qdata.resolved or {}
+    local peers = {}
+    local intents = {}
+    local inbox = {}
+    local flags = {
+        commissionStart=false,
+        startMining=false,
+        dockGranted=false,
+        recall=false
+    }
+    local dock = nil
+    if number == 1 then
+        dock = loadTable("dock.tmp") or {holder=nil,queue={}}
+    end
+    local lastStatus = 0
+    local lastPeer = 0
+
+    local function saveState()
+        saveTable(statePath,state)
+    end
+
+    local function saveQueue()
+        saveTable(queuePath,{queue=queue,active=active,resolved=resolved})
+    end
+
+    local function saveDock()
+        if number == 1 and dock then
+            saveTable("dock.tmp",dock)
+        end
+    end
+
+    local function sendState(message)
+        status("foreman",state.phase,{
+            number=number,
+            rowStart=cfg.rowStart,
+            rowEnd=cfg.rowEnd,
+            x=state.x,
+            z=state.z,
+            queue=#queue + (active and 1 or 0),
+            message=message or ""
+        })
+        lastStatus = now()
+    end
+
+    local function pushInbox(sender,message)
+        inbox[#inbox+1] = {sender=sender,message=message}
+        if #inbox > 100 then
+            table.remove(inbox,1)
+        end
+    end
+
+    local function popInbox(predicate)
+        for i=1,#inbox do
+            local entry = inbox[i]
+            if predicate(entry.sender,entry.message) then
+                table.remove(inbox,i)
+                return entry.sender,entry.message
+            end
+        end
+        return nil,nil
+    end
+
+    local function waitInbox(predicate, timeout)
+        local deadline = now() + timeout
+        while now() < deadline do
+            local sender,message = popInbox(predicate)
+            if sender then
+                return sender,message
+            end
+            sleep(0.05)
+        end
+        return nil,nil
+    end
+
+    local function assignedRow(row)
+        return row >= cfg.rowStart and row <= cfg.rowEnd
+    end
+
+    local function upsertRequest(message)
+        if not assignedRow(message.row or -1) then
+            return
+        end
+        local requestId = message.requestId
+        if resolved[requestId] then
+            if message.minerId then
+                send(message.minerId,{
+                    type="service_complete",
+                    requestId=requestId
+                })
+            end
+            return
+        end
+        if active and active.requestId == requestId then
+            active.arrived = active.arrived or message.type == "service_arrived"
+            active.lastSeen = now()
+            saveQueue()
+            return
+        end
+        for i=1,#queue do
+            if queue[i].requestId == requestId then
+                queue[i].arrived = queue[i].arrived or message.type == "service_arrived"
+                queue[i].lastSeen = now()
+                saveQueue()
+                return
+            end
+        end
+        queue[#queue+1] = {
+            requestId=requestId,
+            row=message.row,
+            service=message.service,
+            minerId=message.minerId,
+            arrived=message.type == "service_arrived",
+            lastSeen=now()
+        }
+        saveQueue()
+        send(message.minerId,{
+            type="service_ack",
+            requestId=requestId,
+            row=message.row
+        })
+        sendState("Queued Miner-" .. tostring(message.row))
+    end
+
+    local function dockContains(fid)
+        if dock.holder == fid then
+            return true
+        end
+        for i=1,#dock.queue do
+            if dock.queue[i] == fid then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function grantDock()
+        if number ~= 1 then
+            return
+        end
+        if not dock.holder and #dock.queue > 0 then
+            dock.holder = table.remove(dock.queue,1)
+            saveDock()
+            if dock.holder == id then
+                flags.dockGranted = true
+            else
+                send(dock.holder,{type="dock_grant"})
+            end
+        end
+    end
+
+    local function requestDock()
+        flags.dockGranted = false
+        if number == 1 then
+            if dock.holder == id then
+                flags.dockGranted = true
+            else
+                if not dockContains(id) then
+                    dock.queue[#dock.queue+1] = id
+                    saveDock()
+                end
+                grantDock()
+            end
+        else
+            broadcast({
+                type="dock_request",
+                foremanId=id,
+                number=number
+            })
+        end
+        local lastRequest = now()
+        while not flags.dockGranted do
+            if number ~= 1 and now() - lastRequest >= 2 then
+                broadcast({
+                    type="dock_request",
+                    foremanId=id,
+                    number=number
+                })
+                lastRequest = now()
+            end
+            sleep(0.05)
+        end
+    end
+
+    local function releaseDock()
+        flags.dockGranted = false
+        if number == 1 then
+            if dock.holder == id then
+                dock.holder = nil
+                saveDock()
+                grantDock()
+            end
+        else
+            send(cfg.controller,{type="dock_release",foremanId=id})
+        end
+    end
+
+    local function occupied(tx,tz)
+        for pid,p in pairs(peers) do
+            if pid ~= id and p.x == tx and p.z == tz and now() - (p.lastSeen or 0) < 8 then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function lowerIntentWins(tx,tz)
+        for pid,p in pairs(intents) do
+            if pid ~= id and p.x == tx and p.z == tz and now() - (p.lastSeen or 0) < 1 then
+                if (p.number or 99) < number then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    local function moveStep(targetDir)
+        faceDir(state,targetDir)
+        saveState()
+        local tx = state.x
+        local tz = state.z
+        if targetDir == DIR_N then
+            tz = tz + 1
+        elseif targetDir == DIR_E then
+            tx = tx + 1
+        elseif targetDir == DIR_S then
+            tz = tz - 1
+        else
+            tx = tx - 1
+        end
+
+        local attempts = 0
+        while attempts < MOVE_RETRY_LIMIT do
+            attempts = attempts + 1
+            if not occupied(tx,tz) then
+                broadcast({
+                    type="move_intent",
+                    foremanId=id,
+                    number=number,
+                    x=tx,
+                    z=tz
+                })
+                intents[id] = {number=number,x=tx,z=tz,lastSeen=now()}
+                sleep(MOVE_RESERVE_TIME)
+                if not occupied(tx,tz) and not lowerIntentWins(tx,tz) then
+                    if turtle.forward() then
+                        state.x = tx
+                        state.z = tz
+                        intents[id] = nil
+                        saveState()
+                        broadcast({
+                            type="foreman_position",
+                            foremanId=id,
+                            number=number,
+                            x=state.x,
+                            z=state.z,
+                            phase=state.phase
+                        })
+                        return true
+                    end
+                end
+            end
+            sleep(0.2)
+        end
+
+        state.phase = "BLOCKED"
+        saveState()
+        sendState("Movement blocked at " .. tostring(tx) .. "," .. tostring(tz))
+        return false
+    end
+
+    local function goTo(tx,tz)
+        while state.x < tx do
+            if not moveStep(DIR_E) then return false end
+        end
+        while state.x > tx do
+            if not moveStep(DIR_W) then return false end
+        end
+        while state.z < tz do
+            if not moveStep(DIR_N) then return false end
+        end
+        while state.z > tz do
+            if not moveStep(DIR_S) then return false end
+        end
+        return true
+    end
+
+    local function useOwnFuel()
+        turtle.select(1)
+        while turtle.getItemCount(1) > 1 and turtle.getFuelLevel() ~= "unlimited" and turtle.getFuelLevel() < FOREMAN_FUEL_TARGET do
+            if not turtle.refuel(1) then
+                break
+            end
+        end
+    end
+
+    local function goDockBypass(targetX)
+        if state.x ~= -1 then
+            if not goTo(-1,state.z) then
+                return false
+            end
+        end
+        if state.z ~= 0 then
+            if not goTo(-1,0) then
+                return false
+            end
+        end
+        if state.x ~= targetX then
+            if not goTo(targetX,0) then
+                return false
+            end
+        end
+        return true
+    end
+
+    local function atSupply()
+        requestDock()
+        if not goDockBypass(0) then
+            releaseDock()
+            return false
+        end
+        faceDir(state,DIR_N)
+        saveState()
+        return true
+    end
+
+    local function atFuel()
+        requestDock()
+        if not goDockBypass(-2) then
+            releaseDock()
+            return false
+        end
+        faceDir(state,DIR_N)
+        saveState()
+        return true
+    end
+
+    local function returnHome()
+        if state.x <= 0 then
+            if state.x ~= -1 then
+                if not goTo(-1,state.z) then
+                    return false
+                end
+            end
+            if not goTo(-1,cfg.homeZ) then
+                return false
+            end
+            if not goTo(cfg.homeX,cfg.homeZ) then
+                return false
+            end
+        else
+            if not goTo(state.x,cfg.homeZ) then
+                return false
+            end
+            if not goTo(cfg.homeX,cfg.homeZ) then
+                return false
+            end
+        end
+        faceDir(state,DIR_N)
+        state.phase = "IDLE"
+        saveState()
+        sendState("Waiting")
+        return true
+    end
+
+    local function loadOwnFuel()
+        useOwnFuel()
+        if turtle.getFuelLevel() == "unlimited" or turtle.getFuelLevel() >= FOREMAN_FUEL_LOW then
+            return true
+        end
+        if not atFuel() then
+            return false
+        end
+        turtle.select(1)
+        if turtle.getItemCount(1) == 0 then
+            takeNamedFromFront("coal",64,1)
+        end
+        useOwnFuel()
+        releaseDock()
+        return turtle.getFuelLevel() == "unlimited" or turtle.getFuelLevel() > 0
+    end
+
+    local function dumpCargo()
+        if not atSupply() then
+            return false
+        end
+        for slot=2,16 do
+            turtle.select(slot)
+            while turtle.getItemCount(slot) > 0 do
+                if not turtle.drop() then
+                    state.phase = "ERROR"
+                    saveState()
+                    sendState("Supply chest full")
+                    releaseDock()
+                    return false
+                end
+            end
+        end
+        turtle.select(1)
+        releaseDock()
+        return true
+    end
+
+    local function fetchMinerFuel()
+        if not atFuel() then
+            return false
+        end
+        turtle.select(2)
+        if turtle.getItemCount(2) > 0 then
+            releaseDock()
+            return true
+        end
+        local got = takeNamedFromFront("coal",WORKER_SETUP_COAL,2)
+        releaseDock()
+        return got > 0
+    end
+
+    local function networkLoop()
+        local timer = os.startTimer(1)
+        while true do
+            local event = {os.pullEvent()}
+            if event[1] == "rednet_message" then
+                local sender = event[2]
+                local message = event[3]
+                local protocol = event[4]
+                if protocol == PROTOCOL and type(message) == "table" then
+                    if message.type == "service_request" or message.type == "service_arrived" then
+                        upsertRequest(message)
+                    elseif message.type == "foreman_position" then
+                        peers[message.foremanId] = {
+                            number=message.number,
+                            x=message.x,
+                            z=message.z,
+                            phase=message.phase,
+                            lastSeen=now()
+                        }
+                    elseif message.type == "move_intent" then
+                        intents[message.foremanId] = {
+                            number=message.number,
+                            x=message.x,
+                            z=message.z,
+                            lastSeen=now()
+                        }
+                    elseif message.type == "dock_request" and number == 1 then
+                        if dock.holder == message.foremanId then
+                            send(message.foremanId,{type="dock_grant"})
+                        else
+                            if not dockContains(message.foremanId) then
+                                dock.queue[#dock.queue+1] = message.foremanId
+                                saveDock()
+                            end
+                            grantDock()
+                        end
+                    elseif message.type == "dock_release" and number == 1 then
+                        if dock.holder == message.foremanId then
+                            dock.holder = nil
+                            saveDock()
+                            grantDock()
+                        end
+                    elseif message.type == "dock_grant" then
+                        flags.dockGranted = true
+                    elseif message.type == "commission_start" and message.number == number then
+                        if state.setupDone then
+                            send(cfg.controller,{
+                                type="commission_done",
+                                number=number,
+                                id=id
+                            })
+                        else
+                            flags.commissionStart = true
+                        end
+                    elseif message.type == "start_mining" then
+                        flags.startMining = true
+                    elseif message.type == "recall_all" then
+                        flags.recall = true
+                    elseif message.type == "status_query" then
+                        sendState("")
+                    else
+                        pushInbox(sender,message)
+                    end
+                end
+            elseif event[1] == "timer" and event[2] == timer then
+                if now() - lastStatus >= STATUS_INTERVAL then
+                    sendState("")
+                end
+                if number == 1 and dock and dock.holder and dock.holder ~= id then
+                    local holder = peers[dock.holder]
+                    if not holder or now() - (holder.lastSeen or 0) > 15 then
+                        dock.holder = nil
+                        saveDock()
+                        grantDock()
+                    end
+                end
+                for requestId,stamp in pairs(resolved) do
+                    if now() - stamp > 300 then
+                        resolved[requestId] = nil
+                    end
+                end
+                if now() - lastPeer >= PEER_INTERVAL then
+                    broadcast({
+                        type="foreman_position",
+                        foremanId=id,
+                        number=number,
+                        x=state.x,
+                        z=state.z,
+                        phase=state.phase
+                    })
+                    lastPeer = now()
+                end
+                timer = os.startTimer(1)
+            end
+        end
+    end
+
+    local function waitForBootstrap(timeout)
+        local sender,message = waitInbox(function(_,m)
+            return type(m)=="table" and m.type=="bootstrap_ready"
+        end,timeout)
+        return sender,message
+    end
+
+    local function placeDriveAndDiskAt(tx,tz,driveSlot,diskSlot)
+        if not goTo(tx,tz-1) then
+            return false
+        end
+        faceDir(state,DIR_N)
+        if not turtle.up() then
+            return false
+        end
+        turtle.select(driveSlot)
+        if not turtle.place() then
+            turtle.down()
+            return false
+        end
+        turtle.select(diskSlot)
+        local inserted = turtle.drop(1)
+        if not inserted then
+            inserted = turtle.place()
+        end
+        sleep(0.3)
+        local ok = disk.isPresent("front")
+        turtle.down()
+        return ok and true or false
+    end
+
+    local function recoverInstaller(workerId,tx,tz,driveSlot,diskSlot)
+        if not goTo(tx,tz-1) then
+            return false
+        end
+        faceDir(state,DIR_N)
+        if not turtle.up() then
+            return false
+        end
+        turtle.select(diskSlot)
+        if turtle.getItemCount(diskSlot) > 0 then
+            turtle.down()
+            return false
+        end
+        if not turtle.suck(1) then
+            turtle.down()
+            return false
+        end
+        if not turtle.down() then
+            return false
+        end
+        faceDir(state,DIR_N)
+        send(workerId,{type="return_installer"})
+        local _,ready = waitInbox(function(sender,m)
+            return sender==workerId and type(m)=="table" and m.type=="installer_ready"
+        end,15)
+        if not ready then
+            return false
+        end
+        turtle.select(driveSlot)
+        if turtle.getItemCount(driveSlot) > 0 then
+            return false
+        end
+        if not turtle.suck(1) then
+            return false
+        end
+        send(workerId,{type="installer_taken"})
+        local _,returned = waitInbox(function(sender,m)
+            return sender==workerId and type(m)=="table" and m.type=="installer_returned"
+        end,10)
+        return returned ~= nil
+    end
+
+    local function ensureWorkerCoal()
+        if turtle.getItemCount(4) >= WORKER_SETUP_COAL then
+            return true
+        end
+        if not atFuel() then
+            return false
+        end
+        turtle.select(4)
+        takeNamedFromFront("coal",64,4)
+        releaseDock()
+        return turtle.getItemCount(4) >= WORKER_SETUP_COAL
+    end
+
+    local function loadWorkers()
+        if turtle.getItemCount(5) >= 4 then
+            return true
+        end
+        if not atSupply() then
+            return false
+        end
+        turtle.select(5)
+        local need = 4 - turtle.getItemCount(5)
+        local got = takeNamedFromFront("wireless_mining_turtle",need,5)
+        releaseDock()
+        return got >= need
+    end
+
+    local function commissionMiner(row,tempDeployment)
+        if not loadOwnFuel() then
+            return false
+        end
+        if not ensureWorkerCoal() then
+            return false
+        end
+        if turtle.getItemCount(5) == 0 and not loadWorkers() then
+            return false
+        end
+
+        local tx = row
+        local tz = 1
+
+        if not tempDeployment then
+            if not placeDriveAndDiskAt(tx,tz,2,3) then
+                state.phase="ERROR"
+                saveState()
+                sendState("Cannot place installer for Miner-" .. tostring(row))
+                return false
+            end
+        else
+            tx = 1
+            tz = -1
+            if not goTo(1,-2) then
+                return false
+            end
+            faceDir(state,DIR_N)
+            if not turtle.up() then
+                return false
+            end
+            turtle.select(3)
+            if turtle.getItemCount(3) == 0 then
+                turtle.down()
+                state.phase="WAITING_INSTALLER"
+                saveState()
+                sendState("Foreman-1 floppy missing")
+                return false
+            end
+            if not turtle.drop(1) then
+                turtle.down()
+                state.phase="WAITING_INSTALLER"
+                saveState()
+                sendState("Cannot insert Foreman-1 floppy")
+                return false
+            end
+            if not turtle.down() then
+                return false
+            end
+        end
+
+        turtle.select(5)
+        if not turtle.place() then
+            state.phase="ERROR"
+            saveState()
+            sendState("Cannot place Miner-" .. tostring(row))
+            return false
+        end
+
+        peripheral.call("front","turnOn")
+        local workerId = nil
+        local deadline = now() + 20
+        while now() < deadline and not workerId do
+            local sender = waitForBootstrap(2)
+            if sender then
+                workerId = sender
+            end
+        end
+        if not workerId then
+            state.phase="ERROR"
+            saveState()
+            sendState("Miner bootstrap timeout")
+            return false
+        end
+
+        local configurePacket={
+            type="configure",
+            target=workerId,
+            role="miner",
+            row=row,
+            foremanId=id,
+            foremanNumber=number,
+            tempDeployment=tempDeployment
+        }
+        send(workerId,configurePacket)
+
+        local installed=nil
+        local installDeadline=now()+20
+        local lastConfigure=now()
+        while now()<installDeadline and not installed do
+            local _,reply=waitInbox(function(sender,m)
+                return sender==workerId and type(m)=="table" and m.type=="install_ok" and m.row==row
+            end,1)
+            if reply then
+                installed=reply
+            elseif now()-lastConfigure>=2 then
+                send(workerId,configurePacket)
+                lastConfigure=now()
+            end
+        end
+        if not installed then
+            return false
+        end
+
+        turtle.select(4)
+        if not turtle.drop(WORKER_SETUP_COAL) then
+            return false
+        end
+        send(workerId,{type="commission_refuel"})
+        local _,fueled = waitInbox(function(sender,m)
+            return sender==workerId and type(m)=="table" and m.type=="commission_refueled"
+        end,10)
+        if not fueled then
+            return false
+        end
+
+        local recoveredDriveSlot = tempDeployment and 14 or 2
+        if not recoverInstaller(workerId,tx,tz,recoveredDriveSlot,3) then
+            state.phase="WAITING_INSTALLER"
+            saveState()
+            sendState("Installer recovery failed")
+            while turtle.getItemCount(recoveredDriveSlot)==0 or turtle.getItemCount(3)==0 do
+                sleep(1)
+            end
+        end
+
+        send(workerId,{type="deploy_miner"})
+        local _,deployed = waitInbox(function(sender,m)
+            return sender==workerId and type(m)=="table" and m.type=="miner_deployed" and m.row==row
+        end,20)
+        return deployed ~= nil
+    end
+
+    local function returnInstaller()
+        if turtle.getItemCount(2)==0 and turtle.getItemCount(3)==0 and turtle.getItemCount(14)==0 then
+            return true
+        end
+        if not atSupply() then
+            return false
+        end
+        turtle.select(2)
+        if turtle.getItemCount(2)>0 then
+            turtle.drop()
+        end
+        turtle.select(3)
+        if turtle.getItemCount(3)>0 then
+            turtle.drop()
+        end
+        turtle.select(14)
+        if turtle.getItemCount(14)>0 then
+            turtle.drop()
+        end
+        turtle.select(1)
+        releaseDock()
+        return true
+    end
+
+    local function returnUnusedFuel()
+        useOwnFuel()
+        if not atFuel() then
+            return false
+        end
+        for slot=1,16 do
+            if slot ~= 2 and slot ~= 3 then
+                turtle.select(slot)
+                if turtle.getItemCount(slot) > 0 and turtle.refuel(0) then
+                    turtle.drop()
+                end
+            end
+        end
+        turtle.select(1)
+        releaseDock()
+        return true
+    end
+
+    local function commissionAssigned()
+        state.phase="COMMISSIONING"
+        state.commissionedRows = state.commissionedRows or {}
+        saveState()
+        sendState("Commissioning assigned miners")
+
+        if number ~= 1 then
+            if not loadWorkers() then
+                return false
+            end
+        end
+
+        local first = cfg.rowStart
+        local last = cfg.rowEnd
+        for row=first,last do
+            if not state.commissionedRows[row] then
+                local temp = number==1 and row==1 and not state.firstInstallerRecovered
+                if not commissionMiner(row,temp) then
+                    return false
+                end
+                state.commissionedRows[row] = true
+                if temp then
+                    state.firstInstallerRecovered=true
+                end
+                saveState()
+            end
+        end
+
+        returnUnusedFuel()
+        returnInstaller()
+        state.setupDone=true
+        state.phase="IDLE"
+        saveState()
+        returnHome()
+        for i=1,3 do
+            send(cfg.controller,{
+                type="commission_done",
+                number=number,
+                id=id
+            })
+            sleep(0.1)
+        end
+        sendState("Miner setup complete")
+        return true
+    end
+
+    local function ensureMasterSeedFuel()
+        if turtle.getFuelLevel() == "unlimited" or turtle.getFuelLevel() > 0 then
+            return true
+        end
+        while turtle.getFuelLevel() ~= "unlimited" and turtle.getFuelLevel() <= 0 do
+            turtle.select(1)
+            if turtle.getItemCount(1) > 0 and turtle.refuel(0) then
+                turtle.refuel(1)
+            else
+                state.phase="WAITING_SEED_FUEL"
+                saveState()
+                sendState("Place one fuel item in Foreman-1 slot 1")
+                clearAndPrint({
+                    "Mine v4 Foreman-1",
+                    "",
+                    "Seed fuel required.",
+                    "Place one coal in slot 1.",
+                    "Setup resumes automatically."
+                })
+                sleep(1)
+            end
+        end
+        state.phase="MASTER_SETUP"
+        saveState()
+        return true
+    end
+
+    local function masterTakeCoal()
+        if not goTo(-2,0) then
+            return false
+        end
+        faceDir(state,DIR_N)
+        local slots = {1,4,5,6,7,8,9,10}
+        for i=1,#slots do
+            turtle.select(slots[i])
+            if turtle.getItemCount(slots[i]) == 0 then
+                local got = takeNamedFromFront("coal",64,slots[i])
+                if got == 0 then
+                    return false
+                end
+            end
+        end
+        useOwnFuel()
+        return true
+    end
+
+    local function masterPlaceBootstrapInstaller()
+        if not goTo(0,0) then
+            return false
+        end
+        faceDir(state,DIR_N)
+        turtle.select(2)
+        if turtle.getItemCount(2)==0 then
+            if takeNamedFromFront("disk_drive",1,2)==0 then
+                return false
+            end
+        end
+        turtle.select(3)
+        if turtle.getItemCount(3)==0 then
+            if takeNamedFromFront("floppy",1,3)==0 then
+                return false
+            end
+        end
+        if not placeDriveAndDiskAt(1,-1,2,3) then
+            return false
+        end
+        return true
+    end
+
+    local function masterFetchPackage()
+        if not goTo(0,0) then
+            return false
+        end
+        faceDir(state,DIR_N)
+        turtle.select(11)
+        if turtle.getItemCount(11)==0 and takeNamedFromFront("narcissistic_wireless_turtle",1,11)==0 then
+            return false
+        end
+        turtle.select(12)
+        if turtle.getItemCount(12)==0 and takeNamedFromFront("disk_drive",1,12)==0 then
+            return false
+        end
+        turtle.select(13)
+        if turtle.getItemCount(13)==0 and takeNamedFromFront("floppy",1,13)==0 then
+            return false
+        end
+        return true
+    end
+
+    local function masterCommissionForeman(n,coalA,coalB)
+        if not masterFetchPackage() then
+            return nil
+        end
+        if not goTo(1,-2) then
+            return nil
+        end
+        faceDir(state,DIR_N)
+        turtle.select(11)
+        if not turtle.place() then
+            return nil
+        end
+        peripheral.call("front","turnOn")
+
+        local newId = nil
+        local deadline = now()+20
+        while now()<deadline and not newId do
+            local sender = waitForBootstrap(2)
+            if sender then
+                newId=sender
+            end
+        end
+        if not newId then
+            return nil
+        end
+
+        local configurePacket={
+            type="configure",
+            target=newId,
+            role="foreman",
+            number=n,
+            rowStart=(n-1)*4+1,
+            rowEnd=n*4
+        }
+        send(newId,configurePacket)
+
+        local installed=nil
+        local installDeadline=now()+20
+        local lastConfigure=now()
+        while now()<installDeadline and not installed do
+            local _,reply=waitInbox(function(sender,m)
+                return sender==newId and type(m)=="table" and m.type=="install_ok" and m.number==n
+            end,1)
+            if reply then
+                installed=reply
+            elseif now()-lastConfigure>=2 then
+                send(newId,configurePacket)
+                lastConfigure=now()
+            end
+        end
+        if not installed then
+            return nil
+        end
+
+        turtle.select(coalA)
+        if not turtle.drop(64) then
+            return nil
+        end
+        turtle.select(12)
+        if not turtle.drop(1) then
+            return nil
+        end
+        turtle.select(13)
+        if not turtle.drop(1) then
+            return nil
+        end
+        turtle.select(coalB)
+        if not turtle.drop(64) then
+            return nil
+        end
+
+        send(newId,{
+            type="deploy_foreman",
+            target=newId
+        })
+
+        local _,deployed = waitInbox(function(sender,m)
+            return sender==newId and type(m)=="table" and m.type=="foreman_deployed" and m.number==n
+        end,120)
+        if not deployed then
+            return nil
+        end
+
+        return newId
+    end
+
+    local function masterSetup()
+        state.phase="MASTER_SETUP"
+        state.foremenReady = state.foremenReady or {[1]=true}
+        cfg.foremen = cfg.foremen or {[1]=id}
+        saveState()
+        saveTable("node.cfg",cfg)
+        sendState("Setting up foremen")
+
+        if not ensureMasterSeedFuel() then
+            return false
+        end
+
+        if not state.initialFuelLoaded then
+            if not masterTakeCoal() then
+                state.phase="WAITING_SUPPLIES"
+                saveState()
+                sendState("Need 8 stacks of coal in fuel chest")
+                return false
+            end
+            state.initialFuelLoaded=true
+            saveState()
+        end
+
+        if not state.bootstrapReady then
+            if not masterPlaceBootstrapInstaller() then
+                state.phase="WAITING_SUPPLIES"
+                saveState()
+                sendState("Cannot establish bootstrap station")
+                return false
+            end
+            state.bootstrapReady=true
+            saveState()
+        end
+
+        local fuelSlots = {
+            [2]={4,5},
+            [3]={6,7},
+            [4]={8,9}
+        }
+
+        for n=2,4 do
+            if not state.foremenReady[n] then
+                local slots=fuelSlots[n]
+                local fid=masterCommissionForeman(n,slots[1],slots[2])
+                if not fid then
+                    state.phase="WAITING_SETUP"
+                    saveState()
+                    sendState("Foreman-" .. tostring(n) .. " setup paused")
+                    return false
+                end
+                state.foremenReady[n]=true
+                cfg.foremen[n]=fid
+                saveTable("node.cfg",cfg)
+                saveState()
+            end
+        end
+
+        if turtle.getItemCount(4)==0 and turtle.getItemCount(10)>0 then
+            turtle.select(10)
+            turtle.transferTo(4)
+        end
+
+        if not state.bootstrapDiskPulled then
+            if not goTo(1,-2) then
+                state.phase="WAITING_SETUP"
+                saveState()
+                sendState("Cannot reach bootstrap drive")
+                return false
+            end
+            faceDir(state,DIR_N)
+            if not turtle.up() then
+                state.phase="WAITING_SETUP"
+                saveState()
+                sendState("Cannot reach bootstrap drive height")
+                return false
+            end
+            turtle.select(3)
+            if turtle.getItemCount(3) > 0 then
+                turtle.down()
+                state.phase="WAITING_SETUP"
+                saveState()
+                sendState("Floppy slot occupied")
+                return false
+            end
+            if not turtle.suck(1) then
+                turtle.down()
+                state.phase="WAITING_SETUP"
+                saveState()
+                sendState("Cannot pull bootstrap floppy")
+                return false
+            end
+            turtle.down()
+            state.bootstrapDiskPulled=true
+            saveState()
+        end
+
+        if not state.ownInstallerLoaded then
+            if not goTo(0,0) then
+                state.phase="WAITING_SETUP"
+                saveState()
+                sendState("Cannot reach supply chest")
+                return false
+            end
+            faceDir(state,DIR_N)
+            turtle.select(2)
+            if turtle.getItemCount(2)==0 then
+                if takeNamedFromFront("disk_drive",1,2)==0 then
+                    state.phase="WAITING_SUPPLIES"
+                    saveState()
+                    sendState("Need fifth Disk Drive for Foreman-1")
+                    return false
+                end
+            end
+            state.ownInstallerLoaded=true
+            saveState()
+        end
+
+        state.phase="CLEARING_SETUP_AREA"
+        saveState()
+        sendState("Clearing shared setup area")
+
+        if not returnHome() then
+            state.phase="WAITING_SETUP"
+            saveState()
+            sendState("Cannot clear shared setup area")
+            return false
+        end
+
+        state.phase="WAITING_SETUP"
+        saveState()
+        sendState("Four foremen online")
+        return true
+    end
+
+    local function commandCommission(n)
+        local target = cfg.foremen and cfg.foremen[n]
+        if n == 1 then
+            return commissionAssigned()
+        end
+        if not target then
+            return false
+        end
+
+        local deadline = now() + 30
+        local lastSend = 0
+
+        while now() < deadline do
+            if now() - lastSend >= 2 then
+                send(target,{type="commission_start",number=n})
+                lastSend = now()
+            end
+
+            local _,done = waitInbox(function(sender,m)
+                return sender==target and type(m)=="table" and m.type=="commission_done" and m.number==n
+            end,1)
+
+            if done then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    local function serviceRequest(req)
+        active = req
+        saveQueue()
+        state.phase="SERVICING"
+        saveState()
+        sendState("Servicing Miner-" .. tostring(req.row))
+
+        while not active.arrived do
+            sleep(0.1)
+            if now() - (active.lastSeen or 0) > 30 then
+                state.phase="WAITING_MINER"
+                saveState()
+            end
+        end
+
+        if not loadOwnFuel() then
+            return false
+        end
+
+        if req.service == "REFUEL" or req.service == "BOTH" then
+            if not fetchMinerFuel() then
+                return false
+            end
+        end
+
+        if not goTo(req.row,0) then
+            return false
+        end
+        faceDir(state,DIR_N)
+        saveState()
+
+        if req.service == "REFUEL" or req.service == "BOTH" then
+            turtle.select(2)
+            if not turtle.drop() then
+                return false
+            end
+            send(req.minerId,{
+                type="refuel_now",
+                requestId=req.requestId
+            })
+            local _,reply = waitInbox(function(sender,m)
+                return sender==req.minerId and type(m)=="table" and m.type=="refuel_complete" and m.requestId==req.requestId
+            end,20)
+            if not reply then
+                return false
+            end
+        end
+
+        if req.service == "DUMP" or req.service == "BOTH" then
+            for slot=2,16 do
+                if turtle.getItemCount(slot)>0 then
+                    return false
+                end
+            end
+            send(req.minerId,{
+                type="dump_now",
+                requestId=req.requestId
+            })
+            local _,reply = waitInbox(function(sender,m)
+                return sender==req.minerId and type(m)=="table" and m.type=="dump_complete" and m.requestId==req.requestId
+            end,25)
+            if not reply then
+                return false
+            end
+        end
+
+        send(req.minerId,{
+            type="service_complete",
+            requestId=req.requestId
+        })
+
+        if req.service == "DUMP" or req.service == "BOTH" then
+            if not dumpCargo() then
+                return false
+            end
+        end
+
+        resolved[req.requestId] = now()
+        active=nil
+        saveQueue()
+        returnHome()
+        sendState("Service complete")
+        return true
+    end
+
+    local function workLoop()
+        if cfg.master and not state.masterSetupDone then
+            while not state.masterSetupDone do
+                if masterSetup() then
+                    state.masterSetupDone=true
+                    saveState()
+                else
+                    state.phase="WAITING_SETUP"
+                    saveState()
+                    sendState("Master setup paused, retrying")
+                    sleep(2)
+                end
+            end
+
+            state.groupsCommissioned = state.groupsCommissioned or {}
+            for n=4,2,-1 do
+                if not state.groupsCommissioned[n] then
+                    if not commandCommission(n) then
+                        state.phase="WAITING_SETUP"
+                        saveState()
+                        sendState("Foreman-" .. tostring(n) .. " commissioning paused")
+                        while not commandCommission(n) do
+                            sendState("Waiting for Foreman-" .. tostring(n) .. " commissioning")
+                            sleep(2)
+                        end
+                    end
+                    state.groupsCommissioned[n]=true
+                    saveState()
+                end
+            end
+            if not state.groupsCommissioned[1] then
+                if not commandCommission(1) then
+                    state.phase="WAITING_SETUP"
+                    saveState()
+                    sendState("Foreman-1 commissioning paused")
+                    while not commandCommission(1) do
+                        sendState("Waiting for Foreman-1 commissioning")
+                        sleep(2)
+                    end
+                end
+                state.groupsCommissioned[1]=true
+                saveState()
+            end
+
+            for i=1,3 do
+                broadcast({type="start_mining"})
+                sleep(0.2)
+            end
+            state.setupDone=true
+            state.phase="IDLE"
+            saveState()
+            returnHome()
+        elseif not cfg.master and not state.setupDone then
+            while not flags.commissionStart do
+                if flags.recall then
+                    state.phase="RECALL_MODE"
+                    saveState()
+                    sendState("Recall received during setup")
+                end
+                sleep(0.1)
+            end
+            flags.commissionStart=false
+
+            while not state.setupDone do
+                if commissionAssigned() then
+                    break
+                end
+
+                state.phase="WAITING_SETUP"
+                saveState()
+                sendState("Commissioning paused, retrying")
+                sleep(2)
+            end
+        end
+
+        while true do
+            if flags.recall then
+                state.phase="RECALL_MODE"
+                saveState()
+                sendState("Recall broadcast active")
+                flags.recall=false
+            end
+
+            loadOwnFuel()
+
+            if not active and #queue>0 then
+                active=table.remove(queue,1)
+                saveQueue()
+            end
+
+            if active then
+                if not serviceRequest(active) then
+                    state.phase="ERROR"
+                    saveState()
+                    sendState("Service error, request retained")
+                    if active then
+                        queue[#queue+1]=active
+                        active=nil
+                        saveQueue()
+                    end
+                    returnHome()
+                    sleep(2)
+                end
+            else
+                if state.x ~= cfg.homeX or state.z ~= cfg.homeZ then
+                    returnHome()
+                end
+                sleep(0.2)
+            end
+        end
+    end
+
+    parallel.waitForAny(networkLoop, workLoop)
+end
+
+local function runMonitor()
+    if not openNetwork() then
+        error("Wireless modem not found")
+    end
+    if peripheral.getType("right") ~= "monitor" then
+        error("4x4 monitor must be on RIGHT")
+    end
+
+    local mon = peripheral.wrap("right")
+    mon.setTextScale(0.5)
+
+    local data = loadTable("monitor.tmp") or {
+        foremen={},
+        miners={},
+        recall={active=false,home={}}
+    }
+    local input = ""
+    local lastQuery = 0
+    local lastRecall = 0
+
+    local function save()
+        saveTable("monitor.tmp",data)
+    end
+
+    local function color(c)
+        if mon.isColor and mon.isColor() then
+            mon.setTextColor(c)
+        else
+            mon.setTextColor(colors.white)
+        end
+    end
+
+    local function writeAt(x,y,text,width,c)
+        local w,h = mon.getSize()
+        if y<1 or y>h or x>w then return end
+        width=math.min(width or #text,w-x+1)
+        if width<1 then return end
+        color(c or colors.white)
+        mon.setCursorPos(x,y)
+        mon.write(string.sub(tostring(text),1,width))
+    end
+
+    local function drawMonitor()
+        mon.setBackgroundColor(colors.black)
+        mon.clear()
+        local w,h=mon.getSize()
+        writeAt(2,1,"ZelOS Mining Control",w-2,colors.blue)
+
+        local y=3
+        for n=1,4 do
+            local f=data.foremen[n]
+            local text
+            local c=colors.white
+            if f then
+                text=string.format("F%d %-10s Rows %02d-%02d Q:%s",n,tostring(f.state or "?"),(n-1)*4+1,n*4,tostring(f.queue or 0))
+                if now()-(f.lastSeen or 0)>15 then
+                    c=colors.red
+                end
+            else
+                text=string.format("F%d NO SIGNAL",n)
+                c=colors.red
+            end
+            writeAt(2,y,text,w-3,c)
+            y=y+1
+        end
+
+        y=y+1
+        local colWidth=math.floor((w-5)/2)
+        for row=1,16 do
+            local col=row<=8 and 0 or 1
+            local idx=row<=8 and row or row-8
+            local x=2+col*(colWidth+1)
+            local yy=y+(idx-1)*2
+            local m=data.miners[row]
+            local line1
+            local line2=""
+            local c=colors.white
+            if m then
+                line1=string.format("%02d %-12s",row,tostring(m.state or "?"))
+                line2=string.format("D:%s P:%s F:%s",tostring(m.depth or "?"),tostring(m.pos or "?"),tostring(m.fuel or "?"))
+                if now()-(m.lastSeen or 0)>20 then
+                    c=colors.red
+                elseif m.state=="WAITING_SERVICE" then
+                    c=colors.orange
+                elseif m.state=="COMPLETE" or m.state=="HOME" then
+                    c=colors.lightBlue
+                end
+            else
+                line1=string.format("%02d NO SIGNAL",row)
+                c=colors.red
+            end
+            writeAt(x,yy,line1,colWidth,c)
+            writeAt(x,yy+1,line2,colWidth,colors.white)
+        end
+
+        if data.recall.active then
+            local count=0
+            for row=1,16 do
+                if data.recall.home[row] then count=count+1 end
+            end
+            writeAt(2,h-1,string.format("RECALL: %d/16 HOME",count),w-3,colors.red)
+        end
+    end
+
+    local function drawTerminal()
+        term.clear()
+        term.setCursorPos(1,1)
+        print("ZelOS Mining Control")
+        print("")
+        print("1 = Recall all miners, clear labels, shutdown")
+        print("")
+        if data.recall.active then
+            local count=0
+            for row=1,16 do
+                if data.recall.home[row] then count=count+1 end
+            end
+            print("Recall active: " .. tostring(count) .. "/16 home")
+            print("")
+        end
+        write("Command: " .. input)
+    end
+
+    local function triggerRecall()
+        data.recall={active=true,home={}}
+        save()
+        broadcast({type="recall_all",source=MONITOR_ID})
+        lastRecall=now()
+        drawTerminal()
+        drawMonitor()
+    end
+
+    broadcast({type="status_query"})
+    lastQuery=now()
+    drawTerminal()
+    drawMonitor()
+
+    local timer=os.startTimer(1)
+
+    while true do
+        local event={os.pullEvent()}
+        if event[1]=="rednet_message" then
+            local sender=event[2]
+            local message=event[3]
+            local protocol=event[4]
+            if protocol==PROTOCOL and type(message)=="table" then
+                if message.type=="status" then
+                    message.lastSeen=now()
+                    if message.role=="foreman" and message.number then
+                        data.foremen[message.number]=message
+                    elseif message.role=="miner" and message.row then
+                        data.miners[message.row]=message
+                    end
+                    save()
+                    drawMonitor()
+                elseif message.type=="recall_home" and message.row then
+                    data.recall.home[message.row]=true
+                    if data.miners[message.row] then
+                        data.miners[message.row].state="HOME"
+                        data.miners[message.row].lastSeen=now()
+                    end
+                    local homeCount=0
+                    for row=1,16 do
+                        if data.recall.home[row] then
+                            homeCount=homeCount+1
+                        end
+                    end
+                    if homeCount>=16 then
+                        data.recall.active=false
+                    end
+                    save()
+                    drawMonitor()
+                    drawTerminal()
+                end
+            end
+        elseif event[1]=="char" then
+            input=input .. event[2]
+            drawTerminal()
+        elseif event[1]=="key" then
+            if event[2]==keys.backspace then
+                input=string.sub(input,1,math.max(0,#input-1))
+                drawTerminal()
+            elseif event[2]==keys.enter then
+                local command=input
+                input=""
+                if command=="1" then
+                    triggerRecall()
+                else
+                    drawTerminal()
+                end
+            end
+        elseif event[1]=="timer" and event[2]==timer then
+            if now()-lastQuery>=10 then
+                broadcast({type="status_query"})
+                lastQuery=now()
+            end
+            if data.recall.active and now()-lastRecall>=3 then
+                broadcast({type="recall_all",source=MONITOR_ID})
+                lastRecall=now()
+            end
+            drawMonitor()
+            timer=os.startTimer(1)
+        end
+    end
+end
+
+local function runMaster()
+    local cfg = loadTable("node.cfg")
+    if cfg and cfg.version ~= VERSION then
+        error("Old master state detected. Clear node.cfg and foreman state before using v4.")
+    end
+    if not cfg then
+        cfg = {
+            version=VERSION,
+            role="foreman",
+            number=1,
+            controller=os.getComputerID(),
+            rowStart=1,
+            rowEnd=4,
+            homeX=0,
+            homeZ=-2,
+            startX=0,
+            startZ=0,
+            startDir=DIR_N,
+            master=true,
+            foremen={[1]=os.getComputerID()}
+        }
+        saveTable("node.cfg",cfg)
+    end
+    os.setComputerLabel("Foreman-1")
+    local state = loadTable("foreman1.tmp")
+    if not state then
+        saveTable("foreman1.tmp",{
+            x=0,
+            z=0,
+            dir=DIR_N,
+            phase="MASTER_SETUP",
+            setupDone=false,
+            masterSetupDone=false
+        })
+    end
+    runForeman(cfg)
+end
+
+if os.getComputerID() == MONITOR_ID then
+    runMonitor()
+elseif MASTER_FOREMAN == 1 then
+    runMaster()
+else
+    local cfg = loadTable("node.cfg")
+    if not cfg then
+        bootstrap()
+    elseif cfg.version ~= VERSION then
+        error("Old mine state detected. Clear node.cfg and old mine state before using v4.")
+    elseif cfg.role == "miner" then
+        runMiner(cfg)
+    elseif cfg.role == "foreman" then
+        runForeman(cfg)
+    else
+        error("Unknown node role")
+    end
+end
 
