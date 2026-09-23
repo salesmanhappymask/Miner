@@ -1,4 +1,4 @@
-local base = "https://raw.githubusercontent.com/YOURNAME/YOURREPO/main/"
+local base = "https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
 
 local mode = ...
 
