@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 19
+local VERSION = 20
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v19"
+local PROTOCOL = "mine_v20"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -407,28 +407,25 @@ local function selfSelectKind(kind)
     return slot
 end
 
-local function selfDropKind(kind, count, direction)
-    local remaining = count
-    while remaining > 0 do
-        local slot = selfFindSlot(kind)
+local function selfDropKind(kind,count)
+    local remaining=count
+
+    while remaining>0 do
+        local slot=selfFindSlot(kind)
         if not slot then
             return false
         end
+
         turtle.select(slot)
-        local amount = math.min(remaining, turtle.getItemCount(slot))
-        local ok
-        if direction == "up" then
-            ok = turtle.dropUp(amount)
-        elseif direction == "down" then
-            ok = turtle.dropDown(amount)
-        else
-            ok = turtle.drop(amount)
-        end
-        if not ok then
+        local amount=math.min(remaining,turtle.getItemCount(slot))
+
+        if amount<=0 or not turtle.drop(amount) then
             return false
         end
-        remaining = remaining - amount
+
+        remaining=remaining-amount
     end
+
     return true
 end
 
@@ -857,6 +854,7 @@ local function bootstrap()
                     saveTable("foreman" .. tostring(cfg.number) .. ".tmp", {
                         x=state.x,
                         z=state.z,
+                        y=0,
                         dir=state.dir,
                         phase="WAITING_SETUP",
                         setupDone=false
@@ -1464,13 +1462,36 @@ local function runForeman(cfg)
     local id = os.getComputerID()
     local statePath = "foreman" .. tostring(number) .. ".tmp"
     local queuePath = "foreman" .. tostring(number) .. "_queue.tmp"
-    local state = loadTable(statePath) or {
+    local state=loadTable(statePath) or {
         x=cfg.homeX,
         z=cfg.homeZ,
+        y=0,
         dir=DIR_N,
         phase=cfg.master and "MASTER_SETUP" or "WAITING_SETUP",
         setupDone=false
     }
+
+    if state.y==nil then
+        state.y=0
+    end
+
+    if type(state.verticalIntent)=="table" then
+        local fuelNow=turtle.getFuelLevel()
+        local fuelBefore=state.verticalIntent.fuelBefore
+
+        if type(fuelNow)=="number" and type(fuelBefore)=="number" then
+            if fuelNow<fuelBefore then
+                state.y=state.verticalIntent.to
+            else
+                state.y=state.verticalIntent.from
+            end
+            state.verticalIntent=nil
+            saveTable(statePath,state)
+        else
+            state.phase="VERTICAL_ERROR"
+        end
+    end
+
     local qdata = loadTable(queuePath) or {queue={},active=nil,resolved={}}
     local queue = qdata.queue or {}
     local active = qdata.active
@@ -1513,6 +1534,7 @@ local function runForeman(cfg)
             rowEnd=cfg.rowEnd,
             x=state.x,
             z=state.z,
+            y=state.y,
             queue=#queue + (active and 1 or 0),
             message=message or ""
         })
@@ -1691,7 +1713,90 @@ local function runForeman(cfg)
         return false
     end
 
+    local function moveVertical(targetY)
+        if targetY~=0 and targetY~=1 then
+            state.phase="VERTICAL_ERROR"
+            saveState()
+            sendState("Invalid relative Y target " .. tostring(targetY))
+            return false
+        end
+
+        while state.y<targetY do
+            state.phase="MOVING_UP"
+            state.verticalIntent={
+                from=state.y,
+                to=state.y+1,
+                fuelBefore=turtle.getFuelLevel()
+            }
+            saveState()
+
+            if not turtle.up() then
+                state.verticalIntent=nil
+                state.phase="VERTICAL_ERROR"
+                saveState()
+                sendState("Unable to move up to relative Y " .. tostring(targetY))
+                return false
+            end
+
+            state.y=state.y+1
+            state.verticalIntent=nil
+            saveState()
+        end
+
+        while state.y>targetY do
+            state.phase="MOVING_DOWN"
+            state.verticalIntent={
+                from=state.y,
+                to=state.y-1,
+                fuelBefore=turtle.getFuelLevel()
+            }
+            saveState()
+
+            if not turtle.down() then
+                state.verticalIntent=nil
+                state.phase="VERTICAL_ERROR"
+                saveState()
+                sendState("Unable to move down to relative Y " .. tostring(targetY))
+                return false
+            end
+
+            state.y=state.y-1
+            state.verticalIntent=nil
+            saveState()
+        end
+
+        return state.y==targetY
+    end
+
+    local function ensureGroundLevel()
+        if state.y~=0 then
+            sendState("Correcting foreman to staging height")
+        end
+        return moveVertical(0)
+    end
+
+    local function ensureInstallerLevel()
+        if state.y~=1 then
+            sendState("Correcting foreman to installer height")
+        end
+        return moveVertical(1)
+    end
+
+    local function verifyGroundFrontNoDrive()
+        if state.y~=0 then
+            return false
+        end
+        return peripheral.getType("front")~="drive"
+    end
+
     local function moveStep(targetDir)
+        if not ensureGroundLevel() then
+            state.phase="VERTICAL_ERROR"
+            saveState()
+            sendState("Horizontal movement blocked because foreman is not at staging height")
+            return false
+        end
+
         faceDir(state,targetDir)
         saveState()
         local tx = state.x
@@ -1731,6 +1836,7 @@ local function runForeman(cfg)
                             number=number,
                             x=state.x,
                             z=state.z,
+                            y=state.y,
                             phase=state.phase
                         })
                         return true
@@ -1747,6 +1853,10 @@ local function runForeman(cfg)
     end
 
     local function goTo(tx,tz)
+        if not ensureGroundLevel() then
+            return false
+        end
+
         while state.x < tx do
             if not moveStep(DIR_E) then return false end
         end
@@ -2187,6 +2297,7 @@ local function runForeman(cfg)
                         number=number,
                         x=state.x,
                         z=state.z,
+                        y=state.y,
                         phase=state.phase
                     })
                     lastPeer = now()
@@ -2228,12 +2339,17 @@ local function runForeman(cfg)
             return false
         end
 
+        if not ensureGroundLevel() then
+            return false
+        end
+
         faceDir(state,DIR_N)
         saveState()
 
-        local groundType=peripheral.getType("front")
-        if groundType=="drive" then
-            local slot=selfTargetSlotExcluding("disk_drive",state.bootstrapDrivePending and state.bootstrapDriveSlot or nil)
+        if peripheral.getType("front")=="drive" then
+            local reserved=state.bootstrapDrivePending and state.bootstrapDriveSlot or nil
+            local slot=selfTargetSlotExcluding("disk_drive",reserved)
+
             if not slot then
                 state.phase="PLACEMENT_ERROR"
                 saveState()
@@ -2245,37 +2361,33 @@ local function runForeman(cfg)
             if not turtle.dig() then
                 state.phase="PLACEMENT_ERROR"
                 saveState()
-                sendState("Cannot remove misplaced ground Disk Drive")
+                sendState("Cannot recover misplaced ground Disk Drive")
                 return false
             end
             sleep(0.2)
-        elseif frontComputerId() then
+        end
+
+        if frontComputerId() then
             state.phase="PLACEMENT_ERROR"
             saveState()
             sendState("Miner square already occupied")
             return false
         end
 
-        state.phase="RAISING_INSTALLER"
-        saveState()
-
-        if not turtle.up() then
-            state.phase="PLACEMENT_ERROR"
-            saveState()
-            sendState("Cannot raise for Disk Drive placement")
+        if not ensureInstallerLevel() then
             return false
         end
 
         faceDir(state,DIR_N)
+        state.phase="PLACING_INSTALLER"
+        saveState()
 
-        local frontType=peripheral.getType("front")
-
-        if frontType~="drive" then
+        if peripheral.getType("front")~="drive" then
             if turtle.detect() then
-                turtle.down()
                 state.phase="PLACEMENT_ERROR"
                 saveState()
-                sendState("Elevated Disk Drive square blocked")
+                sendState("Installer square blocked at relative Y 1")
+                ensureGroundLevel()
                 return false
             end
 
@@ -2283,74 +2395,127 @@ local function runForeman(cfg)
             local driveSlot=selfFindSlotExcluding("disk_drive",reserved)
 
             if not driveSlot then
-                turtle.down()
                 state.phase="WAITING_INSTALLER"
                 saveState()
                 sendState("Operational Disk Drive not found")
+                ensureGroundLevel()
                 return false
             end
 
             turtle.select(driveSlot)
-
             if not turtle.place() then
-                turtle.down()
                 state.phase="PLACEMENT_ERROR"
                 saveState()
-                sendState("Cannot place elevated Disk Drive")
+                sendState("Cannot place Disk Drive directly in front at relative Y 1")
+                ensureGroundLevel()
                 return false
             end
-
             sleep(0.2)
         end
 
-        if peripheral.getType("front")~="drive" then
-            turtle.down()
-            state.phase="PLACEMENT_ERROR"
+        if state.y~=1 or peripheral.getType("front")~="drive" then
+            state.phase="VERTICAL_ERROR"
             saveState()
-            sendState("Disk Drive placement verification failed")
+            sendState("Disk Drive is not directly in front at installer height")
+            ensureGroundLevel()
             return false
         end
 
         if not disk.isPresent("front") then
             if not selfSelectKind("floppy") then
-                turtle.down()
                 state.phase="WAITING_INSTALLER"
                 saveState()
                 sendState("Miner floppy not found")
+                ensureGroundLevel()
                 return false
             end
 
             if not turtle.drop(1) then
-                turtle.down()
                 state.phase="WAITING_INSTALLER"
                 saveState()
-                sendState("Cannot insert miner floppy")
+                sendState("Cannot insert floppy into Disk Drive directly in front")
+                ensureGroundLevel()
                 return false
             end
-
             sleep(0.3)
         end
 
         if not disk.isPresent("front") then
-            turtle.down()
             state.phase="PLACEMENT_ERROR"
             saveState()
-            sendState("Miner floppy verification failed")
+            sendState("Floppy verification failed at installer height")
+            ensureGroundLevel()
             return false
         end
 
-        if not turtle.down() then
-            state.phase="PLACEMENT_ERROR"
-            saveState()
-            sendState("Cannot lower after installer placement")
+        if not ensureGroundLevel() then
             return false
         end
 
         faceDir(state,DIR_N)
-        state.phase="PLACING_MINER"
         saveState()
 
-        return state.x==tx and state.z==stagingZ and state.dir==DIR_N
+        if not verifyGroundFrontNoDrive() then
+            state.phase="VERTICAL_ERROR"
+            saveState()
+            sendState("Disk Drive is at ground level; correcting placement")
+
+            local reserved=state.bootstrapDrivePending and state.bootstrapDriveSlot or nil
+            local slot=selfTargetSlotExcluding("disk_drive",reserved)
+            if not slot then
+                return false
+            end
+
+            turtle.select(slot)
+            if not turtle.dig() then
+                sendState("Cannot recover ground-level Disk Drive for correction")
+                return false
+            end
+
+            if not ensureInstallerLevel() then
+                return false
+            end
+
+            local driveSlot=selfFindSlotExcluding("disk_drive",reserved)
+            if not driveSlot then
+                ensureGroundLevel()
+                return false
+            end
+
+            turtle.select(driveSlot)
+            if not turtle.place() then
+                ensureGroundLevel()
+                return false
+            end
+
+            if peripheral.getType("front")~="drive" then
+                ensureGroundLevel()
+                return false
+            end
+
+            if not disk.isPresent("front") then
+                if not selfSelectKind("floppy") or not turtle.drop(1) then
+                    ensureGroundLevel()
+                    return false
+                end
+            end
+
+            if not ensureGroundLevel() then
+                return false
+            end
+
+            faceDir(state,DIR_N)
+            if not verifyGroundFrontNoDrive() then
+                state.phase="VERTICAL_ERROR"
+                saveState()
+                sendState("Disk Drive remained at ground level after correction")
+                return false
+            end
+        end
+
+        state.phase="PLACING_MINER"
+        saveState()
+        return state.y==0 and state.x==tx and state.z==stagingZ and state.dir==DIR_N
     end
 
     local function recoverInstaller(workerId,tx,tz,useBootstrapDrive)
@@ -2363,6 +2528,10 @@ local function runForeman(cfg)
             return false
         end
 
+        if not ensureGroundLevel() then
+            return false
+        end
+
         faceDir(state,DIR_N)
 
         if frontComputerId()~=workerId then
@@ -2372,38 +2541,34 @@ local function runForeman(cfg)
             return false
         end
 
-        state.phase="RETRIEVING_FLOPPY"
-        saveState()
-
-        if not turtle.up() then
-            state.phase="PLACEMENT_ERROR"
-            saveState()
-            sendState("Cannot raise to retrieve floppy")
+        if not ensureInstallerLevel() then
             return false
         end
 
         faceDir(state,DIR_N)
+        state.phase="RETRIEVING_FLOPPY"
+        saveState()
 
         if peripheral.getType("front")~="drive" then
-            turtle.down()
-            state.phase="PLACEMENT_ERROR"
+            state.phase="VERTICAL_ERROR"
             saveState()
-            sendState("Disk Drive is not directly above assigned miner")
+            sendState("Disk Drive is not directly in front at installer height")
+            ensureGroundLevel()
             return false
         end
 
         local floppySlot=selfTargetSlot("floppy")
         if not floppySlot then
-            turtle.down()
             state.phase="WAITING_INSTALLER"
             saveState()
             sendState("No inventory room for floppy")
+            ensureGroundLevel()
             return false
         end
 
         turtle.select(floppySlot)
-
         local floppyDeadline=now()+10
+
         while not matchesItem(selfItem(floppySlot),"floppy") and now()<floppyDeadline do
             turtle.suck(1)
             if not matchesItem(selfItem(floppySlot),"floppy") then
@@ -2412,21 +2577,25 @@ local function runForeman(cfg)
         end
 
         if not matchesItem(selfItem(floppySlot),"floppy") then
-            turtle.down()
             state.phase="WAITING_INSTALLER"
             saveState()
             sendState("Could not retrieve miner floppy")
+            ensureGroundLevel()
             return false
         end
 
-        if not turtle.down() then
-            state.phase="PLACEMENT_ERROR"
-            saveState()
-            sendState("Cannot lower after retrieving floppy")
+        if not ensureGroundLevel() then
             return false
         end
 
         faceDir(state,DIR_N)
+
+        if peripheral.getType("front")=="drive" then
+            state.phase="VERTICAL_ERROR"
+            saveState()
+            sendState("Disk Drive detected at ground level after floppy retrieval")
+            return false
+        end
 
         if frontComputerId()~=workerId then
             state.phase="PLACEMENT_ERROR"
@@ -2603,14 +2772,14 @@ local function runForeman(cfg)
             faceDir(state,DIR_N)
             saveState()
 
-            if not turtle.up() then
+            if not ensureInstallerLevel() then
                 return false
             end
 
             faceDir(state,DIR_N)
 
             if peripheral.getType("front")~="drive" then
-                turtle.down()
+                ensureGroundLevel()
                 state.phase="PLACEMENT_ERROR"
                 saveState()
                 sendState("Bootstrap Disk Drive missing above Miner-01 pad")
@@ -2619,7 +2788,7 @@ local function runForeman(cfg)
 
             if not disk.isPresent("front") then
                 if not selfSelectKind("floppy") then
-                    turtle.down()
+                    ensureGroundLevel()
                     state.phase="WAITING_INSTALLER"
                     saveState()
                     sendState("Foreman-1 bootstrap floppy missing")
@@ -2627,7 +2796,7 @@ local function runForeman(cfg)
                 end
 
                 if not turtle.drop(1) then
-                    turtle.down()
+                    ensureGroundLevel()
                     state.phase="WAITING_INSTALLER"
                     saveState()
                     sendState("Cannot insert Foreman-1 bootstrap floppy")
@@ -2636,14 +2805,14 @@ local function runForeman(cfg)
             end
 
             if not disk.isPresent("front") then
-                turtle.down()
+                ensureGroundLevel()
                 state.phase="PLACEMENT_ERROR"
                 saveState()
                 sendState("Bootstrap floppy verification failed")
                 return false
             end
 
-            if not turtle.down() then
+            if not ensureGroundLevel() then
                 return false
             end
 
@@ -2661,7 +2830,13 @@ local function runForeman(cfg)
             end
         end
 
-        if state.x~=targetX or state.z~=stagingZ or state.dir~=DIR_N then
+        if not ensureGroundLevel() then
+            return false
+        end
+
+        faceDir(state,DIR_N)
+
+        if state.x~=targetX or state.z~=stagingZ or state.y~=0 or state.dir~=DIR_N then
             state.phase="PLACEMENT_ERROR"
             saveState()
             sendState("Wrong position or facing before miner placement")
@@ -2755,7 +2930,7 @@ local function runForeman(cfg)
             return false
         end
 
-        if not selfDropKind("coal",WORKER_SETUP_COAL,"front") then
+        if not selfDropKind("coal",WORKER_SETUP_COAL) then
             state.phase="WAITING_FUEL"
             saveState()
             sendState("Cannot give Miner-" .. tostring(row) .. " startup coal")
@@ -3072,7 +3247,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v19 Foreman-1",
+                    "Mine v20 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
@@ -3148,19 +3323,25 @@ local function runForeman(cfg)
             return false
         end
 
+        if not ensureGroundLevel() then
+            return false
+        end
+
         faceDir(state,DIR_N)
         saveState()
 
-        local groundType=peripheral.getType("front")
-        if groundType=="drive" then
-            turtle.select(selfTargetSlot("disk_drive") or 16)
+        if peripheral.getType("front")=="drive" then
+            local slot=selfTargetSlot("disk_drive")
+            if not slot then
+                return false
+            end
+            turtle.select(slot)
             if not turtle.dig() then
                 state.phase="PLACEMENT_ERROR"
                 saveState()
-                sendState("Cannot remove misplaced ground Disk Drive from bootstrap pad")
+                sendState("Cannot remove misplaced ground bootstrap Disk Drive")
                 return false
             end
-            sleep(0.2)
         elseif frontComputerId() then
             state.phase="PLACEMENT_ERROR"
             saveState()
@@ -3173,69 +3354,75 @@ local function runForeman(cfg)
             return false
         end
 
-        if not turtle.up() then
+        if not ensureInstallerLevel() then
             return false
         end
 
-        local elevatedType=peripheral.getType("front")
+        faceDir(state,DIR_N)
 
-        if elevatedType~="drive" then
+        if peripheral.getType("front")~="drive" then
             if turtle.detect() then
-                turtle.down()
                 state.phase="PLACEMENT_ERROR"
                 saveState()
-                sendState("Bootstrap drive position blocked by non-drive block")
+                sendState("Bootstrap installer square blocked at relative Y 1")
+                ensureGroundLevel()
                 return false
             end
 
             if not selfSelectKind("disk_drive") then
-                turtle.down()
+                ensureGroundLevel()
                 return false
             end
 
             if not turtle.place() then
-                turtle.down()
+                ensureGroundLevel()
                 return false
             end
-
             sleep(0.2)
+        end
 
-            if peripheral.getType("front")~="drive" then
-                turtle.down()
-                state.phase="PLACEMENT_ERROR"
-                saveState()
-                sendState("Bootstrap Disk Drive verification failed")
-                return false
-            end
+        if peripheral.getType("front")~="drive" then
+            state.phase="VERTICAL_ERROR"
+            saveState()
+            sendState("Bootstrap Disk Drive is not directly in front at installer height")
+            ensureGroundLevel()
+            return false
         end
 
         if not disk.isPresent("front") then
             if not selfSelectKind("floppy") then
-                turtle.down()
+                ensureGroundLevel()
                 return false
             end
 
             if not turtle.drop(1) then
-                turtle.down()
+                ensureGroundLevel()
                 return false
             end
-
             sleep(0.3)
         end
 
         if not disk.isPresent("front") then
-            turtle.down()
+            ensureGroundLevel()
             state.phase="PLACEMENT_ERROR"
             saveState()
             sendState("Bootstrap floppy verification failed")
             return false
         end
 
-        if not turtle.down() then
+        if not ensureGroundLevel() then
             return false
         end
 
         faceDir(state,DIR_N)
+
+        if peripheral.getType("front")=="drive" then
+            state.phase="VERTICAL_ERROR"
+            saveState()
+            sendState("Bootstrap Disk Drive detected at ground level")
+            return false
+        end
+
         saveState()
         return true
     end
@@ -3311,16 +3498,16 @@ local function runForeman(cfg)
             end
         end
 
-        if not selfDropKind("coal",64,"front") then
+        if not selfDropKind("coal",64) then
             return nil
         end
-        if not selfDropKind("disk_drive",1,"front") then
+        if not selfDropKind("disk_drive",1) then
             return nil
         end
-        if not selfDropKind("floppy",1,"front") then
+        if not selfDropKind("floppy",1) then
             return nil
         end
-        if not selfDropKind("wireless_mining_turtle",4,"front") then
+        if not selfDropKind("wireless_mining_turtle",4) then
             return nil
         end
 
@@ -3413,8 +3600,11 @@ local function runForeman(cfg)
                 sendState("Cannot reach bootstrap drive")
                 return false
             end
+            if not ensureGroundLevel() then
+                return false
+            end
             faceDir(state,DIR_N)
-            if not turtle.up() then
+            if not ensureInstallerLevel() then
                 state.phase="WAITING_SETUP"
                 saveState()
                 sendState("Cannot reach bootstrap drive height")
@@ -3422,7 +3612,7 @@ local function runForeman(cfg)
             end
             local floppySlot = selfTargetSlot("floppy")
             if not floppySlot then
-                turtle.down()
+                ensureGroundLevel()
                 state.phase="WAITING_SETUP"
                 saveState()
                 sendState("No room for bootstrap floppy")
@@ -3430,13 +3620,13 @@ local function runForeman(cfg)
             end
             turtle.select(floppySlot)
             if not turtle.suck(1) then
-                turtle.down()
+                ensureGroundLevel()
                 state.phase="WAITING_SETUP"
                 saveState()
                 sendState("Cannot pull bootstrap floppy")
                 return false
             end
-            turtle.down()
+            ensureGroundLevel()
             state.bootstrapDiskPulled=true
             saveState()
         end
@@ -3531,7 +3721,7 @@ local function runForeman(cfg)
         saveState()
 
         if req.service == "REFUEL" or req.service == "BOTH" then
-            if not selfDropKind("coal",64,"front") then
+            if not selfDropKind("coal",64) then
                 return false
             end
             send(req.minerId,{
@@ -3922,7 +4112,7 @@ end
 local function runMaster()
     local cfg = loadTable("node.cfg")
     if cfg and cfg.version ~= VERSION then
-        error("Old master state detected. Clear node.cfg and foreman state before using v19.")
+        error("Old master state detected. Clear node.cfg and foreman state before using v20.")
     end
     if not cfg then
         cfg = {
@@ -3948,6 +4138,7 @@ local function runMaster()
         saveTable("foreman1.tmp",{
             x=0,
             z=0,
+            y=0,
             dir=DIR_N,
             phase="MASTER_SETUP",
             setupDone=false,
@@ -3966,7 +4157,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version ~= VERSION then
-        error("Old mine state detected. Clear node.cfg and old mine state before using v19.")
+        error("Old mine state detected. Clear node.cfg and old mine state before using v20.")
     elseif cfg.role == "miner" then
         if cfg.commissioned then
             runMiner(cfg)
