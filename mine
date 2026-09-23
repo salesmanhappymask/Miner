@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 13
+local VERSION = 14
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v13"
+local PROTOCOL = "mine_v14"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -657,11 +657,12 @@ local function bootstrap()
             elseif sender == cfg.foremanId and type(message) == "table" then
                 if message.type == "commission_refuel" then
                     turtle.select(1)
-                    while turtle.getItemCount(1) > 0 and turtle.getFuelLevel() ~= "unlimited" and turtle.getFuelLevel() < MINER_FUEL_TARGET do
-                        if not turtle.refuel(1) then
-                            break
-                        end
+
+                    if turtle.getFuelLevel() ~= "unlimited" and turtle.getItemCount(1) > 0 then
+                        local count = turtle.getItemCount(1)
+                        turtle.refuel(count)
                     end
+
                     for i=1,3 do
                         send(cfg.foremanId, {
                             type="commission_refueled",
@@ -1599,15 +1600,31 @@ local function runForeman(cfg)
 
         local piecesNeeded = math.ceil((FOREMAN_FUEL_TARGET - fuel) / COAL_FUEL_VALUE)
 
-        for i=1,piecesNeeded do
+        if selfCount("coal") < piecesNeeded then
+            return false
+        end
+
+        local remaining = piecesNeeded
+
+        while remaining > 0 do
             local slot = selfFindSlot("coal")
             if not slot then
                 return false
             end
+
             turtle.select(slot)
-            if not turtle.refuel(1) then
+            local available = turtle.getItemCount(slot)
+            local consume = math.min(remaining, available)
+
+            if consume <= 0 then
                 return false
             end
+
+            if not turtle.refuel(consume) then
+                return false
+            end
+
+            remaining = remaining - consume
         end
 
         return turtle.getFuelLevel() >= FOREMAN_FUEL_TARGET
@@ -1624,25 +1641,36 @@ local function runForeman(cfg)
         end
 
         local piecesNeeded = math.ceil((target - fuel) / COAL_FUEL_VALUE)
+        local onboard = selfCount("coal")
+        local toPull = piecesNeeded - onboard
 
-        for i=1,piecesNeeded do
-            local slot = selfFindSlot("coal")
-
-            if not slot then
-                if takeNamedIntoSelf("coal",1) < 1 then
-                    return false
-                end
-                slot = selfFindSlot("coal")
+        if toPull > 0 then
+            if takeNamedIntoSelf("coal",toPull) < toPull then
+                return false
             end
+        end
 
+        local remaining = piecesNeeded
+
+        while remaining > 0 do
+            local slot = selfFindSlot("coal")
             if not slot then
                 return false
             end
 
             turtle.select(slot)
-            if not turtle.refuel(1) then
+            local available = turtle.getItemCount(slot)
+            local consume = math.min(remaining, available)
+
+            if consume <= 0 then
                 return false
             end
+
+            if not turtle.refuel(consume) then
+                return false
+            end
+
+            remaining = remaining - consume
         end
 
         return turtle.getFuelLevel() >= target
@@ -2299,13 +2327,36 @@ local function runForeman(cfg)
             sendState("Cannot give Miner-" .. tostring(row) .. " startup coal")
             return false
         end
-        send(workerId,{type="commission_refuel"})
-        local _,fueled = waitInbox(function(sender,m)
-            return sender==workerId and type(m)=="table" and m.type=="commission_refueled"
-        end,10)
-        if not fueled then
-            return false
+
+        state.phase="WAITING_MINER_FUEL"
+        saveState()
+        sendState("Fueling Miner-" .. tostring(row))
+
+        local fueled = nil
+        local lastRefuelRequest = 0
+        local refuelWarning = now()
+
+        while not fueled do
+            if now() - lastRefuelRequest >= 1 then
+                send(workerId,{type="commission_refuel"})
+                lastRefuelRequest = now()
+            end
+
+            local _,reply = waitInbox(function(sender,m)
+                return sender==workerId and type(m)=="table" and m.type=="commission_refueled" and m.row==row
+            end,0.5)
+
+            if reply then
+                fueled = reply
+            elseif now() - refuelWarning >= 10 then
+                sendState("Still waiting for Miner-" .. tostring(row) .. " fuel acknowledgement")
+                refuelWarning = now()
+            end
         end
+
+        state.phase="RECOVERING_INSTALLER"
+        saveState()
+        sendState("Recovering installer from Miner-" .. tostring(row))
 
         if not recoverInstaller(workerId,tx,tz) then
             state.phase="WAITING_INSTALLER"
@@ -2314,11 +2365,33 @@ local function runForeman(cfg)
             return false
         end
 
-        send(workerId,{type="deploy_miner"})
-        local _,deployed = waitInbox(function(sender,m)
-            return sender==workerId and type(m)=="table" and m.type=="miner_deployed" and m.row==row
-        end,20)
-        return deployed ~= nil
+        state.phase="WAITING_MINER_DEPLOY"
+        saveState()
+        sendState("Deploying Miner-" .. tostring(row))
+
+        local deployed = nil
+        local lastDeployRequest = 0
+        local deployWarning = now()
+
+        while not deployed do
+            if now() - lastDeployRequest >= 1 then
+                send(workerId,{type="deploy_miner"})
+                lastDeployRequest = now()
+            end
+
+            local _,reply = waitInbox(function(sender,m)
+                return sender==workerId and type(m)=="table" and m.type=="miner_deployed" and m.row==row
+            end,0.5)
+
+            if reply then
+                deployed = reply
+            elseif now() - deployWarning >= 10 then
+                sendState("Still waiting for Miner-" .. tostring(row) .. " deployment")
+                deployWarning = now()
+            end
+        end
+
+        return true
     end
 
     local function returnInstaller()
@@ -2498,7 +2571,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v13 Foreman-1",
+                    "Mine v14 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
