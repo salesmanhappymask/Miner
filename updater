@@ -1,31 +1,136 @@
-local base = "https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
+local base = "https://raw.githubusercontent.com/YOURNAME/YOURREPO/main/"
 
-local files = {
-    "mine",
-    "startup",
-    "version"
-}
+local mode = ...
 
-for i = 1, #files do
-    local name = files[i]
-    local h = http.get(base .. name)
+local function readLocal(path)
+    if not fs.exists(path) then
+        return nil
+    end
+
+    local f = fs.open(path, "r")
+    if not f then
+        return nil
+    end
+
+    local data = f.readAll()
+    f.close()
+    return data
+end
+
+local function download(path)
+    local h = http.get(base .. path)
 
     if not h then
-        error("Failed to download " .. name)
+        return nil
     end
 
     local data = h.readAll()
     h.close()
 
+    if not data or data == "" then
+        return nil
+    end
+
+    return data
+end
+
+local function cleanVersion(value)
+    if not value then
+        return nil
+    end
+
+    return string.match(value, "^%s*(.-)%s*$")
+end
+
+local remoteVersion = download("version")
+
+if not remoteVersion then
+    print("Could not reach update server.")
+
+    if fs.exists("mine") then
+        print("Using installed version.")
+        return
+    end
+
+    error("No local mine program available.")
+end
+
+remoteVersion = cleanVersion(remoteVersion)
+local localVersion = cleanVersion(readLocal("version"))
+
+if mode == "check" and localVersion == remoteVersion then
+    print("Version " .. remoteVersion .. " is current.")
+    return
+end
+
+print("Updating to version " .. remoteVersion)
+
+local files = {
+    "mine",
+    "prep",
+    "startup"
+}
+
+local downloads = {}
+
+for i = 1, #files do
+    local name = files[i]
+
+    print("Downloading " .. name .. "...")
+
+    local data = download(name)
+
+    if not data then
+        error("Failed to download " .. name)
+    end
+
+    downloads[name] = data
+end
+
+for i = 1, #files do
+    local name = files[i]
+    local temp = name .. ".new"
+
+    if fs.exists(temp) then
+        fs.delete(temp)
+    end
+
+    local f = fs.open(temp, "w")
+
+    if not f then
+        error("Could not create " .. temp)
+    end
+
+    f.write(downloads[name])
+    f.close()
+end
+
+for i = 1, #files do
+    local name = files[i]
+    local temp = name .. ".new"
+
     if fs.exists(name) then
         fs.delete(name)
     end
 
-    local f = fs.open(name, "w")
-    f.write(data)
-    f.close()
+    fs.move(temp, name)
 
-    print("Updated " .. name)
+    print("Installed " .. name)
 end
 
-print("Update complete")
+local vf = fs.open("version.new", "w")
+
+if not vf then
+    error("Could not write version")
+end
+
+vf.write(remoteVersion)
+vf.close()
+
+if fs.exists("version") then
+    fs.delete("version")
+end
+
+fs.move("version.new", "version")
+
+print("Update complete.")
