@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 16
+local VERSION = 17
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v16"
+local PROTOCOL = "mine_v17"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -327,6 +327,39 @@ local function selfTargetSlot(kind)
     return empty
 end
 
+local function selfTargetSlotExcluding(kind,excluded)
+    local inv=getSelfInventory()
+    if not inv then
+        return nil
+    end
+
+    local empty=nil
+    local size=inv.getInventorySize()
+
+    for slot=1,size do
+        if slot~=excluded then
+            local ok,item=pcall(inv.getStackInSlot,slot)
+
+            if ok then
+                if item then
+                    if matchesItem(item,kind) then
+                        local qty=tonumber(item.qty or item.size or 1)
+                        local maxSize=tonumber(item.maxSize or 64)
+
+                        if qty<maxSize then
+                            return slot
+                        end
+                    end
+                elseif not empty then
+                    empty=slot
+                end
+            end
+        end
+    end
+
+    return empty
+end
+
 local function takeNamedIntoSelf(kind, count)
     local moved = 0
     while moved < count do
@@ -499,29 +532,207 @@ local function simpleMoveTo(state, tx, tz)
     return true
 end
 
+local function runMinerCommissioning(cfg)
+    if not openNetwork() then
+        error("Wireless modem not found")
+    end
+
+    local state=loadTable("miner.tmp") or {
+        row=cfg.row,
+        depth=0,
+        pos=0,
+        dir=DIR_N,
+        phase="COMMISSIONING",
+        request=nil,
+        requestSeq=0,
+        resumeDepth=0,
+        resumePos=0,
+        resumeDir=DIR_N,
+        complete=false,
+        installerHeld=false,
+        installerFuelSlot=nil
+    }
+
+    state.row=cfg.row
+    state.phase="COMMISSIONING"
+    saveTable("miner.tmp",state)
+
+    local function save()
+        saveTable("miner.tmp",state)
+    end
+
+    local function ack(packet)
+        for i=1,3 do
+            send(cfg.foremanId,packet)
+            sleep(0.1)
+        end
+    end
+
+    local function temporarySlot()
+        if state.installerFuelSlot and state.installerFuelSlot>=2 and state.installerFuelSlot<=16 then
+            return state.installerFuelSlot
+        end
+
+        for slot=16,2,-1 do
+            if turtle.getItemCount(slot)==0 then
+                return slot
+            end
+        end
+
+        return nil
+    end
+
+    status("miner","COMMISSIONING",{
+        row=cfg.row,
+        foreman=cfg.foremanNumber,
+        message=state.installerHeld and "Holding Disk Drive" or "Waiting for assigned foreman"
+    })
+
+    while true do
+        local sender,message=rednet.receive(PROTOCOL,1)
+
+        if sender==MONITOR_ID and type(message)=="table" then
+            if message.type=="recall_all" then
+                os.setComputerLabel(nil)
+                os.shutdown()
+            elseif message.type=="status_query" then
+                status("miner","COMMISSIONING",{
+                    row=cfg.row,
+                    foreman=cfg.foremanNumber,
+                    message=state.installerHeld and "Holding Disk Drive" or "Commissioning"
+                })
+            end
+
+        elseif sender==cfg.foremanId and type(message)=="table" then
+            if message.type=="commission_refuel" then
+                turtle.select(1)
+                local count=turtle.getItemCount(1)
+
+                if count>0 and turtle.getFuelLevel()~="unlimited" then
+                    turtle.refuel(count)
+                end
+
+                ack({
+                    type="commission_refueled",
+                    id=os.getComputerID(),
+                    row=cfg.row,
+                    fuel=turtle.getFuelLevel()
+                })
+
+            elseif message.type=="return_installer" then
+                if not state.installerHeld then
+                    turtle.select(1)
+
+                    if turtle.getItemCount(1)>0 then
+                        local slot=temporarySlot()
+
+                        if not slot then
+                            send(cfg.foremanId,{
+                                type="installer_break_failed",
+                                id=os.getComputerID(),
+                                row=cfg.row,
+                                reason="no_empty_slot"
+                            })
+                        else
+                            state.installerFuelSlot=slot
+                            turtle.transferTo(slot)
+                            save()
+                        end
+                    end
+
+                    if turtle.getItemCount(1)==0 then
+                        turtle.select(1)
+
+                        if turtle.digUp() then
+                            state.installerHeld=true
+                            save()
+                        else
+                            send(cfg.foremanId,{
+                                type="installer_break_failed",
+                                id=os.getComputerID(),
+                                row=cfg.row,
+                                reason="dig_failed"
+                            })
+                        end
+                    end
+                end
+
+                if state.installerHeld then
+                    ack({
+                        type="installer_ready",
+                        id=os.getComputerID(),
+                        row=cfg.row
+                    })
+                end
+
+            elseif message.type=="installer_taken" then
+                if state.installerHeld then
+                    state.installerHeld=false
+
+                    if state.installerFuelSlot and turtle.getItemCount(state.installerFuelSlot)>0 then
+                        turtle.select(state.installerFuelSlot)
+                        turtle.transferTo(1)
+                    end
+
+                    state.installerFuelSlot=nil
+                    turtle.select(1)
+                    save()
+                end
+
+                ack({
+                    type="installer_returned",
+                    id=os.getComputerID(),
+                    row=cfg.row
+                })
+
+            elseif message.type=="deploy_miner" then
+                cfg.commissioned=true
+                saveTable("node.cfg",cfg)
+
+                state.depth=0
+                state.pos=0
+                state.dir=DIR_N
+                state.phase="WAITING"
+                state.installerHeld=false
+                state.installerFuelSlot=nil
+                save()
+
+                ack({
+                    type="miner_deployed",
+                    id=os.getComputerID(),
+                    row=cfg.row
+                })
+
+                status("miner","WAITING",{
+                    row=cfg.row,
+                    foreman=cfg.foremanNumber,
+                    message="Ready"
+                })
+
+                sleep(0.5)
+                os.reboot()
+            end
+        end
+    end
+end
+
 local function bootstrap()
     if not openNetwork() then
         error("Wireless modem not found")
     end
 
-    local myID = os.getComputerID()
-    local configured = nil
-    local lastHello = 0
+    local myID=os.getComputerID()
+    local configured=nil
+
+    status("bootstrap","WAITING",{message="Waiting for direct configuration"})
 
     while not configured do
-        if now() - lastHello >= 2 then
-            broadcast({
-                type = "bootstrap_ready",
-                id = myID
-            })
-            status("bootstrap", "WAITING", {message="Waiting for configuration"})
-            lastHello = now()
-        end
-        local sender, message = rednet.receive(PROTOCOL, 2)
-        if sender and type(message) == "table" and message.type == "configure" and message.target == myID then
-            configured = message
-            configured.controller = sender
-        elseif sender and type(message) == "table" and message.type == "recall_all" then
+        local sender,message=rednet.receive(PROTOCOL,2)
+
+        if sender and type(message)=="table" and message.type=="configure" and message.target==myID then
+            configured=message
+            configured.controller=sender
+        elseif sender==MONITOR_ID and type(message)=="table" and message.type=="recall_all" then
             os.setComputerLabel(nil)
             os.shutdown()
         end
@@ -553,7 +764,7 @@ local function bootstrap()
             homeX = 0,
             homeZ = -(configured.number + 1),
             startX = 1,
-            startZ = -1,
+            startZ = 1,
             startDir = DIR_N,
             master = false
         }
@@ -633,17 +844,19 @@ local function bootstrap()
         end
         os.reboot()
     elseif configured.role == "miner" then
-        local cfg = {
-            version = VERSION,
-            role = "miner",
-            row = configured.row,
-            foremanId = configured.foremanId,
-            foremanNumber = configured.foremanNumber,
-            tempDeployment = configured.tempDeployment and true or false
+        local cfg={
+            version=VERSION,
+            role="miner",
+            row=configured.row,
+            foremanId=configured.foremanId,
+            foremanNumber=configured.foremanNumber,
+            commissioned=false
         }
-        saveTable("node.cfg", cfg)
-        os.setComputerLabel(string.format("Miner-%02d", cfg.row))
-        local state = {
+
+        saveTable("node.cfg",cfg)
+        os.setComputerLabel(string.format("Miner-%02d",cfg.row))
+
+        saveTable("miner.tmp",{
             row=cfg.row,
             depth=0,
             pos=0,
@@ -654,11 +867,13 @@ local function bootstrap()
             resumeDepth=0,
             resumePos=0,
             resumeDir=DIR_N,
-            complete=false
-        }
-        saveTable("miner.tmp", state)
+            complete=false,
+            installerHeld=false,
+            installerFuelSlot=nil
+        })
+
         for i=1,3 do
-            send(configured.controller, {
+            send(configured.controller,{
                 type="install_ok",
                 id=myID,
                 role="miner",
@@ -667,140 +882,7 @@ local function bootstrap()
             sleep(0.1)
         end
 
-        local installerReady = false
-        local installerFuelSlot = nil
-
-        local function sendInstallerReady()
-            for i=1,3 do
-                send(cfg.foremanId, {
-                    type="installer_ready",
-                    id=myID,
-                    row=cfg.row
-                })
-                sleep(0.1)
-            end
-        end
-
-        local done = false
-        while not done do
-            local sender, message = rednet.receive(PROTOCOL, 1)
-            if not sender and installerReady then
-                sendInstallerReady()
-            elseif sender == MONITOR_ID and type(message) == "table" and message.type == "recall_all" then
-                os.setComputerLabel(nil)
-                os.shutdown()
-            elseif sender == cfg.foremanId and type(message) == "table" then
-                if message.type == "commission_refuel" then
-                    turtle.select(1)
-
-                    if turtle.getFuelLevel() ~= "unlimited" and turtle.getItemCount(1) > 0 then
-                        local count = turtle.getItemCount(1)
-                        turtle.refuel(count)
-                    end
-
-                    for i=1,3 do
-                        send(cfg.foremanId, {
-                            type="commission_refueled",
-                            id=myID,
-                            row=cfg.row,
-                            fuel=turtle.getFuelLevel()
-                        })
-                        sleep(0.1)
-                    end
-                elseif message.type == "return_installer" then
-                    if not installerReady then
-                        turtle.select(1)
-                        if turtle.getItemCount(1) > 0 then
-                            installerFuelSlot = nil
-                            for slot=16,2,-1 do
-                                if turtle.getItemCount(slot) == 0 then
-                                    installerFuelSlot = slot
-                                    break
-                                end
-                            end
-                            if not installerFuelSlot then
-                                send(cfg.foremanId,{
-                                    type="installer_break_failed",
-                                    id=myID,
-                                    row=cfg.row,
-                                    reason="no_empty_slot"
-                                })
-                            else
-                                turtle.transferTo(installerFuelSlot)
-                            end
-                        end
-                        if turtle.getItemCount(1) == 0 then
-                            turtle.select(1)
-                            if turtle.digUp() then
-                                installerReady = true
-                                sendInstallerReady()
-                            else
-                                send(cfg.foremanId,{
-                                    type="installer_break_failed",
-                                    id=myID,
-                                    row=cfg.row,
-                                    reason="dig_failed"
-                                })
-                                if installerFuelSlot and turtle.getItemCount(installerFuelSlot) > 0 then
-                                    turtle.select(installerFuelSlot)
-                                    turtle.transferTo(1)
-                                    turtle.select(1)
-                                    installerFuelSlot = nil
-                                end
-                            end
-                        end
-                    else
-                        sendInstallerReady()
-                    end
-                elseif message.type == "installer_taken" then
-                    if installerReady then
-                        installerReady = false
-                        if installerFuelSlot and turtle.getItemCount(installerFuelSlot) > 0 then
-                            turtle.select(installerFuelSlot)
-                            turtle.transferTo(1)
-                        end
-                        installerFuelSlot = nil
-                        turtle.select(1)
-                    end
-                    for i=1,3 do
-                        send(cfg.foremanId, {
-                            type="installer_returned",
-                            id=myID,
-                            row=cfg.row
-                        })
-                        sleep(0.1)
-                    end
-                elseif message.type == "deploy_miner" then
-                    state.dir = DIR_N
-                    if cfg.tempDeployment then
-                        for i = 1, 2 do
-                            if not turtle.forward() then
-                                error("Miner temporary deployment path blocked")
-                            end
-                        end
-                    end
-                    state.depth = 0
-                    state.pos = 0
-                    state.dir = DIR_N
-                    state.phase = "WAITING"
-                    saveTable("miner.tmp", state)
-                    for i=1,3 do
-                        send(cfg.foremanId, {
-                            type="miner_deployed",
-                            id=myID,
-                            row=cfg.row
-                        })
-                        sleep(0.1)
-                    end
-                    status("miner","WAITING",{row=cfg.row,foreman=cfg.foremanNumber,message="Ready"})
-                    done = true
-                elseif message.type == "recall_all" then
-                    os.setComputerLabel(nil)
-                    os.shutdown()
-                end
-            end
-        end
-        os.reboot()
+        runMinerCommissioning(cfg)
     else
         error("Unknown configured role")
     end
@@ -881,7 +963,16 @@ local function runMiner(cfg)
                 local protocol = event[4]
                 if protocol == PROTOCOL and type(message) == "table" then
                     if sender == cfg.foremanId then
-                        if message.type == "start_mining" then
+                        if message.type=="deploy_miner" and cfg.commissioned then
+                            for i=1,3 do
+                                send(cfg.foremanId,{
+                                    type="miner_deployed",
+                                    id=os.getComputerID(),
+                                    row=cfg.row
+                                })
+                                sleep(0.1)
+                            end
+                        elseif message.type == "start_mining" then
                             flags.start = true
                         elseif message.type == "dump_now" and state.request and message.requestId == state.request.id then
                             flags.dumpNow = true
@@ -1223,8 +1314,19 @@ local function runMiner(cfg)
             service(kind)
         elseif state.phase == "RETURNING_MINE" then
             returnToMine()
+        elseif state.phase == "MINING" then
         else
-            state.phase = "MINING"
+            state.phase="WAITING"
+            save()
+
+            while not flags.start do
+                if flags.recall then
+                    recall()
+                end
+                sleep(0.1)
+            end
+
+            state.phase="MINING"
             save()
         end
 
@@ -2062,13 +2164,6 @@ local function runForeman(cfg)
         end
     end
 
-    local function waitForBootstrap(expectedId,timeout)
-        local sender,message = waitInbox(function(sender,m)
-            return sender==expectedId and type(m)=="table" and m.type=="bootstrap_ready"
-        end,timeout)
-        return sender,message
-    end
-
     local function frontComputerId()
         local ok,id = pcall(peripheral.call,"front","getID")
         if ok and type(id)=="number" then
@@ -2181,7 +2276,7 @@ local function runForeman(cfg)
         return state.x==tx and state.z==stagingZ and state.dir==DIR_N
     end
 
-    local function recoverInstaller(workerId,tx,tz,tempDeployment)
+    local function recoverInstaller(workerId,tx,tz,useBootstrapDrive)
         local stagingZ=tz-1
 
         if not goTo(tx,stagingZ) then
@@ -2268,7 +2363,7 @@ local function runForeman(cfg)
         local beforeCount=selfCount("disk_drive")
         local targetSlot=nil
 
-        if tempDeployment then
+        if useBootstrapDrive then
             targetSlot=16
             if turtle.getItemCount(targetSlot)>0 then
                 state.phase="WAITING_INSTALLER"
@@ -2277,7 +2372,9 @@ local function runForeman(cfg)
                 return false
             end
         else
-            targetSlot=selfTargetSlot("disk_drive")
+            local reserved=state.bootstrapDrivePending and state.bootstrapDriveSlot or nil
+            targetSlot=selfTargetSlotExcluding("disk_drive",reserved)
+
             if not targetSlot then
                 state.phase="WAITING_INSTALLER"
                 saveState()
@@ -2304,7 +2401,7 @@ local function runForeman(cfg)
             end
         end
 
-        if tempDeployment then
+        if useBootstrapDrive then
             state.bootstrapDrivePending=true
             state.bootstrapDriveSlot=targetSlot
             saveState()
@@ -2383,81 +2480,81 @@ local function runForeman(cfg)
         return true
     end
 
-    local function commissionMiner(row,tempDeployment)
+    local function commissionMiner(row,useBootstrapDrive)
         if not validateCommissionPackage() then
             return false
         end
 
-        local tx = row
-        local tz = 1
+        local targetX=row
+        local stagingZ=0
 
-        if not tempDeployment then
-            if not placeDriveAndDiskAt(tx,tz) then
-                state.phase="WAITING_INSTALLER"
-                saveState()
-                sendState("Cannot place installer for Miner-" .. tostring(row))
-                return false
-            end
+        if not goTo(targetX,stagingZ) then
+            return false
+        end
 
-            if state.x ~= tx or state.z ~= tz-1 or state.dir ~= DIR_N then
-                state.phase="PLACEMENT_ERROR"
-                saveState()
-                sendState("Installer placement ended on wrong staging square for Miner-" .. tostring(row))
-                return false
-            end
-        else
-            tx = 1
-            tz = -1
-            if not goTo(1,-2) then
-                return false
-            end
-            faceDir(state,DIR_N)
+        faceDir(state,DIR_N)
+        saveState()
+
+        if useBootstrapDrive then
             if not turtle.up() then
                 return false
             end
+
+            if peripheral.getType("front")~="drive" then
+                turtle.down()
+                state.phase="PLACEMENT_ERROR"
+                saveState()
+                sendState("Bootstrap Disk Drive missing above Miner-01")
+                return false
+            end
+
             if not selfSelectKind("floppy") then
                 turtle.down()
-                state.phase="WAITING_INSTALLER"
-                saveState()
-                sendState("Foreman-1 floppy missing")
                 return false
             end
+
             if not turtle.drop(1) then
                 turtle.down()
-                state.phase="WAITING_INSTALLER"
-                saveState()
-                sendState("Cannot insert Foreman-1 floppy")
                 return false
             end
+
+            sleep(0.3)
+
+            if not disk.isPresent("front") then
+                turtle.down()
+                return false
+            end
+
             if not turtle.down() then
                 return false
             end
-
-            if state.x ~= 1 or state.z ~= -2 then
-                state.phase="PLACEMENT_ERROR"
-                saveState()
-                sendState("Foreman-1 bootstrap miner staging position is wrong")
+        else
+            if not placeDriveAndDiskAt(targetX,1) then
                 return false
             end
-            faceDir(state,DIR_N)
-            saveState()
         end
 
-        if not verifyMinerStaging(tx,tz) then
+        if state.x~=targetX or state.z~=stagingZ then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Wrong staging square for Miner-" .. tostring(row))
             return false
         end
+
+        faceDir(state,DIR_N)
+        saveState()
 
         if frontComputerId() then
             state.phase="PLACEMENT_ERROR"
             saveState()
-            sendState("Miner target already occupied at row " .. tostring(row))
+            sendState("Miner-" .. tostring(row) .. " target already occupied")
             return false
         end
 
         if not selfSelectKind("wireless_mining_turtle") then
             state.phase="WAITING_SUPPLIES"
             saveState()
-            sendState("Wireless Mining Turtle not found")
+            sendState("Wireless Mining Turtle missing")
             return false
         end
 
@@ -2470,46 +2567,15 @@ local function runForeman(cfg)
 
         sleep(0.2)
 
-        local expectedWorkerId = frontComputerId()
-        if not expectedWorkerId then
-            state.phase="PLACEMENT_ERROR"
-            saveState()
-            sendState("Placed Miner-" .. tostring(row) .. " but cannot verify it in front")
-            return false
-        end
-
-        local turnedOn = pcall(peripheral.call,"front","turnOn")
-        if not turnedOn then
-            state.phase="PLACEMENT_ERROR"
-            saveState()
-            sendState("Verified Miner-" .. tostring(row) .. " but cannot turn it on")
-            return false
-        end
-
-        state.phase="WAITING_MINER_BOOT"
-        saveState()
-        sendState("Waiting for verified Miner-" .. tostring(row) .. " ID " .. tostring(expectedWorkerId))
-
-        local workerId = nil
-        local deadline = now() + 30
-        local lastWake = now()
-
-        while now() < deadline and not workerId do
-            local sender = waitForBootstrap(expectedWorkerId,1)
-            if sender == expectedWorkerId then
-                workerId = sender
-            elseif now() - lastWake >= 3 then
-                pcall(peripheral.call,"front","turnOn")
-                lastWake = now()
-            end
-        end
-
+        local workerId=frontComputerId()
         if not workerId then
-            state.phase="WAITING_MINER_BOOT"
+            state.phase="PLACEMENT_ERROR"
             saveState()
-            sendState("Verified Miner-" .. tostring(row) .. " did not bootstrap")
+            sendState("Cannot identify Miner-" .. tostring(row))
             return false
         end
+
+        pcall(peripheral.call,"front","turnOn")
 
         local configurePacket={
             type="configure",
@@ -2517,37 +2583,38 @@ local function runForeman(cfg)
             role="miner",
             row=row,
             foremanId=id,
-            foremanNumber=number,
-            tempDeployment=tempDeployment
+            foremanNumber=number
         }
-        send(workerId,configurePacket)
 
         local installed=nil
-        local installDeadline=now()+20
-        local lastConfigure=now()
-        while now()<installDeadline and not installed do
-            local _,reply=waitInbox(function(sender,m)
-                return sender==workerId and type(m)=="table" and m.type=="install_ok" and m.row==row
-            end,1)
-            if reply then
-                installed=reply
-            elseif now()-lastConfigure>=2 then
+        local lastConfigure=0
+        local warning=now()
+
+        while not installed do
+            if now()-lastConfigure>=1 then
                 send(workerId,configurePacket)
+                pcall(peripheral.call,"front","turnOn")
                 lastConfigure=now()
             end
-        end
-        if not installed then
-            state.phase="WAITING_MINER_BOOT"
-            saveState()
-            sendState("Miner-" .. tostring(row) .. " did not confirm installation")
-            return false
+
+            local _,reply=waitInbox(function(sender,m)
+                return sender==workerId and type(m)=="table" and m.type=="install_ok" and m.row==row
+            end,0.5)
+
+            if reply then
+                installed=reply
+            elseif now()-warning>=10 then
+                state.phase="WAITING_MINER_BOOT"
+                saveState()
+                sendState("Waiting for Miner-" .. tostring(row) .. " installation")
+                warning=now()
+            end
         end
 
-        local stillFront = frontComputerId()
-        if stillFront ~= workerId then
+        if frontComputerId()~=workerId then
             state.phase="PLACEMENT_ERROR"
             saveState()
-            sendState("Miner-" .. tostring(row) .. " moved or wrong turtle is in front before fueling")
+            sendState("Miner-" .. tostring(row) .. " moved before fueling")
             return false
         end
 
@@ -2558,85 +2625,69 @@ local function runForeman(cfg)
             return false
         end
 
-        state.phase="WAITING_MINER_FUEL"
-        saveState()
-        sendState("Fueling Miner-" .. tostring(row))
-
-        local fueled = nil
-        local lastRefuelRequest = 0
-        local refuelWarning = now()
+        local fueled=nil
+        local lastFuel=0
+        warning=now()
 
         while not fueled do
-            if now() - lastRefuelRequest >= 1 then
+            if now()-lastFuel>=1 then
                 send(workerId,{type="commission_refuel"})
-                lastRefuelRequest = now()
+                lastFuel=now()
             end
 
-            local _,reply = waitInbox(function(sender,m)
+            local _,reply=waitInbox(function(sender,m)
                 return sender==workerId and type(m)=="table" and m.type=="commission_refueled" and m.row==row
             end,0.5)
 
             if reply then
-                if reply.fuel == "unlimited" or tonumber(reply.fuel) and tonumber(reply.fuel) > 0 then
-                    fueled = reply
-                else
-                    sendState("Miner-" .. tostring(row) .. " acknowledged fuel but reports zero")
-                end
-            elseif now() - refuelWarning >= 10 then
-                sendState("Still waiting for Miner-" .. tostring(row) .. " fuel acknowledgement")
-                refuelWarning = now()
+                fueled=reply
+            elseif now()-warning>=10 then
+                state.phase="WAITING_MINER_FUEL"
+                saveState()
+                sendState("Waiting for Miner-" .. tostring(row) .. " fuel confirmation")
+                warning=now()
             end
         end
 
-        local beforeRecovery = frontComputerId()
-        if beforeRecovery ~= workerId then
-            state.phase="PLACEMENT_ERROR"
-            saveState()
-            sendState("Miner-" .. tostring(row) .. " is not in expected position before installer recovery")
-            return false
-        end
-
-        state.phase="RECOVERING_INSTALLER"
-        saveState()
-        sendState("Recovering installer from Miner-" .. tostring(row))
-
-        if not recoverInstaller(workerId,tx,tz,tempDeployment) then
+        if not recoverInstaller(workerId,targetX,1,useBootstrapDrive) then
             state.phase="WAITING_INSTALLER"
             saveState()
-            sendState("Installer recovery failed")
+            sendState("Installer recovery failed for Miner-" .. tostring(row))
             return false
         end
 
-        state.phase="WAITING_MINER_DEPLOY"
-        saveState()
-        sendState("Deploying Miner-" .. tostring(row))
-
-        local deployed = nil
-        local lastDeployRequest = 0
-        local deployWarning = now()
+        local deployed=nil
+        local lastDeploy=0
+        warning=now()
 
         while not deployed do
-            if now() - lastDeployRequest >= 1 then
+            if now()-lastDeploy>=1 then
                 send(workerId,{type="deploy_miner"})
-                lastDeployRequest = now()
+                lastDeploy=now()
             end
 
-            local _,reply = waitInbox(function(sender,m)
+            local _,reply=waitInbox(function(sender,m)
                 return sender==workerId and type(m)=="table" and m.type=="miner_deployed" and m.row==row
             end,0.5)
 
             if reply then
-                deployed = reply
-            elseif now() - deployWarning >= 10 then
-                sendState("Still waiting for Miner-" .. tostring(row) .. " deployment")
-                deployWarning = now()
+                deployed=reply
+            elseif now()-warning>=10 then
+                state.phase="WAITING_MINER_DEPLOY"
+                saveState()
+                sendState("Waiting for Miner-" .. tostring(row) .. " ready confirmation")
+                warning=now()
             end
         end
 
         state.minerIds=state.minerIds or {}
         state.minerIds[row]=workerId
-        saveState()
 
+        if useBootstrapDrive then
+            state.firstInstallerRecovered=true
+        end
+
+        saveState()
         return true
     end
 
@@ -2766,18 +2817,18 @@ local function runForeman(cfg)
             return false
         end
 
-        local first = cfg.rowStart
-        local last = cfg.rowEnd
+        local first=cfg.rowStart
+        local last=cfg.rowEnd
+
         for row=first,last do
             if not state.commissionedRows[row] then
-                local temp = number==1 and row==1 and not state.firstInstallerRecovered
-                if not commissionMiner(row,temp) then
+                local useBootstrapDrive=number==1 and row==1 and not state.firstInstallerRecovered
+
+                if not commissionMiner(row,useBootstrapDrive) then
                     return false
                 end
-                state.commissionedRows[row] = true
-                if temp then
-                    state.firstInstallerRecovered=true
-                end
+
+                state.commissionedRows[row]=true
                 saveState()
             end
         end
@@ -2820,7 +2871,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v16 Foreman-1",
+                    "Mine v17 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
@@ -2888,34 +2939,84 @@ local function runForeman(cfg)
     end
 
     local function masterPlaceBootstrapInstaller()
-        if selfCount("disk_drive") < 1 or selfCount("floppy") < 1 then
+        if selfCount("disk_drive")<1 or selfCount("floppy")<1 then
             return false
         end
-        return placeDriveAndDiskAt(1,-1)
+
+        if not goTo(1,0) then
+            return false
+        end
+
+        faceDir(state,DIR_N)
+        saveState()
+
+        if not turtle.up() then
+            return false
+        end
+
+        if not selfSelectKind("disk_drive") then
+            turtle.down()
+            return false
+        end
+
+        if not turtle.place() then
+            turtle.down()
+            return false
+        end
+
+        if peripheral.getType("front")~="drive" then
+            turtle.down()
+            return false
+        end
+
+        if not selfSelectKind("floppy") then
+            turtle.down()
+            return false
+        end
+
+        if not turtle.drop(1) then
+            turtle.down()
+            return false
+        end
+
+        sleep(0.3)
+
+        if not disk.isPresent("front") then
+            turtle.down()
+            return false
+        end
+
+        if not turtle.down() then
+            return false
+        end
+
+        faceDir(state,DIR_N)
+        saveState()
+        return true
     end
 
     local function masterCommissionForeman(n)
-        if selfCount("narcissistic_wireless_turtle") < 1 then
-            return nil
-        end
-        if selfCount("disk_drive") < 1 then
-            return nil
-        end
-        if selfCount("floppy") < 1 then
-            return nil
-        end
-        if selfCount("wireless_mining_turtle") < 4 then
-            return nil
-        end
-        if selfCount("coal") < 64 then
+        if selfCount("narcissistic_wireless_turtle")<1
+            or selfCount("disk_drive")<1
+            or selfCount("floppy")<1
+            or selfCount("wireless_mining_turtle")<4
+            or selfCount("coal")<64 then
             return nil
         end
 
-        if not goTo(1,-2) then
+        if not goTo(1,0) then
             return nil
         end
 
         faceDir(state,DIR_N)
+        saveState()
+
+        if frontComputerId() then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Foreman bootstrap position occupied")
+            return nil
+        end
 
         if not selfSelectKind("narcissistic_wireless_turtle") then
             return nil
@@ -2927,38 +3028,17 @@ local function runForeman(cfg)
 
         sleep(0.2)
 
-        local expectedForemanId = frontComputerId()
-        if not expectedForemanId then
+        local newId=frontComputerId()
+        if not newId then
             state.phase="PLACEMENT_ERROR"
             saveState()
-            sendState("Placed Foreman-" .. tostring(n) .. " but cannot verify it in front")
+            sendState("Cannot identify Foreman-" .. tostring(n))
             return nil
         end
 
         pcall(peripheral.call,"front","turnOn")
 
-        local newId = nil
-        local deadline = now()+30
-        local lastWake = now()
-
-        while now()<deadline and not newId do
-            local sender = waitForBootstrap(expectedForemanId,1)
-            if sender == expectedForemanId then
-                newId=sender
-            elseif now()-lastWake>=3 then
-                pcall(peripheral.call,"front","turnOn")
-                lastWake=now()
-            end
-        end
-
-        if not newId then
-            state.phase="WAITING_SETUP"
-            saveState()
-            sendState("Verified Foreman-" .. tostring(n) .. " did not bootstrap")
-            return nil
-        end
-
-        local configurePacket={
+        local packet={
             type="configure",
             target=newId,
             role="foreman",
@@ -2967,27 +3047,23 @@ local function runForeman(cfg)
             rowEnd=n*4
         }
 
-        send(newId,configurePacket)
-
         local installed=nil
-        local installDeadline=now()+20
-        local lastConfigure=now()
+        local lastConfigure=0
 
-        while now()<installDeadline and not installed do
+        while not installed do
+            if now()-lastConfigure>=1 then
+                send(newId,packet)
+                pcall(peripheral.call,"front","turnOn")
+                lastConfigure=now()
+            end
+
             local _,reply=waitInbox(function(sender,m)
                 return sender==newId and type(m)=="table" and m.type=="install_ok" and m.number==n
-            end,1)
+            end,0.5)
 
             if reply then
                 installed=reply
-            elseif now()-lastConfigure>=2 then
-                send(newId,configurePacket)
-                lastConfigure=now()
             end
-        end
-
-        if not installed then
-            return nil
         end
 
         if not selfDropKind("coal",64,"front") then
@@ -3003,17 +3079,22 @@ local function runForeman(cfg)
             return nil
         end
 
-        send(newId,{
-            type="deploy_foreman",
-            target=newId
-        })
+        local deployed=nil
+        local lastDeploy=0
 
-        local _,deployed = waitInbox(function(sender,m)
-            return sender==newId and type(m)=="table" and m.type=="foreman_deployed" and m.number==n
-        end,120)
+        while not deployed do
+            if now()-lastDeploy>=1 then
+                send(newId,{type="deploy_foreman",target=newId})
+                lastDeploy=now()
+            end
 
-        if not deployed then
-            return nil
+            local _,reply=waitInbox(function(sender,m)
+                return sender==newId and type(m)=="table" and m.type=="foreman_deployed" and m.number==n
+            end,0.5)
+
+            if reply then
+                deployed=reply
+            end
         end
 
         return newId
@@ -3081,7 +3162,7 @@ local function runForeman(cfg)
         end
 
         if not state.bootstrapDiskPulled then
-            if not goTo(1,-2) then
+            if not goTo(1,0) then
                 state.phase="WAITING_SETUP"
                 saveState()
                 sendState("Cannot reach bootstrap drive")
@@ -3596,7 +3677,7 @@ end
 local function runMaster()
     local cfg = loadTable("node.cfg")
     if cfg and cfg.version ~= VERSION then
-        error("Old master state detected. Clear node.cfg and foreman state before using v4.")
+        error("Old master state detected. Clear node.cfg and foreman state before using v17.")
     end
     if not cfg then
         cfg = {
@@ -3640,9 +3721,13 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version ~= VERSION then
-        error("Old mine state detected. Clear node.cfg and old mine state before using v4.")
+        error("Old mine state detected. Clear node.cfg and old mine state before using v17.")
     elseif cfg.role == "miner" then
-        runMiner(cfg)
+        if cfg.commissioned then
+            runMiner(cfg)
+        else
+            runMinerCommissioning(cfg)
+        end
     elseif cfg.role == "foreman" then
         runForeman(cfg)
     else
