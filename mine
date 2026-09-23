@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 8
+local VERSION = 12
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v8"
+local PROTOCOL = "mine_v12"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -15,7 +15,6 @@ local MINER_SERVICE_RESERVE = 128
 local FOREMAN_FUEL_TARGET = 1200
 local FOREMAN_FUEL_LOW = 250
 local WORKER_SETUP_COAL = 15
-local STARTING_COAL_STACKS = 8
 
 local DIR_N = 0
 local DIR_E = 1
@@ -193,20 +192,6 @@ local function takeNamedFromFront(kind, count, targetSlot)
     end
 
     return movedTotal
-end
-
-local function countNamedFront(kind)
-    local items = scanInventory("front")
-    if not items then
-        return 0
-    end
-    local total = 0
-    for _, item in pairs(items) do
-        if matchesItem(item, kind) then
-            total = total + tonumber(item.qty or item.size or 1)
-        end
-    end
-    return total
 end
 
 local function getSelfInventory()
@@ -1591,6 +1576,32 @@ local function runForeman(cfg)
         return selfRefuelTo(FOREMAN_FUEL_TARGET)
     end
 
+    local function refuelAtFrontTo(target)
+        if turtle.getFuelLevel() == "unlimited" then
+            return true
+        end
+
+        while turtle.getFuelLevel() < target do
+            if selfCount("coal") == 0 then
+                if takeNamedIntoSelf("coal",1) < 1 then
+                    return false
+                end
+            end
+
+            local slot = selfFindSlot("coal")
+            if not slot then
+                return false
+            end
+
+            turtle.select(slot)
+            if not turtle.refuel(1) then
+                return false
+            end
+        end
+
+        return true
+    end
+
     local function goDockBypass(targetX)
         if state.x ~= -1 then
             if not goTo(-1,state.z) then
@@ -1610,29 +1621,7 @@ local function runForeman(cfg)
         return true
     end
 
-    local function atSupply()
-        requestDock()
-        if not goDockBypass(0) then
-            releaseDock()
-            return false
-        end
-        faceDir(state,DIR_N)
-        saveState()
-        return true
-    end
-
-    local function atFuel()
-        requestDock()
-        if not goDockBypass(-2) then
-            releaseDock()
-            return false
-        end
-        faceDir(state,DIR_N)
-        saveState()
-        return true
-    end
-
-    local function returnHome()
+    local function goPrivateHome()
         if state.x <= 0 then
             if state.x ~= -1 then
                 if not goTo(-1,state.z) then
@@ -1653,6 +1642,13 @@ local function runForeman(cfg)
                 return false
             end
         end
+        return true
+    end
+
+    local function returnHome()
+        if not goPrivateHome() then
+            return false
+        end
         faceDir(state,DIR_N)
         state.phase = "IDLE"
         saveState()
@@ -1660,21 +1656,109 @@ local function runForeman(cfg)
         return true
     end
 
+    local function prepareDockTrip()
+        if state.x ~= cfg.homeX or state.z ~= cfg.homeZ then
+            if not goPrivateHome() then
+                state.phase="BLOCKED"
+                saveState()
+                sendState("Cannot return to private lane before dock trip")
+                return false
+            end
+        end
+        return true
+    end
+
+    local function atSupply()
+        if not prepareDockTrip() then
+            return false
+        end
+
+        requestDock()
+
+        if not goDockBypass(0) then
+            state.phase="DOCK_BLOCKED"
+            saveState()
+            sendState("Supply dock path blocked; token retained")
+            return false
+        end
+
+        faceDir(state,DIR_N)
+        saveState()
+        return true
+    end
+
+    local function atFuel()
+        if not prepareDockTrip() then
+            return false
+        end
+
+        requestDock()
+
+        if not goDockBypass(-2) then
+            state.phase="DOCK_BLOCKED"
+            saveState()
+            sendState("Fuel dock path blocked; token retained")
+            return false
+        end
+
+        faceDir(state,DIR_N)
+        saveState()
+        return true
+    end
+
+    local function exitDockToLane()
+        if state.x ~= -1 then
+            if not goTo(-1,state.z) then
+                return false
+            end
+        end
+
+        if state.z ~= cfg.homeZ then
+            if not goTo(-1,cfg.homeZ) then
+                return false
+            end
+        end
+
+        if not goTo(cfg.homeX,cfg.homeZ) then
+            return false
+        end
+
+        releaseDock()
+        return true
+    end
+
+    local function exitDockHome()
+        if not exitDockToLane() then
+            return false
+        end
+        faceDir(state,DIR_N)
+        state.phase="IDLE"
+        saveState()
+        sendState("Waiting")
+        return true
+    end
+
     local function loadOwnFuel()
-        useOwnFuel()
-        if turtle.getFuelLevel() == "unlimited" or turtle.getFuelLevel() >= FOREMAN_FUEL_LOW then
+        if turtle.getFuelLevel() == "unlimited" then
             return true
         end
+
+        useOwnFuel()
+        if turtle.getFuelLevel() >= FOREMAN_FUEL_LOW then
+            return true
+        end
+
         if not atFuel() then
             return false
         end
-        turtle.select(1)
-        if turtle.getItemCount(1) == 0 then
-            takeNamedFromFront("coal",64,1)
+
+        local ok = refuelAtFrontTo(FOREMAN_FUEL_TARGET)
+
+        if not ok then
+            return false
         end
-        useOwnFuel()
-        releaseDock()
-        return turtle.getFuelLevel() == "unlimited" or turtle.getFuelLevel() > 0
+
+        return exitDockHome()
     end
 
     local function dumpCargo()
@@ -1691,15 +1775,16 @@ local function runForeman(cfg)
                         state.phase = "ERROR"
                         saveState()
                         sendState("Supply chest full")
-                        releaseDock()
+                        state.phase="DOCK_BLOCKED"
+                        saveState()
+                        sendState("Dock operation failed; token retained")
                         return false
                     end
                 end
             end
         end
 
-        releaseDock()
-        return true
+        return exitDockHome()
     end
 
     local function fetchMinerFuel()
@@ -1708,8 +1793,11 @@ local function runForeman(cfg)
         end
 
         local got = takeNamedIntoSelf("coal",64)
-        releaseDock()
-        return got > 0
+        if got <= 0 then
+            return false
+        end
+
+        return exitDockToLane()
     end
 
     local function networkLoop()
@@ -2034,7 +2122,7 @@ local function runForeman(cfg)
             return false
         end
 
-        if selfCount("coal") < WORKER_SETUP_COAL * remaining then
+        if state.commissionFuelLoaded and selfCount("coal") < WORKER_SETUP_COAL * remaining then
             state.phase="WAITING_SUPPLIES"
             saveState()
             sendState("Not enough miner commissioning fuel")
@@ -2196,7 +2284,9 @@ local function runForeman(cfg)
             end
             turtle.select(slot)
             if not turtle.drop() then
-                releaseDock()
+                state.phase="DOCK_BLOCKED"
+                saveState()
+                sendState("Cannot return Disk Drive; dock token retained")
                 return false
             end
         end
@@ -2208,13 +2298,14 @@ local function runForeman(cfg)
             end
             turtle.select(slot)
             if not turtle.drop() then
-                releaseDock()
+                state.phase="DOCK_BLOCKED"
+                saveState()
+                sendState("Cannot return floppy; dock token retained")
                 return false
             end
         end
 
-        releaseDock()
-        return true
+        return exitDockHome()
     end
 
     local function returnUnusedFuel()
@@ -2230,13 +2321,14 @@ local function runForeman(cfg)
             end
             turtle.select(slot)
             if not turtle.drop() then
-                releaseDock()
+                state.phase="DOCK_BLOCKED"
+                saveState()
+                sendState("Cannot return unused fuel; dock token retained")
                 return false
             end
         end
 
-        releaseDock()
-        return true
+        return exitDockHome()
     end
 
     local function loadCommissionFuel()
@@ -2249,35 +2341,11 @@ local function runForeman(cfg)
             end
         end
 
-        local needed = remaining * WORKER_SETUP_COAL
-        if needed <= 0 then
+        if remaining == 0 then
             return true
         end
 
-        if not useOwnFuel() then
-            if not atFuel() then
-                return false
-            end
-            local lastFuel = turtle.getFuelLevel()
-            while turtle.getFuelLevel() ~= "unlimited" and turtle.getFuelLevel() < FOREMAN_FUEL_TARGET do
-                if takeNamedIntoSelf("coal",1) < 1 then
-                    releaseDock()
-                    return false
-                end
-                if not useOwnFuel() and turtle.getFuelLevel() == lastFuel then
-                    releaseDock()
-                    return false
-                end
-                lastFuel = turtle.getFuelLevel()
-            end
-            releaseDock()
-            if not returnHome() then
-                return false
-            end
-        end
-
-        local have = selfCount("coal")
-        if have >= needed then
+        if state.commissionFuelLoaded then
             return true
         end
 
@@ -2285,22 +2353,27 @@ local function runForeman(cfg)
             return false
         end
 
-        local missing = needed - have
-        local pulled = takeNamedIntoSelf("coal",missing)
-        releaseDock()
-
-        if pulled < missing then
+        if not refuelAtFrontTo(FOREMAN_FUEL_TARGET) then
             state.phase="WAITING_FUEL"
             saveState()
-            sendState("Need more coal for assigned miners")
+            sendState("Fuel chest cannot satisfy foreman fuel target; dock token retained")
             return false
         end
 
-        if not returnHome() then
+        local needed = WORKER_SETUP_COAL * 4
+        local pulled = takeNamedIntoSelf("coal",needed)
+
+        if pulled < needed then
+            state.phase="WAITING_FUEL"
+            saveState()
+            sendState("Need 60 coal for assigned miners")
             return false
         end
 
-        return true
+        state.commissionFuelLoaded = true
+        saveState()
+
+        return exitDockHome()
     end
 
     local function commissionAssigned()
@@ -2337,6 +2410,7 @@ local function runForeman(cfg)
 
         returnUnusedFuel()
         returnInstaller()
+        state.commissionFuelLoaded=false
         state.setupDone=true
         state.phase="IDLE"
         saveState()
@@ -2372,7 +2446,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v8 Foreman-1",
+                    "Mine v12 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
@@ -2395,15 +2469,8 @@ local function runForeman(cfg)
 
         faceDir(state,DIR_N)
 
-        if not useOwnFuel() then
-            while turtle.getFuelLevel() ~= "unlimited" and turtle.getFuelLevel() < FOREMAN_FUEL_TARGET do
-                if takeNamedIntoSelf("coal",1) < 1 then
-                    return false
-                end
-                if not useOwnFuel() and selfCount("coal") == 0 then
-                    return false
-                end
-            end
+        if not refuelAtFrontTo(FOREMAN_FUEL_TARGET) then
+            return false
         end
 
         local needed = 192 - selfCount("coal")
@@ -2695,36 +2762,6 @@ local function runForeman(cfg)
         saveState()
         sendState("Four foremen online")
         return true
-    end
-
-    local function commandCommission(n)
-        local target = cfg.foremen and cfg.foremen[n]
-        if n == 1 then
-            return commissionAssigned()
-        end
-        if not target then
-            return false
-        end
-
-        local deadline = now() + 30
-        local lastSend = 0
-
-        while now() < deadline do
-            if now() - lastSend >= 2 then
-                send(target,{type="commission_start",number=n})
-                lastSend = now()
-            end
-
-            local _,done = waitInbox(function(sender,m)
-                return sender==target and type(m)=="table" and m.type=="commission_done" and m.number==n
-            end,1)
-
-            if done then
-                return true
-            end
-        end
-
-        return false
     end
 
     local function serviceRequest(req)
