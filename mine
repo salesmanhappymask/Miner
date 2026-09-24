@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 23
+local VERSION = 24
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v23"
+local PROTOCOL = "mine_v24"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -558,7 +558,7 @@ local function runMinerCommissioning(cfg)
         row=cfg.row,
         depth=0,
         pos=0,
-        dir=DIR_S,
+        dir=DIR_N,
         phase="COMMISSIONING",
         request=nil,
         requestSeq=0,
@@ -631,52 +631,22 @@ local function runMinerCommissioning(cfg)
         return nil
     end
 
-    local function calibratePlacedMinerNorth()
+    local function confirmPlacedMinerNorth()
         if state.orientationCalibrated then
-            return true
+            return state.dir==DIR_N
         end
 
-        if state.orientationTurnIntent then
+        if cfg.placedFacing~=DIR_N then
             state.recoveryLocked=true
-            state.recoveryReason="Server restart interrupted miner orientation turn"
+            state.recoveryReason="Miner placement did not declare north-facing orientation"
             state.phase="RECOVERY_LOCK"
             save()
             return false
         end
 
-        state.orientationTurns=tonumber(state.orientationTurns) or 0
-
-        while state.orientationTurns<2 do
-            local intent={
-                from=state.orientationTurns,
-                to=state.orientationTurns+1
-            }
-
-            state.orientationTurnIntent=intent
-            save()
-
-            if not turtle.turnRight() then
-                state.orientationTurnIntent=nil
-                state.recoveryLocked=true
-                state.recoveryReason="Unable to orient miner north"
-                state.phase="RECOVERY_LOCK"
-                save()
-                return false
-            end
-
-            state.orientationTurns=intent.to
-
-            if state.orientationTurns==1 then
-                state.dir=DIR_W
-            else
-                state.dir=DIR_N
-            end
-
-            state.orientationTurnIntent=nil
-            save()
-        end
-
         state.dir=DIR_N
+        state.orientationTurns=0
+        state.orientationTurnIntent=nil
         state.orientationCalibrated=true
         save()
         return true
@@ -787,7 +757,7 @@ local function runMinerCommissioning(cfg)
 
             elseif message.type=="deploy_miner" then
                 if not state.orientationCalibrated then
-                    if not calibratePlacedMinerNorth() then
+                    if not confirmPlacedMinerNorth() then
                         ack({
                             type="miner_deploy_blocked",
                             id=os.getComputerID(),
@@ -823,10 +793,11 @@ local function runMinerCommissioning(cfg)
                             save()
                         else
                             state.motionIntent=nil
+                            state.recoveryLocked=true
+                            state.recoveryReason="Miner-01 temporary north corridor is blocked"
+                            state.phase="RECOVERY_LOCK"
                             save()
-                            turtle.dig()
-                            turtle.attack()
-                            sleep(0.15)
+                            break
                         end
                     end
                     cfg.tempDeployment=false
@@ -859,7 +830,7 @@ local function runMinerCommissioning(cfg)
                     state.motionIntent=nil
                     state.turnIntent=nil
                     state.orientationTurnIntent=nil
-                    state.orientationTurns=2
+                    state.orientationTurns=0
                     state.originEstablished=true
                     state.orientationCalibrated=true
 
@@ -964,7 +935,7 @@ local function bootstrap()
             homeZ = -(configured.number + 1),
             startX = 1,
             startZ = -1,
-            startDir = DIR_N,
+            startDir = configured.startDir or DIR_N,
             master = false,
             session = configured.session
         }
@@ -1128,6 +1099,7 @@ local function bootstrap()
             foremanId=configured.foremanId,
             foremanNumber=configured.foremanNumber,
             tempDeployment=configured.tempDeployment and true or false,
+            placedFacing=configured.placedFacing,
             session=configured.session,
             commissioned=false
         }
@@ -1139,7 +1111,7 @@ local function bootstrap()
             row=cfg.row,
             depth=0,
             pos=0,
-            dir=DIR_S,
+            dir=DIR_N,
             phase="COMMISSIONING",
             request=nil,
             requestSeq=0,
@@ -3754,6 +3726,7 @@ local function runForeman(cfg)
             foremanId=id,
             foremanNumber=number,
             tempDeployment=temporary,
+            placedFacing=DIR_N,
             session=cfg.session
         }
 
@@ -4114,7 +4087,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v23 Foreman-1",
+                    "Mine v24 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
@@ -4310,6 +4283,13 @@ local function runForeman(cfg)
         faceTracked(DIR_N)
         saveState()
 
+        if state.dir~=DIR_N then
+            state.phase="PLACEMENT_ERROR"
+            saveState()
+            sendState("Master Foreman is not north-facing before subordinate placement")
+            return nil
+        end
+
         if frontComputerId() then
             state.phase="PLACEMENT_ERROR"
             saveState()
@@ -4344,6 +4324,7 @@ local function runForeman(cfg)
             number=n,
             rowStart=(n-1)*4+1,
             rowEnd=n*4,
+            startDir=DIR_N,
             session=cfg.session
         }
 
@@ -5077,7 +5058,7 @@ local function runMaster()
     local cfg=loadTable("node.cfg")
     local newMaster=false
     if cfg and cfg.version~=VERSION then
-        error("Old master state detected. Clear node.cfg and foreman state before using v23.")
+        error("Old master state detected. Clear node.cfg and foreman state before using v24.")
     end
     if not cfg then
         newMaster=true
@@ -5126,7 +5107,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version ~= VERSION then
-        error("Old mine state detected. Clear node.cfg and old mine state before using v23.")
+        error("Old mine state detected. Clear node.cfg and old mine state before using v24.")
     elseif cfg.role == "miner" then
         if cfg.commissioned then
             runMiner(cfg)
