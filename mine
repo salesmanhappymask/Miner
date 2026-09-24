@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 22
+local VERSION = 23
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v22"
+local PROTOCOL = "mine_v23"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -558,7 +558,7 @@ local function runMinerCommissioning(cfg)
         row=cfg.row,
         depth=0,
         pos=0,
-        dir=DIR_N,
+        dir=DIR_S,
         phase="COMMISSIONING",
         request=nil,
         requestSeq=0,
@@ -567,7 +567,10 @@ local function runMinerCommissioning(cfg)
         resumeDir=DIR_N,
         complete=false,
         installerHeld=false,
-        installerFuelSlot=nil
+        installerFuelSlot=nil,
+        orientationTurns=0,
+        orientationTurnIntent=nil,
+        orientationCalibrated=false
     }
 
     state.row=cfg.row
@@ -628,40 +631,55 @@ local function runMinerCommissioning(cfg)
         return nil
     end
 
-    local function frontComputerIdLocal()
-        local ok,id=pcall(peripheral.call,"front","getID")
-        if ok and type(id)=="number" then
-            return id
+    local function calibratePlacedMinerNorth()
+        if state.orientationCalibrated then
+            return true
         end
-        return nil
-    end
 
-    local function calibrateNorthFromForeman()
-        for i=1,4 do
-            if frontComputerIdLocal()==cfg.foremanId then
-                if not turtle.turnRight() then
-                    return false
-                end
-                if not turtle.turnRight() then
-                    return false
-                end
+        if state.orientationTurnIntent then
+            state.recoveryLocked=true
+            state.recoveryReason="Server restart interrupted miner orientation turn"
+            state.phase="RECOVERY_LOCK"
+            save()
+            return false
+        end
 
-                state.dir=DIR_N
-                state.orientationCalibrated=true
-                save()
-                return true
-            end
+        state.orientationTurns=tonumber(state.orientationTurns) or 0
+
+        while state.orientationTurns<2 do
+            local intent={
+                from=state.orientationTurns,
+                to=state.orientationTurns+1
+            }
+
+            state.orientationTurnIntent=intent
+            save()
 
             if not turtle.turnRight() then
+                state.orientationTurnIntent=nil
+                state.recoveryLocked=true
+                state.recoveryReason="Unable to orient miner north"
+                state.phase="RECOVERY_LOCK"
+                save()
                 return false
             end
+
+            state.orientationTurns=intent.to
+
+            if state.orientationTurns==1 then
+                state.dir=DIR_W
+            else
+                state.dir=DIR_N
+            end
+
+            state.orientationTurnIntent=nil
+            save()
         end
 
-        state.recoveryLocked=true
-        state.recoveryReason="Cannot locate assigned foreman for north calibration"
-        state.phase="RECOVERY_LOCK"
+        state.dir=DIR_N
+        state.orientationCalibrated=true
         save()
-        return false
+        return true
     end
 
     status("miner","COMMISSIONING",{
@@ -769,7 +787,7 @@ local function runMinerCommissioning(cfg)
 
             elseif message.type=="deploy_miner" then
                 if not state.orientationCalibrated then
-                    if not calibrateNorthFromForeman() then
+                    if not calibratePlacedMinerNorth() then
                         ack({
                             type="miner_deploy_blocked",
                             id=os.getComputerID(),
@@ -840,6 +858,8 @@ local function runMinerCommissioning(cfg)
                     state.installerFuelSlot=nil
                     state.motionIntent=nil
                     state.turnIntent=nil
+                    state.orientationTurnIntent=nil
+                    state.orientationTurns=2
                     state.originEstablished=true
                     state.orientationCalibrated=true
 
@@ -1119,7 +1139,7 @@ local function bootstrap()
             row=cfg.row,
             depth=0,
             pos=0,
-            dir=DIR_N,
+            dir=DIR_S,
             phase="COMMISSIONING",
             request=nil,
             requestSeq=0,
@@ -1129,6 +1149,8 @@ local function bootstrap()
             complete=false,
             installerHeld=false,
             installerFuelSlot=nil,
+            orientationTurns=0,
+            orientationTurnIntent=nil,
             orientationCalibrated=false,
             originEstablished=false,
             seq=0
@@ -3813,11 +3835,19 @@ local function runForeman(cfg)
             end
 
             local _,reply=waitInbox(function(sender,m)
-                return sender==workerId and type(m)=="table" and m.type=="miner_deployed" and m.row==row
+                return sender==workerId and type(m)=="table" and m.row==row and
+                    (m.type=="miner_deployed" or m.type=="miner_deploy_blocked")
             end,0.5)
 
             if reply then
-                deployed=reply
+                if reply.type=="miner_deployed" then
+                    deployed=reply
+                else
+                    state.phase="MINER_DEPLOY_BLOCKED"
+                    saveState()
+                    sendState("Miner-" .. tostring(row) .. " deployment blocked: " .. tostring(reply.reason))
+                    return false
+                end
             elseif now()-warning>=10 then
                 state.phase="WAITING_MINER_DEPLOY"
                 saveState()
@@ -4084,7 +4114,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v22 Foreman-1",
+                    "Mine v23 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
@@ -5047,7 +5077,7 @@ local function runMaster()
     local cfg=loadTable("node.cfg")
     local newMaster=false
     if cfg and cfg.version~=VERSION then
-        error("Old master state detected. Clear node.cfg and foreman state before using v22.")
+        error("Old master state detected. Clear node.cfg and foreman state before using v23.")
     end
     if not cfg then
         newMaster=true
@@ -5096,7 +5126,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version ~= VERSION then
-        error("Old mine state detected. Clear node.cfg and old mine state before using v22.")
+        error("Old mine state detected. Clear node.cfg and old mine state before using v23.")
     elseif cfg.role == "miner" then
         if cfg.commissioned then
             runMiner(cfg)
