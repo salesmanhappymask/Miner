@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 24
+local VERSION = 25
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v24"
+local PROTOCOL = "mine_v25"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -554,11 +554,13 @@ local function runMinerCommissioning(cfg)
         error("Wireless modem not found")
     end
 
+    local initialDir=(cfg.placementMode=="AIR") and DIR_S or DIR_N
+
     local state=loadTable("miner.tmp") or {
         row=cfg.row,
         depth=0,
         pos=0,
-        dir=DIR_N,
+        dir=initialDir,
         phase="COMMISSIONING",
         request=nil,
         requestSeq=0,
@@ -631,22 +633,72 @@ local function runMinerCommissioning(cfg)
         return nil
     end
 
-    local function confirmPlacedMinerNorth()
+    local function establishPlacedMinerNorth()
         if state.orientationCalibrated then
             return state.dir==DIR_N
         end
 
-        if cfg.placedFacing~=DIR_N then
+        if cfg.placementMode=="SUPPORTED" then
+            state.dir=DIR_N
+            state.orientationTurns=0
+            state.orientationTurnIntent=nil
+            state.orientationCalibrated=true
+            save()
+            return true
+        end
+
+        if cfg.placementMode~="AIR" then
             state.recoveryLocked=true
-            state.recoveryReason="Miner placement did not declare north-facing orientation"
+            state.recoveryReason="Unknown miner placement mode"
             state.phase="RECOVERY_LOCK"
             save()
             return false
         end
 
-        state.dir=DIR_N
-        state.orientationTurns=0
-        state.orientationTurnIntent=nil
+        state.dir=tonumber(state.dir) or DIR_S
+        state.orientationTurns=tonumber(state.orientationTurns) or 0
+
+        if state.orientationTurnIntent then
+            state.recoveryLocked=true
+            state.recoveryReason="Server restart interrupted air-placement orientation correction"
+            state.phase="RECOVERY_LOCK"
+            save()
+            return false
+        end
+
+        while state.orientationTurns<2 do
+            local intent={
+                from=state.dir,
+                to=(state.dir+1)%4,
+                turnNumber=state.orientationTurns+1
+            }
+
+            state.orientationTurnIntent=intent
+            save()
+
+            if not turtle.turnRight() then
+                state.orientationTurnIntent=nil
+                state.recoveryLocked=true
+                state.recoveryReason="Could not turn air-placed miner toward north"
+                state.phase="RECOVERY_LOCK"
+                save()
+                return false
+            end
+
+            state.dir=intent.to
+            state.orientationTurns=intent.turnNumber
+            state.orientationTurnIntent=nil
+            save()
+        end
+
+        if state.dir~=DIR_N then
+            state.recoveryLocked=true
+            state.recoveryReason="Air-placement orientation correction did not end north"
+            state.phase="RECOVERY_LOCK"
+            save()
+            return false
+        end
+
         state.orientationCalibrated=true
         save()
         return true
@@ -757,7 +809,7 @@ local function runMinerCommissioning(cfg)
 
             elseif message.type=="deploy_miner" then
                 if not state.orientationCalibrated then
-                    if not confirmPlacedMinerNorth() then
+                    if not establishPlacedMinerNorth() then
                         ack({
                             type="miner_deploy_blocked",
                             id=os.getComputerID(),
@@ -830,7 +882,6 @@ local function runMinerCommissioning(cfg)
                     state.motionIntent=nil
                     state.turnIntent=nil
                     state.orientationTurnIntent=nil
-                    state.orientationTurns=0
                     state.originEstablished=true
                     state.orientationCalibrated=true
 
@@ -935,7 +986,8 @@ local function bootstrap()
             homeZ = -(configured.number + 1),
             startX = 1,
             startZ = -1,
-            startDir = configured.startDir or DIR_N,
+            placementMode = configured.placementMode,
+            startDir = configured.startDir or DIR_S,
             master = false,
             session = configured.session
         }
@@ -965,6 +1017,7 @@ local function bootstrap()
                         phase="DEPLOYING",
                         number=cfg.number,
                         setupDone=false,
+                        orientationCalibrated=false,
                         session=cfg.session,
                         seq=0
                     }
@@ -1064,6 +1117,39 @@ local function bootstrap()
                         end
                     end
 
+                    if not state.orientationCalibrated then
+                        if cfg.placementMode=="AIR" then
+                            if state.dir~=DIR_S then
+                                state.phase="RECOVERY_LOCK"
+                                saveDeploy()
+                                error("Air-placed Foreman did not begin facing south")
+                            end
+
+                            if not deployTurn(true) then
+                                error("Cannot perform Foreman orientation correction")
+                            end
+                            if not deployTurn(true) then
+                                error("Cannot perform Foreman orientation correction")
+                            end
+
+                            if state.dir~=DIR_N then
+                                state.phase="RECOVERY_LOCK"
+                                saveDeploy()
+                                error("Foreman orientation correction did not end north")
+                            end
+                        elseif cfg.placementMode=="SUPPORTED" then
+                            state.dir=DIR_N
+                        else
+                            state.phase="RECOVERY_LOCK"
+                            saveDeploy()
+                            error("Unknown Foreman placement mode")
+                        end
+
+                        state.orientationCalibrated=true
+                        checkpointDeploy()
+                        saveDeploy()
+                    end
+
                     local laneX=cfg.number
                     deployFace(DIR_E)
                     while state.x<laneX do deployForward("east") end
@@ -1099,7 +1185,7 @@ local function bootstrap()
             foremanId=configured.foremanId,
             foremanNumber=configured.foremanNumber,
             tempDeployment=configured.tempDeployment and true or false,
-            placedFacing=configured.placedFacing,
+            placementMode=configured.placementMode,
             session=configured.session,
             commissioned=false
         }
@@ -1111,7 +1197,7 @@ local function bootstrap()
             row=cfg.row,
             depth=0,
             pos=0,
-            dir=DIR_N,
+            dir=(cfg.placementMode=="AIR") and DIR_S or DIR_N,
             phase="COMMISSIONING",
             request=nil,
             requestSeq=0,
@@ -3726,7 +3812,7 @@ local function runForeman(cfg)
             foremanId=id,
             foremanNumber=number,
             tempDeployment=temporary,
-            placedFacing=DIR_N,
+            placementMode=temporary and "SUPPORTED" or "AIR",
             session=cfg.session
         }
 
@@ -4087,7 +4173,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v24 Foreman-1",
+                    "Mine v25 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
@@ -4324,7 +4410,8 @@ local function runForeman(cfg)
             number=n,
             rowStart=(n-1)*4+1,
             rowEnd=n*4,
-            startDir=DIR_N,
+            placementMode="AIR",
+            startDir=DIR_S,
             session=cfg.session
         }
 
@@ -5058,7 +5145,7 @@ local function runMaster()
     local cfg=loadTable("node.cfg")
     local newMaster=false
     if cfg and cfg.version~=VERSION then
-        error("Old master state detected. Clear node.cfg and foreman state before using v24.")
+        error("Old master state detected. Clear node.cfg and foreman state before using v25.")
     end
     if not cfg then
         newMaster=true
@@ -5107,7 +5194,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version ~= VERSION then
-        error("Old mine state detected. Clear node.cfg and old mine state before using v24.")
+        error("Old mine state detected. Clear node.cfg and old mine state before using v25.")
     elseif cfg.role == "miner" then
         if cfg.commissioned then
             runMiner(cfg)
