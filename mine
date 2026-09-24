@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 26
+local VERSION = 27
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v26"
+local PROTOCOL = "mine_v27"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -808,6 +808,9 @@ local function runMinerCommissioning(cfg)
                 })
 
             elseif message.type=="deploy_miner" then
+                state.phase="ORIENTING_FOR_DEPLOYMENT"
+                save()
+
                 if not state.orientationCalibrated then
                     if not establishPlacedMinerNorth() then
                         ack({
@@ -827,6 +830,9 @@ local function runMinerCommissioning(cfg)
                         message="Deployment halted rather than guessing position"
                     })
                 elseif cfg.tempDeployment then
+                    state.phase="MOVING_TO_ORIGIN"
+                    save()
+
                     while state.tempSteps<2 do
                         local intent={
                             kind="temp_forward",
@@ -3551,14 +3557,22 @@ local function runForeman(cfg)
             end
         end
 
-        local beforeCount=selfCount("disk_drive")
         local targetSlot=nil
+        local slotCountBefore=nil
+        local driveCountBefore=nil
 
         if useBootstrapDrive then
             targetSlot=selfEmptySlot()
+            if targetSlot then
+                slotCountBefore=turtle.getItemCount(targetSlot)
+            end
         else
             local reserved=state.bootstrapDrivePending and state.bootstrapDriveSlot or nil
             targetSlot=selfTargetSlotExcluding("disk_drive",reserved)
+            if targetSlot then
+                slotCountBefore=turtle.getItemCount(targetSlot)
+                driveCountBefore=selfCount("disk_drive")
+            end
         end
 
         if not targetSlot then
@@ -3570,16 +3584,28 @@ local function runForeman(cfg)
 
         turtle.select(targetSlot)
         lastWarning=now()
+        local driveReceived=false
 
-        while selfCount("disk_drive")<=beforeCount do
+        while not driveReceived do
             turtle.suck(1)
+            sleep(0.1)
 
-            if selfCount("disk_drive")<=beforeCount then
+            local slotCountNow=turtle.getItemCount(targetSlot)
+
+            if slotCountNow>slotCountBefore then
+                driveReceived=true
+            elseif not useBootstrapDrive and driveCountBefore and selfCount("disk_drive")>driveCountBefore then
+                driveReceived=true
+            else
                 send(workerId,{type="return_installer"})
+
                 if now()-lastWarning>=10 then
-                    sendState("Still waiting to receive Disk Drive")
+                    state.phase="WAITING_FOR_DRIVE_TRANSFER"
+                    saveState()
+                    sendState("Disk Drive broken but transfer to Foreman not yet confirmed")
                     lastWarning=now()
                 end
+
                 sleep(0.25)
             end
         end
@@ -3589,6 +3615,9 @@ local function runForeman(cfg)
             state.bootstrapDriveSlot=targetSlot
             saveState()
         end
+
+        state.phase="CONFIRMING_INSTALLER_HANDOFF"
+        saveState()
 
         local returned=nil
         local lastTaken=0
@@ -3607,12 +3636,12 @@ local function runForeman(cfg)
             if reply then
                 returned=reply
             elseif now()-lastWarning>=10 then
-                sendState("Still waiting for installer handoff acknowledgement")
+                sendState("Disk Drive received; waiting for miner handoff acknowledgement")
                 lastWarning=now()
             end
         end
 
-        state.phase="MINER_STANDBY"
+        state.phase="INSTALLER_RECOVERED"
         saveState()
         return true
     end
@@ -4173,7 +4202,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v26 Foreman-1",
+                    "Mine v27 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
@@ -5145,7 +5174,7 @@ local function runMaster()
     local cfg=loadTable("node.cfg")
     local newMaster=false
     if cfg and cfg.version~=VERSION then
-        error("Old master state detected. Clear node.cfg and foreman state before using v26.")
+        error("Old master state detected. Clear node.cfg and foreman state before using v27.")
     end
     if not cfg then
         newMaster=true
@@ -5194,7 +5223,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version ~= VERSION then
-        error("Old mine state detected. Clear node.cfg and old mine state before using v26.")
+        error("Old mine state detected. Clear node.cfg and old mine state before using v27.")
     elseif cfg.role == "miner" then
         if cfg.commissioned then
             runMiner(cfg)
