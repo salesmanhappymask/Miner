@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 27
+local VERSION = 29
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v27"
+local PROTOCOL = "mine_v29"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -11,6 +11,7 @@ local PEER_INTERVAL = 2
 local MOVE_RESERVE_TIME = 0.2
 local MOVE_RETRY_LIMIT = 30
 local MINER_FUEL_TARGET = 1200
+local MINER_REFUEL_COAL = 16
 local MINER_SERVICE_RESERVE = 128
 local FOREMAN_FUEL_TARGET = 1200
 local COAL_FUEL_VALUE = 80
@@ -1852,18 +1853,38 @@ local function runMiner(cfg)
 
     local function dumpItems()
         if not faceForeman() then
-            return false
+            return false,false
         end
+
+        local movedAny=false
+
         for slot=2,16 do
             turtle.select(slot)
-            while turtle.getItemCount(slot) > 0 do
-                if not turtle.drop() then
-                    sleep(0.2)
+
+            if turtle.getItemCount(slot)>0 then
+                local before=turtle.getItemCount(slot)
+
+                if turtle.drop() then
+                    sleep(0.05)
+
+                    if turtle.getItemCount(slot)<before then
+                        movedAny=true
+                    end
                 end
             end
         end
+
+        local empty=true
+
+        for slot=2,16 do
+            if turtle.getItemCount(slot)>0 then
+                empty=false
+                break
+            end
+        end
+
         turtle.select(1)
-        return true
+        return true,empty,movedAny
     end
 
     local function refuelSelf()
@@ -1942,7 +1963,15 @@ local function runMiner(cfg)
             end
             if flags.dumpNow then
                 flags.dumpNow=false
-                if dumpItems() then
+                local adjacent,empty,movedAny=dumpItems()
+
+                if not adjacent then
+                    send(cfg.foremanId,{
+                        type="service_not_adjacent",
+                        row=state.row,
+                        requestId=state.request.id
+                    })
+                elseif empty then
                     send(cfg.foremanId,{
                         type="dump_complete",
                         row=state.row,
@@ -1950,9 +1979,10 @@ local function runMiner(cfg)
                     })
                 else
                     send(cfg.foremanId,{
-                        type="service_not_adjacent",
+                        type="dump_partial",
                         row=state.row,
-                        requestId=state.request.id
+                        requestId=state.request.id,
+                        movedAny=movedAny and true or false
                     })
                 end
             end
@@ -3091,17 +3121,205 @@ local function runForeman(cfg)
         return exitDockHome()
     end
 
-    local function fetchMinerFuel()
+    local function fetchMinerFuel(amount)
+        amount=amount or MINER_REFUEL_COAL
+
         if not atFuel() then
             return false
         end
 
-        local got = takeNamedIntoSelf("coal",64)
-        if got <= 0 then
+        if turtle.getItemCount(1)>0 then
+            local item=selfItem(1)
+            if not item or not matchesItem(item,"coal") then
+                state.phase="SERVICE_PREP_ERROR"
+                saveState()
+                sendState("Slot 1 must be empty or coal before miner refuel")
+                return false
+            end
+        end
+
+        local remaining=amount
+
+        while remaining>0 do
+            turtle.select(1)
+            local before=turtle.getItemCount(1)
+            local room=64-before
+
+            if room<=0 then
+                break
+            end
+
+            local wanted=math.min(remaining,room)
+            local got=takeNamedFromFront("coal",wanted,1)
+
+            if got<=0 then
+                break
+            end
+
+            local after=turtle.getItemCount(1)
+            local actual=after-before
+
+            if actual<=0 then
+                break
+            end
+
+            remaining=remaining-actual
+        end
+
+        if remaining>0 then
+            state.phase="WAITING_FUEL"
+            saveState()
+            sendState("Fuel chest cannot provide miner refuel packet")
             return false
         end
 
         return exitDockToLane()
+    end
+
+    local function returnRuntimeNonFuel()
+        local needSupply=false
+
+        for slot=1,16 do
+            local item=selfItem(slot)
+            if item and not matchesItem(item,"coal") then
+                needSupply=true
+                break
+            end
+        end
+
+        if not needSupply then
+            return true
+        end
+
+        if not atSupply() then
+            return false
+        end
+
+        for slot=1,16 do
+            local item=selfItem(slot)
+
+            if item and not matchesItem(item,"coal") then
+                turtle.select(slot)
+
+                while turtle.getItemCount(slot)>0 do
+                    if not turtle.drop() then
+                        state.phase="SERVICE_PREP_ERROR"
+                        saveState()
+                        sendState("Cannot clear non-fuel runtime inventory")
+                        return false
+                    end
+                end
+            end
+        end
+
+        if number==1 then
+            state.bootstrapDrivePending=false
+            state.bootstrapDriveSlot=nil
+            saveState()
+        end
+
+        return exitDockHome()
+    end
+
+    local function returnRuntimeFuel()
+        if selfCount("coal")<=0 then
+            return true
+        end
+
+        if not atFuel() then
+            return false
+        end
+
+        for slot=1,16 do
+            local item=selfItem(slot)
+
+            if item and matchesItem(item,"coal") then
+                turtle.select(slot)
+
+                while turtle.getItemCount(slot)>0 do
+                    if not turtle.drop() then
+                        state.phase="SERVICE_PREP_ERROR"
+                        saveState()
+                        sendState("Cannot clear runtime coal")
+                        return false
+                    end
+                end
+            end
+        end
+
+        return exitDockHome()
+    end
+
+    local function prepareRuntimeService(service)
+        state.phase="PREPARING_SERVICE"
+        saveState()
+
+        if service=="REFUEL" or service=="BOTH" then
+            if selfCount("coal")<MINER_REFUEL_COAL then
+                if not atFuel() then
+                    return false
+                end
+
+                local needed=MINER_REFUEL_COAL-selfCount("coal")
+                local got=takeNamedIntoSelf("coal",needed)
+
+                if got<needed then
+                    state.phase="WAITING_FUEL"
+                    saveState()
+                    sendState("Fuel chest cannot provide miner refuel packet")
+                    return false
+                end
+
+                if not exitDockToLane() then
+                    return false
+                end
+            end
+        end
+
+        return true
+    end
+
+    local function dropMinerFuel(amount)
+        amount=amount or MINER_REFUEL_COAL
+        local remaining=amount
+        local movedTotal=0
+
+        for slot=1,16 do
+            local item=selfItem(slot)
+
+            if item and matchesItem(item,"coal") and remaining>0 then
+                turtle.select(slot)
+
+                local before=turtle.getItemCount(slot)
+                local requested=math.min(remaining,before)
+
+                if requested>0 and turtle.drop(requested) then
+                    sleep(0.05)
+
+                    local after=turtle.getItemCount(slot)
+                    local moved=before-after
+
+                    if moved>0 then
+                        movedTotal=movedTotal+moved
+                        remaining=remaining-moved
+                    end
+                end
+            end
+        end
+
+        return movedTotal>0,movedTotal
+    end
+
+    local function countRuntimeFreeSlots()
+        local free=0
+
+        for slot=1,16 do
+            if turtle.getItemCount(slot)==0 then
+                free=free+1
+            end
+        end
+
+        return free
     end
 
     local function networkLoop()
@@ -4202,7 +4420,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v27 Foreman-1",
+                    "Mine v29 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
@@ -4673,10 +4891,8 @@ local function runForeman(cfg)
             return false
         end
 
-        if req.service == "REFUEL" or req.service == "BOTH" then
-            if not fetchMinerFuel() then
-                return false
-            end
+        if not prepareRuntimeService(req.service) then
+            return false
         end
 
         if not goTo(req.row,0) then
@@ -4686,36 +4902,95 @@ local function runForeman(cfg)
         saveState()
 
         if req.service == "REFUEL" or req.service == "BOTH" then
-            if not selfDropKind("coal",64) then
+            local transferred,moved=dropMinerFuel(MINER_REFUEL_COAL)
+
+            if not transferred then
+                state.phase="SERVICE_TRANSFER_ERROR"
+                saveState()
+                sendState("Miner-" .. tostring(req.row) .. " would not accept refuel coal")
                 return false
             end
+
             send(req.minerId,{
                 type="refuel_now",
-                requestId=req.requestId
+                requestId=req.requestId,
+                coalTransferred=moved
             })
+
             local _,reply = waitInbox(function(sender,m)
                 return sender==req.minerId and type(m)=="table" and m.type=="refuel_complete" and m.requestId==req.requestId
             end,20)
+
             if not reply then
+                state.phase="SERVICE_TIMEOUT"
+                saveState()
+                sendState("Miner-" .. tostring(req.row) .. " did not confirm refuel")
                 return false
             end
         end
 
         if req.service == "DUMP" or req.service == "BOTH" then
-            for slot=2,16 do
-                if turtle.getItemCount(slot)>0 then
+            local dumpFinished=false
+
+            while not dumpFinished do
+                if countRuntimeFreeSlots()<=0 then
+                    state.phase="SERVICE_UNLOAD_TRIP"
+                    saveState()
+                    sendState("Foreman full; unloading before continuing Miner-" .. tostring(req.row))
+
+                    if not dumpCargo() then
+                        return false
+                    end
+
+                    if not goTo(req.row,0) then
+                        return false
+                    end
+
+                    faceTracked(DIR_N)
+                    saveState()
+                end
+
+                send(req.minerId,{
+                    type="dump_now",
+                    requestId=req.requestId
+                })
+
+                local _,reply = waitInbox(function(sender,m)
+                    return sender==req.minerId and type(m)=="table" and
+                        (m.type=="dump_complete" or m.type=="dump_partial" or m.type=="service_not_adjacent") and
+                        m.requestId==req.requestId
+                end,25)
+
+                if not reply then
+                    state.phase="SERVICE_TIMEOUT"
+                    saveState()
+                    sendState("Miner-" .. tostring(req.row) .. " did not answer dump request")
                     return false
                 end
-            end
-            send(req.minerId,{
-                type="dump_now",
-                requestId=req.requestId
-            })
-            local _,reply = waitInbox(function(sender,m)
-                return sender==req.minerId and type(m)=="table" and m.type=="dump_complete" and m.requestId==req.requestId
-            end,25)
-            if not reply then
-                return false
+
+                if reply.type=="service_not_adjacent" then
+                    state.phase="SERVICE_ALIGNMENT_ERROR"
+                    saveState()
+                    sendState("Miner-" .. tostring(req.row) .. " cannot see assigned Foreman")
+                    return false
+                elseif reply.type=="dump_complete" then
+                    dumpFinished=true
+                else
+                    state.phase="SERVICE_UNLOAD_TRIP"
+                    saveState()
+                    sendState("Miner-" .. tostring(req.row) .. " has more cargo; unloading and returning")
+
+                    if not dumpCargo() then
+                        return false
+                    end
+
+                    if not goTo(req.row,0) then
+                        return false
+                    end
+
+                    faceTracked(DIR_N)
+                    saveState()
+                end
             end
         end
 
@@ -4725,6 +5000,11 @@ local function runForeman(cfg)
         })
 
         if req.service == "DUMP" or req.service == "BOTH" then
+            if selfCount("coal")>0 then
+                state.phase="RETURNING_AFTER_SERVICE"
+                saveState()
+            end
+
             if not dumpCargo() then
                 return false
             end
@@ -5174,7 +5454,7 @@ local function runMaster()
     local cfg=loadTable("node.cfg")
     local newMaster=false
     if cfg and cfg.version~=VERSION then
-        error("Old master state detected. Clear node.cfg and foreman state before using v27.")
+        error("Old master state detected. Clear node.cfg and foreman state before using v29.")
     end
     if not cfg then
         newMaster=true
@@ -5223,7 +5503,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version ~= VERSION then
-        error("Old mine state detected. Clear node.cfg and old mine state before using v27.")
+        error("Old mine state detected. Clear node.cfg and old mine state before using v29.")
     elseif cfg.role == "miner" then
         if cfg.commissioned then
             runMiner(cfg)
