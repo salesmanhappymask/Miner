@@ -1,8 +1,8 @@
 local MASTER_FOREMAN = 0
 
-local VERSION = 25
+local VERSION = 26
 local MONITOR_ID = 34
-local PROTOCOL = "mine_v25"
+local PROTOCOL = "mine_v26"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -3812,7 +3812,7 @@ local function runForeman(cfg)
             foremanId=id,
             foremanNumber=number,
             tempDeployment=temporary,
-            placementMode=temporary and "SUPPORTED" or "AIR",
+            placementMode="AIR",
             session=cfg.session
         }
 
@@ -4173,7 +4173,7 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
                 clearAndPrint({
-                    "Mine v25 Foreman-1",
+                    "Mine v26 Foreman-1",
                     "",
                     "Seed fuel required.",
                     "Place coal or charcoal",
@@ -5145,7 +5145,7 @@ local function runMaster()
     local cfg=loadTable("node.cfg")
     local newMaster=false
     if cfg and cfg.version~=VERSION then
-        error("Old master state detected. Clear node.cfg and foreman state before using v25.")
+        error("Old master state detected. Clear node.cfg and foreman state before using v26.")
     end
     if not cfg then
         newMaster=true
@@ -5194,7 +5194,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version ~= VERSION then
-        error("Old mine state detected. Clear node.cfg and old mine state before using v25.")
+        error("Old mine state detected. Clear node.cfg and old mine state before using v26.")
     elseif cfg.role == "miner" then
         if cfg.commissioned then
             runMiner(cfg)
