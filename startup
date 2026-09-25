@@ -1,8 +1,8 @@
 local REGIONAL_MANAGER = 0
 local MASTER_FOREMAN = 0
 
-local VERSION = 32
-local PROTOCOL = "miner_swarm_v32"
+local VERSION = 33
+local PROTOCOL = "miner_swarm_v33"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -1351,6 +1351,12 @@ local function bootstrap()
                     while state.x>cfg.homeX do deployForward("west") end
                     deployFace(DIR_N)
 
+                    if state.x~=cfg.homeX or state.z~=cfg.homeZ or state.y~=0 or state.dir~=DIR_N then
+                        state.phase="RECOVERY_LOCK"
+                        saveDeploy()
+                        error("Foreman deployment ended at incorrect home coordinate")
+                    end
+
                     state.phase="WAITING_SETUP"
                     state.setupDone=false
                     checkpointDeploy()
@@ -1521,15 +1527,15 @@ local function runMiner(cfg)
     end
 
     do
-        local managerState,managerSeq=requestPoseBackup("miner",5,cfg.session)
-        local localSeq=tonumber(state.seq) or 0
-        local remoteSeq=tonumber(managerSeq or (managerState and managerState.seq) or -1) or -1
+        local managerState=requestPoseBackup("miner",5,cfg.session)
 
-        if managerState and snapshotHasExactPose(managerState) and remoteSeq>=localSeq then
+        if not poseValid() and managerState and snapshotHasExactPose(managerState) then
             applySnapshot(managerState)
             state.motionIntent=nil
             state.turnIntent=nil
             saveTable(path,state)
+        elseif poseValid() and not state.motionIntent and not state.turnIntent then
+            checkpointPose("miner",state.seq,snapshot(),cfg.session)
         end
     end
 
@@ -2693,18 +2699,21 @@ local function runForeman(cfg)
 
     do
         local managerState,managerSeq=requestPoseBackup("foreman",5,cfg.session)
-        local localSeq=tonumber(state.seq) or 0
-        local remoteSeq=tonumber(managerSeq or (managerState and managerState.seq) or -1) or -1
+        local managerPoseValid=managerState and
+            type(managerState.x)=="number" and type(managerState.y)=="number" and
+            type(managerState.z)=="number" and type(managerState.dir)=="number"
 
-        if managerState and type(managerState.x)=="number" and type(managerState.y)=="number" and
-            type(managerState.z)=="number" and type(managerState.dir)=="number" and remoteSeq>=localSeq then
+        if not foremanPoseValid() and managerPoseValid then
             state=managerState
             state.motionIntent=nil
             state.verticalIntent=nil
             state.turnIntent=nil
             state.session=cfg.session
-            state.seq=remoteSeq
+            state.seq=tonumber(managerSeq or managerState.seq or state.seq) or 0
             saveTable(statePath,state)
+        elseif foremanPoseValid() and not state.motionIntent and
+            not state.verticalIntent and not state.turnIntent then
+            checkpointPose("foreman",state.seq,state,cfg.session)
         end
     end
 
@@ -3357,6 +3366,19 @@ local function runForeman(cfg)
         return true
     end
 
+    local function verifyDockInventory(kind)
+        local inv=wrapInventory("front")
+
+        if inv then
+            return true
+        end
+
+        state.phase="NAVIGATION_ERROR"
+        saveState()
+        sendState("Expected " .. tostring(kind) .. " chest directly north at dock coordinate")
+        return false
+    end
+
     local function goPrivateHome()
         if state.x <= 0 then
             if state.x ~= -1 then
@@ -3385,9 +3407,26 @@ local function runForeman(cfg)
         if not goPrivateHome() then
             return false
         end
+
+        if state.x~=cfg.homeX or state.z~=cfg.homeZ or state.y~=0 then
+            state.phase="NAVIGATION_ERROR"
+            saveState()
+            sendState("Foreman home coordinate mismatch")
+            return false
+        end
+
         faceTracked(DIR_N)
+
+        if state.dir~=DIR_N then
+            state.phase="NAVIGATION_ERROR"
+            saveState()
+            sendState("Foreman could not establish north at home")
+            return false
+        end
+
         state.phase = "IDLE"
         saveState()
+        checkpointForeman()
         sendState("Waiting")
         return true
     end
@@ -3420,6 +3459,18 @@ local function runForeman(cfg)
 
         faceTracked(DIR_N)
         saveState()
+
+        if state.x~=0 or state.z~=0 or state.y~=0 then
+            state.phase="NAVIGATION_ERROR"
+            saveState()
+            sendState("Supply dock coordinate mismatch")
+            return false
+        end
+
+        if not verifyDockInventory("supply") then
+            return false
+        end
+
         return true
     end
 
@@ -3439,6 +3490,18 @@ local function runForeman(cfg)
 
         faceTracked(DIR_N)
         saveState()
+
+        if state.x~=-2 or state.z~=0 or state.y~=0 then
+            state.phase="NAVIGATION_ERROR"
+            saveState()
+            sendState("Fuel dock coordinate mismatch")
+            return false
+        end
+
+        if not verifyDockInventory("fuel") then
+            return false
+        end
+
         return true
     end
 
@@ -5470,6 +5533,13 @@ local function runForeman(cfg)
             return false
         end
 
+        if state.x~=req.row or state.z~=0 or state.y~=0 then
+            state.phase="NAVIGATION_ERROR"
+            saveState()
+            sendState("Service route ended at wrong coordinate for Miner-" .. tostring(req.row))
+            return false
+        end
+
         if not verifyServiceMiner(req) then
             return false
         end
@@ -5650,10 +5720,59 @@ local function runForeman(cfg)
         checkpointForeman()
 
         if state.phase=="DEPLOYING" then
-            if not goTo(cfg.homeX,cfg.homeZ) then
+            local laneX=cfg.number
+            local deploymentValid=
+                state.y==0 and
+                state.x>=cfg.homeX and state.x<=laneX and
+                state.z>=cfg.homeZ and state.z<=cfg.startZ
+
+            if not deploymentValid then
                 state.phase="RECOVERY_LOCK"
                 state.recoveryLocked=true
-                state.recoveryReason="Could not resume interrupted foreman deployment"
+                state.recoveryReason="Interrupted Foreman deployment pose is outside its deployment corridor"
+                saveState()
+                checkpointForeman()
+                while true do
+                    sendState(state.recoveryReason)
+                    sleep(5)
+                end
+            end
+
+            if state.z>cfg.homeZ then
+                while state.x<laneX do
+                    if not moveStep(DIR_E) then
+                        state.recoveryLocked=true
+                        state.recoveryReason="Could not regain Foreman deployment lane"
+                        break
+                    end
+                end
+
+                if not state.recoveryLocked then
+                    while state.z>cfg.homeZ do
+                        if not moveStep(DIR_S) then
+                            state.recoveryLocked=true
+                            state.recoveryReason="Could not resume Foreman southbound deployment"
+                            break
+                        end
+                    end
+                end
+            end
+
+            if not state.recoveryLocked and state.z==cfg.homeZ then
+                while state.x>cfg.homeX do
+                    if not moveStep(DIR_W) then
+                        state.recoveryLocked=true
+                        state.recoveryReason="Could not finish Foreman westbound deployment"
+                        break
+                    end
+                end
+            end
+
+            if state.recoveryLocked or
+                state.x~=cfg.homeX or state.z~=cfg.homeZ or state.y~=0 then
+                state.phase="RECOVERY_LOCK"
+                state.recoveryLocked=true
+                state.recoveryReason=state.recoveryReason or "Could not resume interrupted Foreman deployment"
                 saveState()
                 checkpointForeman()
                 while true do
@@ -6952,7 +7071,7 @@ local function runMaster()
     local newMaster=false
 
     if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v32.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v33.")
     end
 
     if not cfg then
@@ -7046,7 +7165,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version~=VERSION then
-        error("Old node state detected. Clear node.cfg and old state before using v32.")
+        error("Old node state detected. Clear node.cfg and old state before using v33.")
     elseif cfg.role=="miner" then
         setRegionalManager(cfg.managerId)
         if cfg.commissioned then
