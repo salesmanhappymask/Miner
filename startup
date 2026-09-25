@@ -1,8 +1,8 @@
 local REGIONAL_MANAGER = 0
 local MASTER_FOREMAN = 0
 
-local VERSION = 42
-local PROTOCOL = "miner_swarm_v42"
+local VERSION = 44
+local PROTOCOL = "miner_swarm_v44"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local NAVIGATOR_COUNT = 4
@@ -43,6 +43,10 @@ local function getRegionalManager()
 end
 
 local function detectPlacement()
+    if not turtle then
+        return true,"SUPPORTED",DIR_N
+    end
+
     local supported=turtle.detectDown() and true or false
     return supported,supported and "SUPPORTED" or "AIR",supported and DIR_N or DIR_S
 end
@@ -4995,7 +4999,8 @@ local function runForeman(cfg)
             return false
         end
 
-        if selfCount("computer")>=4 and selfCount("wireless_modem")>=4 then
+        if selfCount("computer")>=4 and selfCount("wireless_modem")>=4 and
+            selfCount("disk_drive")>=4 then
             return true
         end
 
@@ -5019,6 +5024,14 @@ local function runForeman(cfg)
             return false
         end
 
+        local needDrives=4-selfCount("disk_drive")
+        if needDrives>0 and takeNamedIntoSelf("disk_drive",needDrives)<needDrives then
+            state.phase="WAITING_NAVIGATOR_SUPPLIES"
+            saveState()
+            sendState("Need 4 additional Disk Drives in the supply chest")
+            return false
+        end
+
         return exitDockHome()
     end
 
@@ -5030,10 +5043,6 @@ local function runForeman(cfg)
         local sz=site.z-1
 
         if not navigatorGoTo(sx,site.y,sz) then
-            return false
-        end
-
-        if not faceTracked(DIR_N) then
             return false
         end
 
@@ -5063,6 +5072,10 @@ local function runForeman(cfg)
         end
 
         if not navigatorVertical(site.y) then
+            return false
+        end
+
+        if not faceTracked(DIR_N) then
             return false
         end
 
@@ -5100,10 +5113,6 @@ local function runForeman(cfg)
         sleep(0.2)
 
         if not navigatorVertical(site.y) then
-            return false
-        end
-
-        if not faceTracked(DIR_N) then
             return false
         end
 
@@ -5145,38 +5154,6 @@ local function runForeman(cfg)
             return false
         end
 
-        if not navigatorVertical(site.y-1) then
-            return false
-        end
-
-        if peripheral.getType("front")~="drive" then
-            return false
-        end
-
-        local floppySlot=selfTargetSlot("floppy")
-        if not floppySlot then
-            return false
-        end
-
-        turtle.select(floppySlot)
-        if not turtle.suck(1) then
-            return false
-        end
-
-        local driveSlot=selfTargetSlot("disk_drive")
-        if not driveSlot then
-            return false
-        end
-
-        turtle.select(driveSlot)
-        if not turtle.dig() then
-            return false
-        end
-
-        if not navigatorVertical(site.y) then
-            return false
-        end
-
         return true
     end
 
@@ -5189,8 +5166,12 @@ local function runForeman(cfg)
         saveState()
         sendState("Preparing GPS Navigators")
 
-        if not loadNavigatorSupplies() then
-            return false
+        if not state.navigatorSuppliesLoaded then
+            if not loadNavigatorSupplies() then
+                return false
+            end
+            state.navigatorSuppliesLoaded=true
+            saveState()
         end
 
         local order={1,2,4,3}
@@ -5231,6 +5212,7 @@ local function runForeman(cfg)
 
         state.navigatorSetupActive=false
         state.navigatorSetupDone=true
+        state.navigatorSuppliesLoaded=nil
         state.phase="IDLE"
         saveState()
         checkpointForeman()
@@ -7747,7 +7729,7 @@ local function runMaster()
     local newMaster=false
 
     if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v42.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v44.")
     end
 
     if not cfg then
@@ -7866,7 +7848,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version~=VERSION then
-        error("Old node state detected. Clear node.cfg and old state before using v42.")
+        error("Old node state detected. Clear node.cfg and old state before using v44.")
     elseif cfg.role=="miner" then
         setRegionalManager(cfg.managerId)
         if cfg.commissioned then
