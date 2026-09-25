@@ -1,12 +1,12 @@
 local REGIONAL_MANAGER = 0
 local MASTER_FOREMAN = 0
 
-local VERSION = 37
-local PROTOCOL = "miner_swarm_v37"
+local VERSION = 38
+local PROTOCOL = "miner_swarm_v38"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
-local STATUS_INTERVAL = 5
+local STATUS_INTERVAL = 10
 local PEER_INTERVAL = 2
 local MOVE_RESERVE_TIME = 0.2
 local MOVE_RETRY_LIMIT = 30
@@ -1738,6 +1738,19 @@ local function runMiner(cfg)
                                 })
                                 sleep(0.1)
                             end
+                        elseif message.type == "service_probe" and state.request and
+                            message.requestId == state.request.id and state.phase=="WAITING_SERVICE" then
+                            if prepareForForemanService() then
+                                send(cfg.foremanId,{
+                                    type="service_probe_ack",
+                                    requestId=state.request.id,
+                                    row=state.row,
+                                    x=state.x,
+                                    y=state.y,
+                                    z=state.z,
+                                    dir=state.dir
+                                })
+                            end
                         elseif message.type == "dump_now" and state.request and message.requestId == state.request.id then
                             flags.dumpNow = true
                         elseif message.type == "refuel_now" and state.request and message.requestId == state.request.id then
@@ -1804,7 +1817,7 @@ local function runMiner(cfg)
         state.depth=-state.y
         state.pos=state.z
 
-        if critical or state.seq%5==0 then
+        if critical or state.seq%10==0 then
             checkpoint()
         end
 
@@ -2095,26 +2108,16 @@ local function runMiner(cfg)
         return true
     end
 
-    local function faceForeman()
-        if not face(DIR_S) then
+    local function prepareForForemanService()
+        if state.x~=cfg.row or state.y~=0 or state.z~=0 then
             return false
         end
 
-        for i=1,20 do
-            local ok,frontId=pcall(peripheral.call,"front","getID")
-
-            if ok and tonumber(frontId)==tonumber(cfg.foremanId) then
-                return true
-            end
-
-            sleep(0.1)
-        end
-
-        return false
+        return face(DIR_S)
     end
 
     local function dumpItems()
-        if not faceForeman() then
+        if not prepareForForemanService() then
             return false,false
         end
 
@@ -2946,7 +2949,7 @@ local function runForeman(cfg)
             if sender then
                 return sender,message
             end
-            sleep(0.05)
+            sleep(0.1)
         end
         return nil,nil
     end
@@ -3884,19 +3887,28 @@ local function runForeman(cfg)
             return false
         end
 
-        for i=1,20 do
-            local seen=frontComputerId()
+        for attempt=1,3 do
+            send(req.minerId,{
+                type="service_probe",
+                requestId=req.requestId,
+                row=req.row
+            })
 
-            if seen==tonumber(req.minerId) then
+            local _,reply=waitInbox(function(sender,m)
+                return sender==req.minerId and type(m)=="table" and
+                    m.type=="service_probe_ack" and m.requestId==req.requestId
+            end,1)
+
+            if reply and tonumber(reply.row)==tonumber(req.row) and
+                tonumber(reply.x)==tonumber(req.row) and tonumber(reply.y)==0 and
+                tonumber(reply.z)==0 and tonumber(reply.dir)==DIR_S then
                 return true
             end
-
-            sleep(0.1)
         end
 
         state.phase="SERVICE_ALIGNMENT_ERROR"
         saveState()
-        sendState("Expected Miner-" .. tostring(req.row) .. " directly north but could not verify it")
+        sendState("Miner-" .. tostring(req.row) .. " did not confirm service position")
         return false
     end
 
@@ -5930,9 +5942,19 @@ local function runRegionalManager()
     local lastPair=0
     local lastRecall=0
     local lastDispatch=0
+    local managerDirty=false
+    local lastManagerFlush=0
 
     local function save()
-        saveTable("regional_manager.tmp",data)
+        managerDirty=true
+    end
+
+    local function flushManager(force)
+        if managerDirty and (force or now()-lastManagerFlush>=2) then
+            saveTable("regional_manager.tmp",data)
+            managerDirty=false
+            lastManagerFlush=now()
+        end
     end
 
     local IS_COLOR=mon.isColor and mon.isColor() or false
@@ -6050,14 +6072,19 @@ local function runRegionalManager()
         return pending,active,blocked
     end
 
+    local monitorInitialized=false
+
     local function drawMonitor()
         local w,h=ui.w,ui.h
-        ui.clearAll()
-        drawHeader("Regional Manager")
 
         local overviewY=3
         local overviewH=5
-        cardSurface(1,overviewY,w,overviewH,C_ACCENT)
+
+        if not monitorInitialized then
+            ui.clearAll()
+            drawHeader("Regional Manager")
+            cardSurface(1,overviewY,w,overviewH,C_ACCENT)
+        end
 
         local pending,activeJobs,blocked=countRequests()
         local pairText=data.paired and ("Manager " .. tostring(managerId) .. " / Master " .. tostring(data.masterForemanId or "?")) or "Waiting for Master Foreman pairing"
@@ -6069,8 +6096,11 @@ local function runRegionalManager()
 
         local foreY=overviewY+overviewH
         local foreH=7
-        cardSurface(1,foreY,w,foreH,C_ACCENT)
-        ui.field("fore_title",3,foreY+1,w-4,"FOREMEN",C_SUBTXT,C_INSET)
+
+        if not monitorInitialized then
+            cardSurface(1,foreY,w,foreH,C_ACCENT)
+            ui.field("fore_title",3,foreY+1,w-4,"FOREMEN",C_SUBTXT,C_INSET)
+        end
 
         for n=1,4 do
             local f=data.foremen[n]
@@ -6096,8 +6126,11 @@ local function runRegionalManager()
         local minersY=foreY+foreH
         local minersH=h-minersY+1
         if minersH<8 then minersH=8 end
-        cardSurface(1,minersY,w,minersH,C_ACCENT)
-        ui.field("miners_title",3,minersY+1,w-4,"MINERS",C_SUBTXT,C_INSET)
+
+        if not monitorInitialized then
+            cardSurface(1,minersY,w,minersH,C_ACCENT)
+            ui.field("miners_title",3,minersY+1,w-4,"MINERS",C_SUBTXT,C_INSET)
+        end
 
         local cols=4
         local colW=math.floor((w-5)/cols)
@@ -6150,7 +6183,11 @@ local function runRegionalManager()
                 if data.recall.homeForemen[i] then fh=fh+1 end
             end
             ui.field("recall_status",3,bottom,w-4,string.format("%s  M:%d/16 F:%d/4 E:%d/16",tostring(data.recall.mode),mh,fh,empty),C_WARN,C_INSET)
+        else
+            ui.field("recall_status",3,bottom,w-4,"",C_MUTED,C_INSET)
         end
+
+        monitorInitialized=true
     end
 
     local function drawTerminal()
@@ -6436,6 +6473,7 @@ local function runRegionalManager()
 
         lastRecall=now()
         save()
+        flushManager(true)
         drawTerminal()
         drawMonitor()
     end
@@ -6463,6 +6501,7 @@ local function runRegionalManager()
         end
 
         save()
+        flushManager(true)
         drawTerminal()
         drawMonitor()
     end
@@ -6624,7 +6663,7 @@ local function runRegionalManager()
     announceManagerOnline()
     releaseSwarm()
 
-    local timer=os.startTimer(0.5)
+    local timer=os.startTimer(1)
 
     while true do
         local event={os.pullEvent()}
@@ -6931,9 +6970,9 @@ local function runRegionalManager()
                 end
             end
 
-            save()
+            flushManager(false)
             drawMonitor()
-            timer=os.startTimer(0.5)
+            timer=os.startTimer(1)
         end
     end
 end
@@ -6947,7 +6986,7 @@ local function runMaster()
     local newMaster=false
 
     if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v37.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v38.")
     end
 
     if not cfg then
@@ -7066,7 +7105,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version~=VERSION then
-        error("Old node state detected. Clear node.cfg and old state before using v37.")
+        error("Old node state detected. Clear node.cfg and old state before using v38.")
     elseif cfg.role=="miner" then
         setRegionalManager(cfg.managerId)
         if cfg.commissioned then
