@@ -1,8 +1,8 @@
 local REGIONAL_MANAGER = 0
 local MASTER_FOREMAN = 0
 
-local VERSION = 31
-local PROTOCOL = "miner_swarm_v31"
+local VERSION = 32
+local PROTOCOL = "miner_swarm_v32"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -166,20 +166,46 @@ local function wrapInventory(side)
     return p
 end
 
-local function scanInventory(side)
-    local inv = wrapInventory(side)
+local function inventorySnapshot(inv)
     if not inv then
-        return nil, "No OpenPeripheral inventory on " .. side
+        return nil
     end
-    local size = inv.getInventorySize()
-    local items = {}
-    for slot = 1, size do
-        local ok, item = pcall(inv.getStackInSlot, slot)
-        if ok and item then
-            items[slot] = item
+
+    if inv.getAllStacks then
+        local ok,all=pcall(inv.getAllStacks)
+        if ok and type(all)=="table" then
+            local items={}
+            for slot,item in pairs(all) do
+                local n=tonumber(slot)
+                if n and item then
+                    items[n]=item
+                end
+            end
+            return items
         end
     end
-    return items, inv
+
+    local size=inv.getInventorySize()
+    local items={}
+
+    for slot=1,size do
+        local ok,item=pcall(inv.getStackInSlot,slot)
+        if ok and item then
+            items[slot]=item
+        end
+    end
+
+    return items
+end
+
+local function scanInventory(side)
+    local inv=wrapInventory(side)
+
+    if not inv then
+        return nil,"No OpenPeripheral inventory on " .. side
+    end
+
+    return inventorySnapshot(inv),inv
 end
 
 local function findInventorySlot(side, kind)
@@ -270,94 +296,102 @@ local function selfItem(slot)
 end
 
 local function selfFindSlot(kind)
-    local inv = getSelfInventory()
+    local inv=getSelfInventory()
     if not inv then
         return nil
     end
-    local size = inv.getInventorySize()
-    for slot=1,size do
-        local ok, item = pcall(inv.getStackInSlot, slot)
-        if ok and item and matchesItem(item, kind) then
-            return slot, item
+
+    local items=inventorySnapshot(inv) or {}
+
+    for slot,item in pairs(items) do
+        if item and matchesItem(item,kind) then
+            return slot,item
         end
     end
+
     return nil
 end
 
 local function selfFindSlotExcluding(kind,excluded)
-    local inv = getSelfInventory()
+    local inv=getSelfInventory()
     if not inv then
         return nil
     end
-    local size = inv.getInventorySize()
-    for slot=1,size do
-        if slot ~= excluded then
-            local ok,item = pcall(inv.getStackInSlot,slot)
-            if ok and item and matchesItem(item,kind) then
-                return slot,item
-            end
+
+    local items=inventorySnapshot(inv) or {}
+
+    for slot,item in pairs(items) do
+        if slot~=excluded and item and matchesItem(item,kind) then
+            return slot,item
         end
     end
+
     return nil
 end
 
 local function selfCountExcluding(kind,excluded)
-    local inv = getSelfInventory()
+    local inv=getSelfInventory()
     if not inv then
         return 0
     end
+
     local total=0
-    local size=inv.getInventorySize()
-    for slot=1,size do
-        if slot ~= excluded then
-            local ok,item=pcall(inv.getStackInSlot,slot)
-            if ok and item and matchesItem(item,kind) then
-                total=total+tonumber(item.qty or item.size or 1)
-            end
+    local items=inventorySnapshot(inv) or {}
+
+    for slot,item in pairs(items) do
+        if slot~=excluded and item and matchesItem(item,kind) then
+            total=total+tonumber(item.qty or item.size or 1)
         end
     end
+
     return total
 end
 
 local function selfCount(kind)
-    local inv = getSelfInventory()
+    local inv=getSelfInventory()
     if not inv then
         return 0
     end
-    local total = 0
-    local size = inv.getInventorySize()
-    for slot=1,size do
-        local ok, item = pcall(inv.getStackInSlot, slot)
-        if ok and item and matchesItem(item, kind) then
-            total = total + tonumber(item.qty or item.size or 1)
+
+    local total=0
+    local items=inventorySnapshot(inv) or {}
+
+    for _,item in pairs(items) do
+        if item and matchesItem(item,kind) then
+            total=total+tonumber(item.qty or item.size or 1)
         end
     end
+
     return total
 end
 
 local function selfTargetSlot(kind)
-    local inv = getSelfInventory()
+    local inv=getSelfInventory()
     if not inv then
         return nil
     end
-    local empty = nil
-    local size = inv.getInventorySize()
+
+    local items=inventorySnapshot(inv) or {}
+    local size=inv.getInventorySize()
+    local empty=nil
+
     for slot=1,size do
-        local ok, item = pcall(inv.getStackInSlot, slot)
-        if ok then
-            if item then
-                if matchesItem(item, kind) then
-                    local qty = tonumber(item.qty or item.size or 1)
-                    local maxSize = tonumber(item.maxSize or 64)
-                    if qty < maxSize then
-                        return slot
-                    end
+        local item=items[slot]
+
+        if item then
+            if matchesItem(item,kind) then
+                local qty=tonumber(item.qty or item.size or 1)
+                local maxSize=tonumber(item.maxSize or 64)
+
+                if qty<maxSize then
+                    return slot
                 end
-            elseif not empty then
-                empty = slot
             end
+        elseif not empty then
+            empty=slot
         end
     end
+
     return empty
 end
 
@@ -367,26 +401,25 @@ local function selfTargetSlotExcluding(kind,excluded)
         return nil
     end
 
-    local empty=nil
+    local items=inventorySnapshot(inv) or {}
     local size=inv.getInventorySize()
+    local empty=nil
 
     for slot=1,size do
         if slot~=excluded then
-            local ok,item=pcall(inv.getStackInSlot,slot)
+            local item=items[slot]
 
-            if ok then
-                if item then
-                    if matchesItem(item,kind) then
-                        local qty=tonumber(item.qty or item.size or 1)
-                        local maxSize=tonumber(item.maxSize or 64)
+            if item then
+                if matchesItem(item,kind) then
+                    local qty=tonumber(item.qty or item.size or 1)
+                    local maxSize=tonumber(item.maxSize or 64)
 
-                        if qty<maxSize then
-                            return slot
-                        end
+                    if qty<maxSize then
+                        return slot
                     end
-                elseif not empty then
-                    empty=slot
                 end
+            elseif not empty then
+                empty=slot
             end
         end
     end
@@ -400,11 +433,11 @@ local function selfEmptySlot()
         return nil
     end
 
+    local items=inventorySnapshot(inv) or {}
     local size=inv.getInventorySize()
 
     for slot=1,size do
-        local ok,item=pcall(inv.getStackInSlot,slot)
-        if ok and not item then
+        if not items[slot] then
             return slot
         end
     end
@@ -2836,6 +2869,8 @@ local function runForeman(cfg)
             dir=state.dir,
             seq=state.seq,
             queue=#queue + (active and 1 or 0),
+            setupDone=state.setupDone and true or false,
+            miningStarted=state.miningStarted and true or false,
             recovery=state.recoveryReason,
             message=message or ""
         })
@@ -5689,21 +5724,18 @@ local function runForeman(cfg)
                 sleep(1)
             end
 
-            for n=2,4 do
-                local fid=cfg.foremen and cfg.foremen[n]
-                if fid then
-                    for i=1,3 do
-                        send(fid,{type="start_assigned"})
-                        sleep(0.1)
-                    end
-                end
-            end
-
-            startAssignedMiners()
-
             state.setupDone=true
             state.phase="IDLE"
             saveState()
+            sendState("Commissioning complete; waiting for Regional Manager release")
+
+            send(cfg.managerId,{
+                type="commissioning_complete",
+                version=VERSION,
+                masterForemanId=id,
+                session=cfg.session
+            })
+
             returnHome()
         elseif not cfg.master and not state.setupDone then
             while not flags.commissionStart do
@@ -5731,7 +5763,12 @@ local function runForeman(cfg)
         while true do
             if flags.startMining then
                 flags.startMining=false
-                startAssignedMiners()
+                state.miningStarted=true
+                if state.phase~="RECALLED_PAUSED" then
+                    state.phase="IDLE"
+                end
+                saveState()
+                sendState("Regional Manager released mining")
             end
 
             if flags.recallMode then
@@ -5815,11 +5852,22 @@ local function runForeman(cfg)
 end
 
 local function runRegionalManager()
-    if not openNetwork() then
-        error("Wireless modem not found")
+    while not openNetwork() do
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.white)
+        term.clear()
+        term.setCursorPos(1,1)
+        print("Regional Manager waiting for wireless modem...")
+        sleep(1)
     end
-    if peripheral.getType("right") ~= "monitor" then
-        error("4x4 monitor must be on RIGHT")
+
+    while peripheral.getType("right")~="monitor" do
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.white)
+        term.clear()
+        term.setCursorPos(1,1)
+        print("Regional Manager waiting for monitor on RIGHT...")
+        sleep(1)
     end
 
     local managerId=os.getComputerID()
@@ -5843,6 +5891,8 @@ local function runRegionalManager()
             authority={},
             requests={},
             foremanJobs={},
+            commissioningComplete=false,
+            swarmStarted=false,
             recall={
                 state="NORMAL",
                 mode=nil,
@@ -5863,6 +5913,8 @@ local function runRegionalManager()
     data.authority=data.authority or {}
     data.requests=data.requests or {}
     data.foremanJobs=data.foremanJobs or {}
+    data.commissioningComplete=data.commissioningComplete and true or false
+    data.swarmStarted=data.swarmStarted and true or false
     data.recall=data.recall or {
         state="NORMAL",
         mode=nil,
@@ -6244,6 +6296,9 @@ local function runRegionalManager()
             if data.recall.mode~="DUMP" or message.role=="miner" then
                 send(sender,{type="recall_command",mode=data.recall.mode,session=data.session})
             end
+        elseif data.swarmStarted then
+            send(sender,{type="start_mining",session=data.session})
+            send(sender,{type="resume_swarm",session=data.session})
         end
     end
 
@@ -6470,6 +6525,99 @@ local function runRegionalManager()
         end
     end
 
+    local function registeredCounts()
+        local foremen=0
+        local miners=0
+
+        for n=1,4 do
+            local f=data.foremen[n]
+            if f and f.id then
+                foremen=foremen+1
+            end
+        end
+
+        for row=1,16 do
+            local m=data.miners[row]
+            if m and m.id then
+                miners=miners+1
+            end
+        end
+
+        return foremen,miners
+    end
+
+    local function allForemenCommissioned()
+        for n=1,4 do
+            local f=data.foremen[n]
+            if not f or not f.setupDone then
+                return false
+            end
+        end
+        return true
+    end
+
+    local function releaseSwarm()
+        if data.recall.state~="NORMAL" then
+            return false
+        end
+
+        local foremen,miners=registeredCounts()
+
+        if foremen<4 or miners<16 then
+            return false
+        end
+
+        if not data.commissioningComplete and not allForemenCommissioned() then
+            return false
+        end
+
+        data.commissioningComplete=true
+        data.swarmStarted=true
+        save()
+
+        for _,node in pairs(data.nodes) do
+            send(node.id,{
+                type="start_mining",
+                session=data.session
+            })
+            send(node.id,{
+                type="resume_swarm",
+                session=data.session
+            })
+        end
+
+        return true
+    end
+
+    local function announceManagerOnline()
+        broadcast({
+            type="manager_online",
+            version=VERSION,
+            managerId=managerId,
+            session=data.session,
+            swarmStarted=data.swarmStarted and true or false,
+            recallState=data.recall.state
+        })
+
+        for _,node in pairs(data.nodes) do
+            send(node.id,{
+                type="status_query",
+                session=data.session
+            })
+
+            if data.recall.state=="NORMAL" and data.swarmStarted then
+                send(node.id,{
+                    type="start_mining",
+                    session=data.session
+                })
+                send(node.id,{
+                    type="resume_swarm",
+                    session=data.session
+                })
+            end
+        end
+    end
+
     broadcast({
         type="manager_presence",
         version=VERSION,
@@ -6478,6 +6626,8 @@ local function runRegionalManager()
 
     drawTerminal()
     drawMonitor()
+    announceManagerOnline()
+    releaseSwarm()
 
     local timer=os.startTimer(0.5)
 
@@ -6544,6 +6694,12 @@ local function runRegionalManager()
 
                     save()
 
+                elseif message.type=="commissioning_complete" and sender==data.masterForemanId and
+                    message.session==data.session then
+                    data.commissioningComplete=true
+                    save()
+                    releaseSwarm()
+
                 elseif message.type=="status" then
                     message.lastSeen=now()
                     data.nodes[sender]=data.nodes[sender] or {}
@@ -6563,6 +6719,10 @@ local function runRegionalManager()
                     end
 
                     save()
+
+                    if message.role=="foreman" and message.setupDone then
+                        releaseSwarm()
+                    end
 
                 elseif message.type=="pose_checkpoint" and sender==message.id and
                     message.version==VERSION and message.role and message.snapshot and
@@ -6748,9 +6908,8 @@ local function runRegionalManager()
             end
 
             if now()-lastQuery>=10 then
-                for _,node in pairs(data.nodes) do
-                    send(node.id,{type="status_query",session=data.session})
-                end
+                announceManagerOnline()
+                releaseSwarm()
                 lastQuery=now()
             end
 
@@ -6793,7 +6952,7 @@ local function runMaster()
     local newMaster=false
 
     if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v31.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v32.")
     end
 
     if not cfg then
@@ -6861,7 +7020,24 @@ end
 if REGIONAL_MANAGER==1 and MASTER_FOREMAN==1 then
     error("REGIONAL_MANAGER and MASTER_FOREMAN cannot both be enabled")
 elseif REGIONAL_MANAGER==1 then
-    runRegionalManager()
+    while true do
+        local ok,err=pcall(runRegionalManager)
+
+        if ok then
+            sleep(0.5)
+        else
+            writeFile("regional_manager_error.log",tostring(err))
+            term.setBackgroundColor(colors.black)
+            term.setTextColor(colors.white)
+            term.clear()
+            term.setCursorPos(1,1)
+            print("Regional Manager recovered from error:")
+            print(tostring(err))
+            print("")
+            print("Restarting manager service...")
+            sleep(3)
+        end
+    end
 elseif MASTER_FOREMAN==1 then
     runMaster()
 else
@@ -6870,7 +7046,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version~=VERSION then
-        error("Old node state detected. Clear node.cfg and old state before using v31.")
+        error("Old node state detected. Clear node.cfg and old state before using v32.")
     elseif cfg.role=="miner" then
         setRegionalManager(cfg.managerId)
         if cfg.commissioned then
