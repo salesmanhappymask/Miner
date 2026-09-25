@@ -1,8 +1,8 @@
 local REGIONAL_MANAGER = 0
 local MASTER_FOREMAN = 0
 
-local VERSION = 35
-local PROTOCOL = "miner_swarm_v35"
+local VERSION = 37
+local PROTOCOL = "miner_swarm_v37"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -33,6 +33,11 @@ end
 
 local function getRegionalManager()
     return regionalManagerID
+end
+
+local function detectPlacement()
+    local supported=turtle.detectDown() and true or false
+    return supported,supported and "SUPPORTED" or "AIR",supported and DIR_N or DIR_S
 end
 
 local function now()
@@ -1141,9 +1146,7 @@ local function bootstrap()
         end
     end
 
-    local placementSupported=turtle.detectDown() and true or false
-    local detectedPlacementMode=placementSupported and "SUPPORTED" or "AIR"
-    local detectedStartDir=placementSupported and DIR_N or DIR_S
+    local placementSupported,detectedPlacementMode,detectedStartDir=detectPlacement()
 
     local source = readFile("/disk/startup") or readFile("disk/startup")
     if not source then
@@ -1530,6 +1533,32 @@ local function runMiner(cfg)
             state.dir>=DIR_N and state.dir<=DIR_W
     end
 
+    local function minerSnapshot()
+        return {
+            row=state.row,
+            session=cfg.session,
+            x=state.x,
+            y=state.y,
+            z=state.z,
+            depth=state.depth,
+            pos=state.pos,
+            dir=state.dir,
+            phase=state.phase,
+            request=state.request,
+            requestSeq=state.requestSeq,
+            resumeX=state.resumeX,
+            resumeY=state.resumeY,
+            resumeZ=state.resumeZ,
+            resumeDepth=state.resumeDepth,
+            resumePos=state.resumePos,
+            resumeDir=state.resumeDir,
+            complete=state.complete,
+            originEstablished=state.originEstablished==true,
+            orientationCalibrated=cfg.orientationCalibrated==true,
+            seq=state.seq
+        }
+    end
+
     local function snapshotHasExactPose(snapshot)
         return snapshot and snapshot.row==cfg.row and
             type(snapshot.x)=="number" and type(snapshot.y)=="number" and
@@ -1567,7 +1596,7 @@ local function runMiner(cfg)
             state.turnIntent=nil
             saveTable(path,state)
         elseif poseValid() and not state.motionIntent and not state.turnIntent then
-            checkpointPose("miner",state.seq,snapshot(),cfg.session)
+            checkpointPose("miner",state.seq,minerSnapshot(),cfg.session)
         end
     end
 
@@ -1642,32 +1671,6 @@ local function runMiner(cfg)
         state.depth=-state.y
         state.pos=state.z
         saveTable(path,state)
-    end
-
-    local function minerSnapshot()
-        return {
-            row=state.row,
-            session=cfg.session,
-            x=state.x,
-            y=state.y,
-            z=state.z,
-            depth=state.depth,
-            pos=state.pos,
-            dir=state.dir,
-            phase=state.phase,
-            request=state.request,
-            requestSeq=state.requestSeq,
-            resumeX=state.resumeX,
-            resumeY=state.resumeY,
-            resumeZ=state.resumeZ,
-            resumeDepth=state.resumeDepth,
-            resumePos=state.resumePos,
-            resumeDir=state.resumeDir,
-            complete=state.complete,
-            originEstablished=state.originEstablished==true,
-            orientationCalibrated=cfg.orientationCalibrated==true,
-            seq=state.seq
-        }
     end
 
     local function checkpoint()
@@ -3642,134 +3645,8 @@ local function runForeman(cfg)
         return exitDockHome()
     end
 
-    local function fetchMinerFuel(amount)
-        amount=amount or MINER_REFUEL_COAL
 
-        if not atFuel() then
-            return false
-        end
 
-        if turtle.getItemCount(1)>0 then
-            local item=selfItem(1)
-            if not item or not matchesItem(item,"coal") then
-                state.phase="SERVICE_PREP_ERROR"
-                saveState()
-                sendState("Slot 1 must be empty or coal before miner refuel")
-                return false
-            end
-        end
-
-        local remaining=amount
-
-        while remaining>0 do
-            turtle.select(1)
-            local before=turtle.getItemCount(1)
-            local room=64-before
-
-            if room<=0 then
-                break
-            end
-
-            local wanted=math.min(remaining,room)
-            local got=takeNamedFromFront("coal",wanted,1)
-
-            if got<=0 then
-                break
-            end
-
-            local after=turtle.getItemCount(1)
-            local actual=after-before
-
-            if actual<=0 then
-                break
-            end
-
-            remaining=remaining-actual
-        end
-
-        if remaining>0 then
-            state.phase="WAITING_FUEL"
-            saveState()
-            sendState("Fuel chest cannot provide miner refuel packet")
-            return false
-        end
-
-        return exitDockToLane()
-    end
-
-    local function returnRuntimeNonFuel()
-        local needSupply=false
-
-        for slot=1,16 do
-            local item=selfItem(slot)
-            if item and not matchesItem(item,"coal") then
-                needSupply=true
-                break
-            end
-        end
-
-        if not needSupply then
-            return true
-        end
-
-        if not atSupply() then
-            return false
-        end
-
-        for slot=1,16 do
-            local item=selfItem(slot)
-
-            if item and not matchesItem(item,"coal") then
-                turtle.select(slot)
-
-                while turtle.getItemCount(slot)>0 do
-                    if not turtle.drop() then
-                        state.phase="SERVICE_PREP_ERROR"
-                        saveState()
-                        sendState("Cannot clear non-fuel runtime inventory")
-                        return false
-                    end
-                end
-            end
-        end
-
-        if number==1 then
-            state.bootstrapDrivePending=false
-            state.bootstrapDriveSlot=nil
-            saveState()
-        end
-
-        return exitDockHome()
-    end
-
-    local function returnRuntimeFuel()
-        if selfCount("coal")<=0 then
-            return true
-        end
-
-        if not atFuel() then
-            return false
-        end
-
-        for slot=1,16 do
-            local item=selfItem(slot)
-
-            if item and matchesItem(item,"coal") then
-                turtle.select(slot)
-
-                while turtle.getItemCount(slot)>0 do
-                    if not turtle.drop() then
-                        state.phase="SERVICE_PREP_ERROR"
-                        saveState()
-                        sendState("Cannot clear runtime coal")
-                        return false
-                    end
-                end
-            end
-        end
-
-        return exitDockHome()
-    end
 
     local function prepareRuntimeService(service)
         state.phase="PREPARING_SERVICE"
@@ -4023,19 +3900,6 @@ local function runForeman(cfg)
         return false
     end
 
-    local function verifyMinerStaging(tx,tz)
-        if state.x ~= tx or state.z ~= tz-1 then
-            state.phase="PLACEMENT_ERROR"
-            saveState()
-            sendState("Wrong miner staging square: expected " .. tostring(tx) .. "," .. tostring(tz-1) ..
-                " got " .. tostring(state.x) .. "," .. tostring(state.z))
-            return false
-        end
-
-        faceTracked(DIR_N)
-        saveState()
-        return true
-    end
 
     local function placeDriveAndDiskAt(tx,tz)
         local stagingZ=tz-1
@@ -5423,23 +5287,6 @@ local function runForeman(cfg)
         return true
     end
 
-    local function startAssignedMiners()
-        state.minerIds=state.minerIds or {}
-        state.miningStarted=true
-        saveState()
-
-        for row=cfg.rowStart,cfg.rowEnd do
-            local minerId=state.minerIds[row]
-            if minerId then
-                for i=1,3 do
-                    send(minerId,{type="start_mining"})
-                    sleep(0.1)
-                end
-            end
-        end
-
-        sendState("Assigned miners released")
-    end
 
     local function applyManagerForemanPose()
         local snapshot,seq=requestPoseBackup("foreman",5,cfg.session)
@@ -7100,7 +6947,7 @@ local function runMaster()
     local newMaster=false
 
     if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v35.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v37.")
     end
 
     if not cfg then
@@ -7165,6 +7012,31 @@ local function runMaster()
     runForeman(cfg)
 end
 
+local function runConfiguredNode(role,fn)
+    local ok,err=pcall(fn)
+
+    if ok then
+        return
+    end
+
+    local message=tostring(err or "Unknown runtime error")
+    writeFile(tostring(role) .. "_error.log",message)
+
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.white)
+    term.clear()
+    term.setCursorPos(1,1)
+    print(tostring(role) .. " runtime stopped:")
+    print(message)
+    print("")
+    print("Error saved to " .. tostring(role) .. "_error.log")
+    print("Reboot to retry.")
+
+    while true do
+        sleep(60)
+    end
+end
+
 if REGIONAL_MANAGER==1 and MASTER_FOREMAN==1 then
     error("REGIONAL_MANAGER and MASTER_FOREMAN cannot both be enabled")
 elseif REGIONAL_MANAGER==1 then
@@ -7187,24 +7059,24 @@ elseif REGIONAL_MANAGER==1 then
         end
     end
 elseif MASTER_FOREMAN==1 then
-    runMaster()
+    runConfiguredNode("master_foreman",runMaster)
 else
     local cfg=loadTable("node.cfg")
 
     if not cfg then
         bootstrap()
     elseif cfg.version~=VERSION then
-        error("Old node state detected. Clear node.cfg and old state before using v35.")
+        error("Old node state detected. Clear node.cfg and old state before using v37.")
     elseif cfg.role=="miner" then
         setRegionalManager(cfg.managerId)
         if cfg.commissioned then
-            runMiner(cfg)
+            runConfiguredNode("miner",function() runMiner(cfg) end)
         else
-            runMinerCommissioning(cfg)
+            runConfiguredNode("miner_commissioning",function() runMinerCommissioning(cfg) end)
         end
     elseif cfg.role=="foreman" then
         setRegionalManager(cfg.managerId)
-        runForeman(cfg)
+        runConfiguredNode("foreman",function() runForeman(cfg) end)
     else
         error("Unknown node role")
     end
