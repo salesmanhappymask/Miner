@@ -1,8 +1,8 @@
 local REGIONAL_MANAGER = 0
 local MASTER_FOREMAN = 0
 
-local VERSION = 40
-local PROTOCOL = "miner_swarm_v40"
+local VERSION = 41
+local PROTOCOL = "miner_swarm_v41"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local NAVIGATOR_COUNT = 4
@@ -6524,32 +6524,6 @@ local function runNavigator(cfg)
                 message.type=="status_query" then
                 sendNavigatorStatus()
             end
-        elseif event[1]=="char" then
-            local ch=lower(event[2])
-            refreshGpsReady()
-
-            if data.gpsReady and not data.minerSetupApproved then
-                if ch=="y" then
-                    data.minerSetupApproved=true
-                    data.minerSetupDeclined=false
-                    save()
-                    flushManager(true)
-
-                    if data.masterForemanId then
-                        send(data.masterForemanId,{
-                            type="miner_setup_approved",
-                            session=data.session
-                        })
-                    end
-                elseif ch=="n" then
-                    data.minerSetupDeclined=true
-                    save()
-                    flushManager(true)
-                end
-
-                drawMonitor()
-            end
-
         elseif event[1]=="timer" and event[2]==timer then
             sendNavigatorStatus()
             timer=os.startTimer(5)
@@ -6780,6 +6754,19 @@ local function runRegionalManager()
     end
 
     local monitorInitialized=false
+
+    local function refreshGpsReady()
+        local ready=0
+
+        for n=1,NAVIGATOR_COUNT do
+            local nav=data.navigators[n]
+            local site=NAVIGATOR_SITES[n]
+
+            if nav and site and nav.gpsHost==true and online(nav,15) and
+                tonumber(nav.x)==site.x and tonumber(nav.y)==site.y and tonumber(nav.z)==site.z then
+                ready=ready+1
+            end
+        end
 
     local function drawMonitor()
         local w,h=ui.w,ui.h
@@ -7302,18 +7289,6 @@ local function runRegionalManager()
         end
     end
 
-    local function refreshGpsReady()
-        local ready=0
-
-        for n=1,NAVIGATOR_COUNT do
-            local nav=data.navigators[n]
-            local site=NAVIGATOR_SITES[n]
-
-            if nav and site and nav.gpsHost==true and online(nav,15) and
-                tonumber(nav.x)==site.x and tonumber(nav.y)==site.y and tonumber(nav.z)==site.z then
-                ready=ready+1
-            end
-        end
 
         data.gpsReady=ready==NAVIGATOR_COUNT
         return ready
@@ -7773,7 +7748,7 @@ local function runMaster()
     local newMaster=false
 
     if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v40.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v41.")
     end
 
     if not cfg then
@@ -7892,7 +7867,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version~=VERSION then
-        error("Old node state detected. Clear node.cfg and old state before using v40.")
+        error("Old node state detected. Clear node.cfg and old state before using v41.")
     elseif cfg.role=="miner" then
         setRegionalManager(cfg.managerId)
         if cfg.commissioned then
