@@ -1,8 +1,8 @@
 local REGIONAL_MANAGER = 0
 local MASTER_FOREMAN = 0
 
-local VERSION = 41
-local PROTOCOL = "miner_swarm_v41"
+local VERSION = 42
+local PROTOCOL = "miner_swarm_v42"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local NAVIGATOR_COUNT = 4
@@ -6768,6 +6768,10 @@ local function runRegionalManager()
             end
         end
 
+        data.gpsReady=ready==NAVIGATOR_COUNT
+        return ready
+    end
+
     local function drawMonitor()
         local w,h=ui.w,ui.h
 
@@ -7289,11 +7293,6 @@ local function runRegionalManager()
         end
     end
 
-
-        data.gpsReady=ready==NAVIGATOR_COUNT
-        return ready
-    end
-
     local function registeredCounts()
         local foremen=0
         local miners=0
@@ -7748,7 +7747,7 @@ local function runMaster()
     local newMaster=false
 
     if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v41.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v42.")
     end
 
     if not cfg then
@@ -7867,7 +7866,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version~=VERSION then
-        error("Old node state detected. Clear node.cfg and old state before using v41.")
+        error("Old node state detected. Clear node.cfg and old state before using v42.")
     elseif cfg.role=="miner" then
         setRegionalManager(cfg.managerId)
         if cfg.commissioned then
