@@ -1,8 +1,8 @@
 local REGIONAL_MANAGER = 0
 local MASTER_FOREMAN = 0
 
-local VERSION = 33
-local PROTOCOL = "miner_swarm_v33"
+local VERSION = 35
+local PROTOCOL = "miner_swarm_v35"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -738,7 +738,7 @@ local function runMinerCommissioning(cfg)
     end
     ensureManagerRegistration(cfg)
 
-    local initialDir=(cfg.placementMode=="AIR") and DIR_S or DIR_N
+    local initialDir=cfg.placementSupported and DIR_N or DIR_S
 
     local state=loadTable("miner.tmp") or {
         row=cfg.row,
@@ -1141,6 +1141,10 @@ local function bootstrap()
         end
     end
 
+    local placementSupported=turtle.detectDown() and true or false
+    local detectedPlacementMode=placementSupported and "SUPPORTED" or "AIR"
+    local detectedStartDir=placementSupported and DIR_N or DIR_S
+
     local source = readFile("/disk/startup") or readFile("disk/startup")
     if not source then
         error("Cannot read /disk/startup")
@@ -1172,8 +1176,9 @@ local function bootstrap()
             homeZ = -(configured.number + 1),
             startX = 1,
             startZ = -1,
-            placementMode = configured.placementMode,
-            startDir = configured.startDir or DIR_S,
+            placementMode = detectedPlacementMode,
+            placementSupported = placementSupported,
+            startDir = detectedStartDir,
             master = false,
             managerId = configured.managerId,
             masterForemanId = configured.masterForemanId,
@@ -1190,7 +1195,10 @@ local function bootstrap()
                 type = "install_ok",
                 id = myID,
                 role = "foreman",
-                number = cfg.number
+                number = cfg.number,
+                placementSupported = cfg.placementSupported,
+                placementMode = cfg.placementMode,
+                detectedStartDir = cfg.startDir
             })
             sleep(0.1)
         end
@@ -1310,31 +1318,27 @@ local function bootstrap()
                     end
 
                     if not state.orientationCalibrated then
-                        if cfg.placementMode=="AIR" then
-                            if state.dir~=DIR_S then
-                                state.phase="RECOVERY_LOCK"
-                                saveDeploy()
-                                error("Air-placed Foreman did not begin facing south")
-                            end
+                        if cfg.placementMode=="SUPPORTED" then
+                            state.dir=DIR_N
+                        elseif cfg.placementMode=="AIR" then
+                            state.dir=DIR_S
 
                             if not deployTurn(true) then
-                                error("Cannot perform Foreman orientation correction")
+                                error("Cannot perform air-placement orientation correction")
                             end
                             if not deployTurn(true) then
-                                error("Cannot perform Foreman orientation correction")
+                                error("Cannot perform air-placement orientation correction")
                             end
 
                             if state.dir~=DIR_N then
                                 state.phase="RECOVERY_LOCK"
                                 saveDeploy()
-                                error("Foreman orientation correction did not end north")
+                                error("Air-placement orientation correction did not end north")
                             end
-                        elseif cfg.placementMode=="SUPPORTED" then
-                            state.dir=DIR_N
                         else
                             state.phase="RECOVERY_LOCK"
                             saveDeploy()
-                            error("Unknown Foreman placement mode")
+                            error("Unknown detected Foreman placement mode")
                         end
 
                         state.orientationCalibrated=true
@@ -1343,13 +1347,37 @@ local function bootstrap()
                     end
 
                     local laneX=cfg.number
-                    deployFace(DIR_E)
-                    while state.x<laneX do deployForward("east") end
-                    deployFace(DIR_S)
-                    while state.z>cfg.homeZ do deployForward("south") end
-                    deployFace(DIR_W)
-                    while state.x>cfg.homeX do deployForward("west") end
-                    deployFace(DIR_N)
+
+                    if not deployFace(DIR_E) then
+                        error("Cannot face east for Foreman deployment")
+                    end
+                    while state.x<laneX do
+                        if not deployForward("east") then
+                            error("Cannot move east on Foreman deployment lane")
+                        end
+                    end
+
+                    if not deployFace(DIR_S) then
+                        error("Cannot face south for Foreman deployment")
+                    end
+                    while state.z>cfg.homeZ do
+                        if not deployForward("south") then
+                            error("Cannot move south to Foreman home row")
+                        end
+                    end
+
+                    if not deployFace(DIR_W) then
+                        error("Cannot face west for Foreman deployment")
+                    end
+                    while state.x>cfg.homeX do
+                        if not deployForward("west") then
+                            error("Cannot move west into Foreman home")
+                        end
+                    end
+
+                    if not deployFace(DIR_N) then
+                        error("Cannot face north at Foreman home")
+                    end
 
                     if state.x~=cfg.homeX or state.z~=cfg.homeZ or state.y~=0 or state.dir~=DIR_N then
                         state.phase="RECOVERY_LOCK"
@@ -1383,7 +1411,8 @@ local function bootstrap()
             foremanId=configured.foremanId,
             foremanNumber=configured.foremanNumber,
             tempDeployment=configured.tempDeployment and true or false,
-            placementMode=configured.placementMode,
+            placementMode=detectedPlacementMode,
+            placementSupported=placementSupported,
             managerId=configured.managerId,
             masterForemanId=configured.masterForemanId,
             session=configured.session,
@@ -1397,7 +1426,7 @@ local function bootstrap()
             row=cfg.row,
             depth=0,
             pos=0,
-            dir=(cfg.placementMode=="AIR") and DIR_S or DIR_N,
+            dir=cfg.placementSupported and DIR_N or DIR_S,
             phase="COMMISSIONING",
             request=nil,
             requestSeq=0,
@@ -1419,7 +1448,10 @@ local function bootstrap()
                 type="install_ok",
                 id=myID,
                 role="miner",
-                row=cfg.row
+                row=cfg.row,
+                placementSupported=cfg.placementSupported,
+                placementMode=cfg.placementMode,
+                detectedStartDir=cfg.placementSupported and DIR_N or DIR_S
             })
             sleep(0.1)
         end
@@ -4595,7 +4627,6 @@ local function runForeman(cfg)
             foremanId=id,
             foremanNumber=number,
             tempDeployment=temporary,
-            placementMode="AIR",
             managerId=cfg.managerId,
             masterForemanId=cfg.masterForemanId,
             session=cfg.session
@@ -5195,8 +5226,6 @@ local function runForeman(cfg)
             number=n,
             rowStart=(n-1)*4+1,
             rowEnd=n*4,
-            placementMode="AIR",
-            startDir=DIR_S,
             managerId=cfg.managerId,
             masterForemanId=cfg.masterForemanId,
             session=cfg.session
@@ -7071,7 +7100,7 @@ local function runMaster()
     local newMaster=false
 
     if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v33.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v35.")
     end
 
     if not cfg then
@@ -7165,7 +7194,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version~=VERSION then
-        error("Old node state detected. Clear node.cfg and old state before using v33.")
+        error("Old node state detected. Clear node.cfg and old state before using v35.")
     elseif cfg.role=="miner" then
         setRegionalManager(cfg.managerId)
         if cfg.commissioned then
