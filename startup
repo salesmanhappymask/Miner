@@ -1,8 +1,8 @@
 local REGIONAL_MANAGER = 0
 local MASTER_FOREMAN = 0
 
-local VERSION = 45
-local PROTOCOL = "miner_swarm_v45"
+local VERSION = 46
+local PROTOCOL = "miner_swarm_v46"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local NAVIGATOR_COUNT = 4
@@ -2647,6 +2647,39 @@ local function runMiner(cfg)
         minerId=os.getComputerID()
     })
 
+    local function pauseForSetupRecall()
+        if not flags.recallMode then
+            return false
+        end
+
+        local mode=flags.recallMode
+        flags.recallMode=nil
+        recallForeman(mode)
+
+        if mode=="SHUTDOWN" then
+            return true
+        end
+
+        while state.phase=="RECALLED_PAUSED" do
+            if flags.recallMode then
+                local nextMode=flags.recallMode
+                flags.recallMode=nil
+                recallForeman(nextMode)
+            elseif flags.resume then
+                flags.resume=false
+                state.recallMode=nil
+                state.phase="WAITING_SETUP"
+                saveState()
+                sendState("Regional Manager resumed setup")
+                break
+            else
+                sleep(0.2)
+            end
+        end
+
+        return true
+    end
+
     local function workLoop()
         if state.recoveryLocked then
             state.phase="RECOVERY_LOCK"
@@ -3230,6 +3263,10 @@ local function runForeman(cfg)
     end
 
     local function moveVertical(targetY)
+        if flags.recallMode then
+            return false
+        end
+
         if state.recoveryLocked then
             return false
         end
@@ -3318,6 +3355,10 @@ local function runForeman(cfg)
     end
 
     local function moveStep(targetDir)
+        if flags.recallMode then
+            return false
+        end
+
         if not ensureGroundLevel() then
             state.phase="VERTICAL_ERROR"
             saveState()
@@ -5279,6 +5320,10 @@ local function runForeman(cfg)
         end
 
         for row=first,last do
+            if flags.recallMode then
+                return false
+            end
+
             if not state.commissionedRows[row] then
                 local useBootstrapDrive=number==1 and row==1 and not state.firstInstallerRecovered
 
@@ -5623,6 +5668,8 @@ local function runForeman(cfg)
         local lastConfigure=0
 
         while not installed do
+            if flags.recallMode then return nil end
+
             if now()-lastConfigure>=1 then
                 send(newId,packet)
                 pcall(peripheral.call,"front","turnOn")
@@ -5650,6 +5697,8 @@ local function runForeman(cfg)
         local lastDeploy=0
 
         while not traveling do
+            if flags.recallMode then return nil end
+
             if now()-lastDeploy>=1 then
                 send(newId,{
                     type="deploy_navigator",
@@ -5739,6 +5788,8 @@ local function runForeman(cfg)
         local lastConfigure=0
 
         while not installed do
+            if flags.recallMode then return nil end
+
             if now()-lastConfigure>=1 then
                 send(newId,packet)
                 pcall(peripheral.call,"front","turnOn")
@@ -5771,6 +5822,8 @@ local function runForeman(cfg)
         local lastDeploy=0
 
         while not deployed do
+            if flags.recallMode then return nil end
+
             if now()-lastDeploy>=1 then
                 send(newId,{type="deploy_foreman",target=newId})
                 lastDeploy=now()
@@ -6270,6 +6323,10 @@ local function runForeman(cfg)
 
         checkpointForeman()
 
+        if flags.recallMode then
+            pauseForSetupRecall()
+        end
+
         if state.phase=="DEPLOYING" then
             local laneX=cfg.number
             local deploymentValid=
@@ -6350,14 +6407,20 @@ local function runForeman(cfg)
 
         if cfg.master and not state.setupDone then
             while not state.masterSetupDone do
-                if masterSetup() then
+                if flags.recallMode then
+                    pauseForSetupRecall()
+                elseif masterSetup() then
                     state.masterSetupDone=true
                     saveState()
                 else
-                    state.phase="WAITING_SETUP"
-                    saveState()
-                    sendState("Master setup paused, retrying")
-                    sleep(2)
+                    if flags.recallMode then
+                        pauseForSetupRecall()
+                    else
+                        state.phase="WAITING_SETUP"
+                        saveState()
+                        sendState("Master setup paused, retrying")
+                        sleep(2)
+                    end
                 end
             end
 
@@ -6367,6 +6430,10 @@ local function runForeman(cfg)
                 sendState("GPS ready check pending; approve miner setup at Regional Manager")
 
                 while not state.minerSetupApproved do
+                    if flags.recallMode then
+                        pauseForSetupRecall()
+                    end
+
                     send(cfg.managerId,{
                         type="miner_setup_gate_request",
                         session=cfg.session
@@ -6433,23 +6500,28 @@ local function runForeman(cfg)
         elseif not cfg.master and not state.setupDone then
             while not flags.commissionStart do
                 if flags.recallMode then
-                    state.phase="RECALL_MODE"
-                    saveState()
-                    sendState("Recall received during setup")
+                    pauseForSetupRecall()
+                else
+                    sleep(0.1)
                 end
-                sleep(0.1)
             end
             flags.commissionStart=false
 
             while not state.setupDone do
-                if commissionAssigned() then
+                if flags.recallMode then
+                    pauseForSetupRecall()
+                elseif commissionAssigned() then
                     break
+                else
+                    if flags.recallMode then
+                        pauseForSetupRecall()
+                    else
+                        state.phase="WAITING_SETUP"
+                        saveState()
+                        sendState("Commissioning paused, retrying")
+                        sleep(2)
+                    end
                 end
-
-                state.phase="WAITING_SETUP"
-                saveState()
-                sendState("Commissioning paused, retrying")
-                sleep(2)
             end
         end
 
@@ -6854,6 +6926,8 @@ local function runRegionalManager()
             gpsReady=false,
             minerSetupApproved=false,
             minerSetupDeclined=false,
+            minerSetupGateRequested=false,
+            minerSetupConfirm=false,
             recall={
                 state="NORMAL",
                 mode=nil,
@@ -6875,6 +6949,8 @@ local function runRegionalManager()
     data.gpsReady=data.gpsReady and true or false
     data.minerSetupApproved=data.minerSetupApproved and true or false
     data.minerSetupDeclined=data.minerSetupDeclined and true or false
+    data.minerSetupGateRequested=data.minerSetupGateRequested and true or false
+    data.minerSetupConfirm=data.minerSetupConfirm and true or false
     data.authority=data.authority or {}
     data.requests=data.requests or {}
     data.foremanJobs=data.foremanJobs or {}
@@ -7049,6 +7125,33 @@ local function runRegionalManager()
         return ready
     end
 
+    local function foremenReadyForMinerSetup()
+        if not data.gpsReady or not data.minerSetupGateRequested or data.minerSetupApproved then
+            return false
+        end
+
+        for n=1,4 do
+            local f=data.foremen[n]
+            if not f or not online(f,20) then
+                return false
+            end
+        end
+
+        local f1=data.foremen[1]
+        if not f1 or f1.state~="WAITING_MINER_APPROVAL" then
+            return false
+        end
+
+        for n=2,4 do
+            local f=data.foremen[n]
+            if not f or (f.state~="WAITING_SETUP" and f.state~="IDLE") then
+                return false
+            end
+        end
+
+        return true
+    end
+
     local function drawMonitor()
         local w,h=ui.w,ui.h
 
@@ -7077,10 +7180,11 @@ local function runRegionalManager()
             if data.minerSetupApproved then
                 gpsText="GPS 4/4 READY | Miner setup APPROVED"
                 gpsColor=C_OK
-            elseif data.minerSetupDeclined then
-                gpsText="GPS 4/4 READY | PAUSED - type Y to continue"
+            elseif foremenReadyForMinerSetup() then
+                gpsText="GPS 4/4 READY | Miner setup available: option 5"
+                gpsColor=C_OK
             else
-                gpsText="GPS 4/4 READY | Start miner setup? Y/N"
+                gpsText="GPS 4/4 READY | Waiting for Foremen"
             end
         else
             gpsText="GPS " .. tostring(gpsCount) .. "/4 | Waiting for Navigators"
@@ -7195,7 +7299,13 @@ local function runRegionalManager()
         print("2 = Dump & Recall")
         print("3 = Shutdown Recall")
         print("4 = Resume")
+        if foremenReadyForMinerSetup() then
+            print("5 = Begin Miner Setup")
+        end
         print("")
+        if data.minerSetupConfirm and foremenReadyForMinerSetup() then
+            print("Begin miner setup? Y/N")
+        end
         print("State: " .. tostring(data.recall.state or "NORMAL"))
         if not data.paired then
             print("Pairing: waiting for Master Foreman")
@@ -7744,7 +7854,9 @@ local function runRegionalManager()
 
                 elseif message.type=="miner_setup_gate_request" and sender==data.masterForemanId and
                     message.session==data.session then
+                    data.minerSetupGateRequested=true
                     refreshGpsReady()
+                    save()
 
                     if data.gpsReady and data.minerSetupApproved then
                         send(sender,{
@@ -7958,7 +8070,29 @@ local function runRegionalManager()
                 local command=input
                 input=""
 
-                if command=="1" then
+                local lowerCommand=lower(command)
+
+                if data.minerSetupConfirm then
+                    if lowerCommand=="y" and foremenReadyForMinerSetup() then
+                        data.minerSetupApproved=true
+                        data.minerSetupDeclined=false
+                        data.minerSetupConfirm=false
+                        save()
+                        flushManager(true)
+
+                        if data.masterForemanId then
+                            send(data.masterForemanId,{
+                                type="miner_setup_approved",
+                                session=data.session
+                            })
+                        end
+                    elseif lowerCommand=="n" then
+                        data.minerSetupConfirm=false
+                        data.minerSetupDeclined=true
+                        save()
+                        flushManager(true)
+                    end
+                elseif command=="1" then
                     beginRecall("NORMAL")
                 elseif command=="2" then
                     beginRecall("DUMP")
@@ -7966,6 +8100,10 @@ local function runRegionalManager()
                     beginRecall("SHUTDOWN")
                 elseif command=="4" then
                     resumeSwarm()
+                elseif command=="5" and foremenReadyForMinerSetup() then
+                    data.minerSetupConfirm=true
+                    data.minerSetupDeclined=false
+                    save()
                 end
 
                 drawTerminal()
@@ -8024,7 +8162,7 @@ local function runMaster()
     local newMaster=false
 
     if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v45.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v46.")
     end
 
     if not cfg then
@@ -8143,7 +8281,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version~=VERSION then
-        error("Old node state detected. Clear node.cfg and old state before using v45.")
+        error("Old node state detected. Clear node.cfg and old state before using v46.")
     elseif cfg.role=="miner" then
         setRegionalManager(cfg.managerId)
         if cfg.commissioned then
