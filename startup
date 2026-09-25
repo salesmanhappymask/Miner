@@ -1,8 +1,8 @@
 local REGIONAL_MANAGER = 0
 local MASTER_FOREMAN = 0
 
-local VERSION = 38
-local PROTOCOL = "miner_swarm_v38"
+local VERSION = 39
+local PROTOCOL = "miner_swarm_v39"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local REQUEST_REPEAT = 10
@@ -1411,6 +1411,12 @@ local function bootstrap()
             version=VERSION,
             role="miner",
             row=configured.row,
+            homeX=configured.row,
+            homeY=0,
+            homeZ=0,
+            homeDir=DIR_N,
+            shaftMinZ=0,
+            shaftMaxZ=15,
             foremanId=configured.foremanId,
             foremanNumber=configured.foremanNumber,
             tempDeployment=configured.tempDeployment and true or false,
@@ -1513,6 +1519,13 @@ local function runMiner(cfg)
         saveTable(path,state)
     end
 
+    cfg.homeX=tonumber(cfg.homeX) or cfg.row
+    cfg.homeY=tonumber(cfg.homeY) or 0
+    cfg.homeZ=tonumber(cfg.homeZ) or 0
+    cfg.homeDir=tonumber(cfg.homeDir) or DIR_N
+    cfg.shaftMinZ=tonumber(cfg.shaftMinZ) or 0
+    cfg.shaftMaxZ=tonumber(cfg.shaftMaxZ) or 15
+
     state.row=cfg.row
     state.session=cfg.session
     state.seq=tonumber(state.seq) or 0
@@ -1529,7 +1542,8 @@ local function runMiner(cfg)
 
     local function poseValid()
         return state.originEstablished==true and cfg.orientationCalibrated==true and
-            state.x==cfg.row and state.y<=0 and state.z>=0 and state.z<=15 and
+            state.x==cfg.homeX and state.y<=cfg.homeY and
+            state.z>=cfg.shaftMinZ and state.z<=cfg.shaftMaxZ and
             state.dir>=DIR_N and state.dir<=DIR_W
     end
 
@@ -1659,13 +1673,15 @@ local function runMiner(cfg)
         start=false,
         recallMode=nil,
         resume=false,
-        dumpNow=false,
+        serviceProbe=nil,
+        dumpPrepare=nil,
         refuelNow=false,
         serviceComplete=false,
         newForeman=nil
     }
     local lastStatus = 0
     local lastRequest = 0
+    local prepareForForemanService
 
     local function save()
         state.depth=-state.y
@@ -1740,19 +1756,10 @@ local function runMiner(cfg)
                             end
                         elseif message.type == "service_probe" and state.request and
                             message.requestId == state.request.id and state.phase=="WAITING_SERVICE" then
-                            if prepareForForemanService() then
-                                send(cfg.foremanId,{
-                                    type="service_probe_ack",
-                                    requestId=state.request.id,
-                                    row=state.row,
-                                    x=state.x,
-                                    y=state.y,
-                                    z=state.z,
-                                    dir=state.dir
-                                })
-                            end
-                        elseif message.type == "dump_now" and state.request and message.requestId == state.request.id then
-                            flags.dumpNow = true
+                            flags.serviceProbe=message.requestId
+                        elseif message.type == "dump_prepare" and state.request and
+                            message.requestId == state.request.id and state.phase=="WAITING_SERVICE" then
+                            flags.dumpPrepare=message.requestId
                         elseif message.type == "refuel_now" and state.request and message.requestId == state.request.id then
                             flags.refuelNow = true
                         end
@@ -2030,9 +2037,9 @@ local function runMiner(cfg)
             end
         end
 
-        if state.y~=0 then
+        if state.y~=cfg.homeY then
             state.recoveryLocked=true
-            state.recoveryReason="Miner attempted to return above surface origin"
+            state.recoveryReason="Miner attempted to return above immutable surface bound"
             state.phase="RECOVERY_LOCK"
             save()
             sendState(state.recoveryReason)
@@ -2043,22 +2050,22 @@ local function runMiner(cfg)
             return false
         end
 
-        while state.z>0 do
+        while state.z>cfg.homeZ do
             if not digForward() then
                 return false
             end
         end
 
-        if state.z~=0 or state.x~=cfg.row then
+        if state.z~=cfg.homeZ or state.x~=cfg.homeX or state.y~=cfg.homeY then
             state.recoveryLocked=true
-            state.recoveryReason="Miner return ended outside its home coordinate"
+            state.recoveryReason="Miner return ended outside immutable home bounds"
             state.phase="RECOVERY_LOCK"
             save()
             sendState(state.recoveryReason)
             return false
         end
 
-        if not face(DIR_N) then
+        if not face(cfg.homeDir) then
             return false
         end
 
@@ -2108,48 +2115,20 @@ local function runMiner(cfg)
         return true
     end
 
-    local function prepareForForemanService()
-        if state.x~=cfg.row or state.y~=0 or state.z~=0 then
+    prepareForForemanService=function()
+        if state.x~=cfg.homeX or state.y~=cfg.homeY or state.z~=cfg.homeZ then
             return false
         end
-
         return face(DIR_S)
     end
 
-    local function dumpItems()
-        if not prepareForForemanService() then
-            return false,false
-        end
-
-        local movedAny=false
-
-        for slot=2,16 do
-            turtle.select(slot)
-
-            if turtle.getItemCount(slot)>0 then
-                local before=turtle.getItemCount(slot)
-
-                if turtle.drop() then
-                    sleep(0.05)
-
-                    if turtle.getItemCount(slot)<before then
-                        movedAny=true
-                    end
-                end
-            end
-        end
-
-        local empty=true
-
+    local function nextDumpSlot()
         for slot=2,16 do
             if turtle.getItemCount(slot)>0 then
-                empty=false
-                break
+                return slot,turtle.getItemCount(slot)
             end
         end
-
-        turtle.select(1)
-        return true,empty,movedAny
+        return nil,0
     end
 
     local function refuelSelf()
@@ -2212,7 +2191,8 @@ local function runMiner(cfg)
         requestPacket(true)
         sendState("Waiting south-facing for Foreman-" .. tostring(cfg.foremanNumber))
 
-        flags.dumpNow=false
+        flags.serviceProbe=nil
+        flags.dumpPrepare=nil
         flags.refuelNow=false
         flags.serviceComplete=false
 
@@ -2220,6 +2200,64 @@ local function runMiner(cfg)
             if flags.recallMode then
                 return false
             end
+
+            if flags.serviceProbe then
+                local requestId=flags.serviceProbe
+                flags.serviceProbe=nil
+
+                if prepareForForemanService() then
+                    send(cfg.foremanId,{
+                        type="service_probe_ack",
+                        requestId=requestId,
+                        row=state.row,
+                        x=state.x,
+                        y=state.y,
+                        z=state.z,
+                        dir=state.dir
+                    })
+                else
+                    send(cfg.foremanId,{
+                        type="service_not_adjacent",
+                        requestId=requestId,
+                        row=state.row
+                    })
+                end
+            end
+
+            if flags.dumpPrepare then
+                local requestId=flags.dumpPrepare
+                flags.dumpPrepare=nil
+
+                if not prepareForForemanService() then
+                    send(cfg.foremanId,{
+                        type="service_not_adjacent",
+                        row=state.row,
+                        requestId=requestId
+                    })
+                else
+                    local slot,count=nextDumpSlot()
+                    if slot then
+                        turtle.select(slot)
+                        send(cfg.foremanId,{
+                            type="dump_slot_ready",
+                            row=state.row,
+                            requestId=requestId,
+                            slot=slot,
+                            count=count,
+                            empty=false
+                        })
+                    else
+                        turtle.select(1)
+                        send(cfg.foremanId,{
+                            type="dump_slot_ready",
+                            row=state.row,
+                            requestId=requestId,
+                            empty=true
+                        })
+                    end
+                end
+            end
+
             if flags.refuelNow then
                 flags.refuelNow=false
                 refuelSelf()
@@ -2229,31 +2267,6 @@ local function runMiner(cfg)
                     requestId=state.request.id,
                     fuel=turtle.getFuelLevel()
                 })
-            end
-            if flags.dumpNow then
-                flags.dumpNow=false
-                local adjacent,empty,movedAny=dumpItems()
-
-                if not adjacent then
-                    send(cfg.foremanId,{
-                        type="service_not_adjacent",
-                        row=state.row,
-                        requestId=state.request.id
-                    })
-                elseif empty then
-                    send(cfg.foremanId,{
-                        type="dump_complete",
-                        row=state.row,
-                        requestId=state.request.id
-                    })
-                else
-                    send(cfg.foremanId,{
-                        type="dump_partial",
-                        row=state.row,
-                        requestId=state.request.id,
-                        movedAny=movedAny and true or false
-                    })
-                end
             end
             sleep(0.1)
         end
@@ -2301,11 +2314,43 @@ local function runMiner(cfg)
     local function applyManagerRecoveryPose()
         local snapshot,seq=requestPoseBackup("miner",5,cfg.session)
 
-        if snapshot and snapshot.row==cfg.row and
-            type(snapshot.x)=="number" and type(snapshot.y)=="number" and
-            type(snapshot.z)=="number" and type(snapshot.dir)=="number" then
-            local incoming=tonumber(seq or snapshot.seq or 0) or 0
+        if not snapshot or snapshot.row~=cfg.row or
+            type(snapshot.x)~="number" or type(snapshot.y)~="number" or
+            type(snapshot.z)~="number" or type(snapshot.dir)~="number" then
+            return true
+        end
 
+        local incoming=tonumber(seq or snapshot.seq or 0) or 0
+        local localSeq=tonumber(state.seq) or 0
+        local localValid=poseValid()
+        local managerValid=
+            snapshot.originEstablished==true and
+            snapshot.x==cfg.homeX and snapshot.y<=cfg.homeY and
+            snapshot.z>=cfg.shaftMinZ and snapshot.z<=cfg.shaftMaxZ and
+            snapshot.dir>=DIR_N and snapshot.dir<=DIR_W
+
+        if not managerValid then
+            return localValid
+        end
+
+        if localValid and localSeq==incoming then
+            if state.x~=snapshot.x or state.y~=snapshot.y or
+                state.z~=snapshot.z or state.dir~=snapshot.dir then
+                state.recoveryLocked=true
+                state.recoveryReason="Local and Regional Manager poses disagree at the same sequence"
+                state.phase="RECOVERY_LOCK"
+                save()
+                return false
+            end
+            return true
+        end
+
+        if localValid and localSeq>incoming then
+            checkpoint()
+            return true
+        end
+
+        if incoming>localSeq or not localValid then
             state.x=snapshot.x
             state.y=snapshot.y
             state.z=snapshot.z
@@ -2318,7 +2363,10 @@ local function runMiner(cfg)
             state.recoveryLocked=false
             state.recoveryReason=nil
             save()
+            return true
         end
+
+        return localValid
     end
 
     local function recall(mode)
@@ -2337,7 +2385,9 @@ local function runMiner(cfg)
             save()
         end
 
-        applyManagerRecoveryPose()
+        if not applyManagerRecoveryPose() then
+            return false
+        end
 
         if state.recoveryLocked then
             state.phase="RECOVERY_LOCK"
@@ -2364,7 +2414,8 @@ local function runMiner(cfg)
             return false
         end
 
-        if state.x~=cfg.row or state.y~=0 or state.z~=0 or state.dir~=DIR_N then
+        if state.x~=cfg.homeX or state.y~=cfg.homeY or
+            state.z~=cfg.homeZ or state.dir~=cfg.homeDir then
             state.phase="RECOVERY_LOCK"
             state.recoveryLocked=true
             state.recoveryReason="Recall home verification failed"
@@ -5498,69 +5549,75 @@ local function runForeman(cfg)
                     if not verifyServiceMiner(req) then
                         return false
                     end
-
-                    saveState()
                 end
 
                 send(req.minerId,{
-                    type="dump_now",
+                    type="dump_prepare",
                     requestId=req.requestId
                 })
 
-                local _,reply = waitInbox(function(sender,m)
+                local _,reply=waitInbox(function(sender,m)
                     return sender==req.minerId and type(m)=="table" and
-                        (m.type=="dump_complete" or m.type=="dump_partial" or m.type=="service_not_adjacent") and
+                        (m.type=="dump_slot_ready" or m.type=="service_not_adjacent") and
                         m.requestId==req.requestId
-                end,25)
+                end,10)
 
                 if not reply then
                     state.phase="SERVICE_TIMEOUT"
                     saveState()
-                    sendState("Miner-" .. tostring(req.row) .. " did not answer dump request")
+                    sendState("Miner-" .. tostring(req.row) .. " did not expose cargo")
                     return false
                 end
 
                 if reply.type=="service_not_adjacent" then
                     state.phase="SERVICE_ALIGNMENT_ERROR"
                     saveState()
-                    sendState("Miner-" .. tostring(req.row) .. " cannot see assigned Foreman")
+                    sendState("Miner-" .. tostring(req.row) .. " cannot establish service position")
                     return false
-                elseif reply.type=="dump_complete" then
+                end
+
+                if reply.empty then
                     dumpFinished=true
                 else
-                    state.phase="SERVICE_UNLOAD_TRIP"
-                    saveState()
-                    sendState("Miner-" .. tostring(req.row) .. " has more cargo; unloading and returning")
-                    send(cfg.managerId,{
-                        type="job_progress",
-                        requestId=req.requestId,
-                        foremanId=id,
-                        row=req.row,
-                        phase="PARTIAL_DUMP",
-                        session=cfg.session
-                    })
+                    local requested=math.min(64,tonumber(reply.count) or 64)
+                    local pulled=false
 
-                    if not dumpCargo() then
-                        send(cfg.managerId,{
-                            type="job_blocked",
-                            requestId=req.requestId,
-                            foremanId=id,
-                            row=req.row,
-                            reason=state.phase=="DOCK_BLOCKED" and "STORAGE_FULL" or "UNLOAD_FAILED",
-                            session=cfg.session
-                        })
-                        return false
+                    for attempt=1,3 do
+                        if turtle.suck(requested) then
+                            pulled=true
+                            break
+                        end
+                        sleep(0.1)
                     end
 
-                    if not goTo(req.row,0) then
-                        return false
-                    end
+                    if not pulled then
+                        if countRuntimeFreeSlots()<=0 then
+                            state.phase="SERVICE_UNLOAD_TRIP"
+                            saveState()
+                            sendState("Foreman inventory filled while pulling Miner-" .. tostring(req.row))
 
-                    if not verifyServiceMiner(req) then
-                        return false
-                    end
+                            if not dumpCargo() then
+                                send(cfg.managerId,{
+                                    type="job_blocked",
+                                    requestId=req.requestId,
+                                    foremanId=id,
+                                    row=req.row,
+                                    reason=state.phase=="DOCK_BLOCKED" and "STORAGE_FULL" or "UNLOAD_FAILED",
+                                    session=cfg.session
+                                })
+                                return false
+                            end
 
-                    saveState()
+                            if not goTo(req.row,0) or not verifyServiceMiner(req) then
+                                return false
+                            end
+                        else
+                            state.phase="SERVICE_TRANSFER_ERROR"
+                            saveState()
+                            sendState("Could not pull exposed cargo from Miner-" .. tostring(req.row))
+                            return false
+                        end
+                    end
                 end
             end
         end
@@ -6986,7 +7043,7 @@ local function runMaster()
     local newMaster=false
 
     if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v38.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v39.")
     end
 
     if not cfg then
@@ -7105,7 +7162,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version~=VERSION then
-        error("Old node state detected. Clear node.cfg and old state before using v38.")
+        error("Old node state detected. Clear node.cfg and old state before using v39.")
     elseif cfg.role=="miner" then
         setRegionalManager(cfg.managerId)
         if cfg.commissioned then
