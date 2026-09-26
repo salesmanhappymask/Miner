@@ -38,14 +38,14 @@ end
 local data,path=loadManagerState()
 
 if not data then
-    error("Run this program on the Regional Manager computer. No usable regional_manager state was found.")
+    error("Run this on the Regional Manager computer. No usable regional_manager state was found.")
 end
 
 if not openWireless() then
     error("No wireless modem found")
 end
 
-local version=tonumber(data.version) or 48
+local version=tonumber(data.version) or 47
 local protocol="miner_swarm_v"..tostring(version)
 local session=data.session
 
@@ -57,13 +57,22 @@ for row=1,16 do
     end
 end
 
-print("Loaded "..tostring(path))
+print("Legacy miner label clear")
+print("Loaded: "..tostring(path))
 print("Protocol: "..protocol)
-print("Sending miner label-clear maintenance request")
-print("This computer ID: "..tostring(os.getComputerID()))
+print("Known miners: "..tostring((function()
+    local c=0
+    for _ in pairs(miners) do c=c+1 end
+    return c
+end)()))
+print("")
+print("Sending repeated SHUTDOWN recall commands.")
+print("This works with older miners that are still running their startup program.")
+print("")
 
 local cleared={}
-local deadline=os.clock()+20
+local lastStatus={}
+local deadline=os.clock()+30
 local lastSend=0
 
 while os.clock()<deadline do
@@ -71,13 +80,13 @@ while os.clock()<deadline do
         for row,id in pairs(miners) do
             if not cleared[row] then
                 rednet.send(id,{
-                    type="maintenance_clear_label",
+                    type="recall_command",
+                    mode="SHUTDOWN",
                     session=session
                 },protocol)
 
                 rednet.send(id,{
-                    type="recall_command",
-                    mode="SHUTDOWN",
+                    type="status_query",
                     session=session
                 },protocol)
             end
@@ -88,26 +97,41 @@ while os.clock()<deadline do
     local sender,message,recvProtocol=rednet.receive(protocol,0.25)
 
     if sender and type(message)=="table" then
-        if message.type=="maintenance_label_cleared" and message.row then
+        if message.role=="miner" and message.row then
+            local row=tonumber(message.row)
+            lastStatus[row]=message.state or message.phase or "ONLINE"
+
+            if message.type=="recall_shutdown_ready" then
+                cleared[row]=true
+                print("Miner-"..tostring(row)..": shutdown recall acknowledged")
+            end
+        elseif message.type=="recall_shutdown_ready" and message.row then
             local row=tonumber(message.row)
             cleared[row]=true
-            print("Miner-"..tostring(row).." label clear: "..tostring(message.cleared))
-        elseif message.type=="recall_shutdown_ready" and message.role=="miner" and message.row then
-            local row=tonumber(message.row)
-            cleared[row]=true
-            print("Miner-"..tostring(row).." shutdown recall acknowledged")
+            print("Miner-"..tostring(row)..": shutdown recall acknowledged")
         end
     end
 end
 
+print("")
 local count=0
 for row=1,16 do
     if cleared[row] then count=count+1 end
 end
 
-print("")
-print("Acknowledged: "..count.."/16 miners")
+print("Acknowledged: "..tostring(count).."/16")
 
-if count<16 then
-    print("Unacknowledged miners may be powered off, crashed, unloaded, or running an older startup without the maintenance listener.")
+for row=1,16 do
+    if miners[row] and not cleared[row] then
+        print(
+            "Miner-"..tostring(row)..
+            " no shutdown ACK; last state="..
+            tostring(lastStatus[row] or "no response")
+        )
+    end
 end
+
+print("")
+print("Important:")
+print("An older miner that has crashed to the shell or is powered off cannot receive rednet.")
+print("This utility cannot remotely clear such a label because the old startup has no direct label-clear listener.")
