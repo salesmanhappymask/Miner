@@ -134,6 +134,19 @@ local function runForeman(cfg)
     local queue=type(qdata.queue)=="table" and qdata.queue or {}
     local active=type(qdata.active)=="table" and qdata.active or nil
     local resolved=type(qdata.resolved)=="table" and qdata.resolved or {}
+    local queueBootNow=now()
+    if active then active.lastSeen=queueBootNow end
+    for i=1,#queue do
+        if type(queue[i])=="table" then queue[i].lastSeen=queueBootNow end
+    end
+    for requestId in pairs(resolved) do
+        if type(resolved[requestId])=="table" then
+            resolved[requestId].stamp=queueBootNow
+            resolved[requestId].lastSend=nil
+        else
+            resolved[requestId]={stamp=queueBootNow,acknowledged=true}
+        end
+    end
     local peers = {}
     local intents = {}
     local recallTravel=false
@@ -240,7 +253,8 @@ local function runForeman(cfg)
             setupDone=state.setupDone and true or false,
             miningStarted=state.miningStarted and true or false,
             recovery=state.recoveryReason,
-            message=message or ""
+            message=message or "",
+            session=cfg.session
         })
         lastStatus = now()
     end
@@ -285,16 +299,31 @@ local function runForeman(cfg)
         end
         local requestId = message.requestId
         if resolved[requestId] then
-            if message.minerId then
-                send(message.minerId,{
-                    type="service_complete",
-                    requestId=requestId
+            local result=resolved[requestId]
+            if not result.minerId and message.managerAssigned then
+                result.minerId=message.minerId
+                result.row=message.row
+                result.service=message.service
+                result.acknowledged=false
+                saveQueue()
+            end
+            if result.minerId then
+                send(cfg.managerId,{
+                    type="job_complete",
+                    requestId=requestId,
+                    foremanId=id,
+                    foremanNumber=number,
+                    minerId=result.minerId,
+                    row=result.row,
+                    service=result.service,
+                    session=cfg.session
                 })
             end
             return
         end
         if active and active.requestId == requestId then
             active.arrived = active.arrived or message.type == "service_arrived"
+            if active.service~=message.service and message.service then active.service="BOTH" end
             active.lastSeen = now()
             saveQueue()
             return
@@ -302,6 +331,7 @@ local function runForeman(cfg)
         for i=1,#queue do
             if queue[i].requestId == requestId then
                 queue[i].arrived = queue[i].arrived or message.type == "service_arrived"
+                if queue[i].service~=message.service and message.service then queue[i].service="BOTH" end
                 queue[i].lastSeen = now()
                 saveQueue()
                 return
@@ -355,6 +385,9 @@ local function runForeman(cfg)
 
     local function requestDock()
         flags.dockGranted = false
+        while number~=1 and state.dockReleasePending do
+            sleep(0.1)
+        end
         if number == 1 then
             if dock.holder == id then
                 flags.dockGranted = true
@@ -395,6 +428,8 @@ local function runForeman(cfg)
                 grantDock()
             end
         else
+            state.dockReleasePending=true
+            saveState()
             send(cfg.controller,{type="dock_release",foremanId=id})
         end
     end
@@ -939,7 +974,8 @@ local function runForeman(cfg)
     end
 
     local function privateLaneZ()
-        return 1-number
+        if number==1 then return 0 end
+        return -number
     end
 
     local function goTo(tx,tz)
@@ -965,6 +1001,23 @@ local function runForeman(cfg)
 
         if not travelAxis(DIR_S,function() return state.z>tz end) then
             return false
+        end
+
+        return true
+    end
+
+    local function enterPrivateLane()
+        local laneZ=privateLaneZ()
+        local entryX=cfg.rowStart
+
+        if state.x==cfg.homeX and state.z==cfg.homeZ then
+            if state.x~=entryX then
+                if not goTo(entryX,cfg.homeZ) then return false end
+            end
+        end
+
+        if state.z~=laneZ then
+            if not goTo(state.x,laneZ) then return false end
         end
 
         return true
@@ -1091,25 +1144,29 @@ local function runForeman(cfg)
     end
 
     local function goPrivateHome()
-        if state.x <= 0 then
-            if state.x ~= -1 then
-                if not goTo(-1,state.z) then
-                    return false
-                end
+        local laneZ=privateLaneZ()
+        local approachX=cfg.rowStart
+
+        if state.x<=0 and state.z~=laneZ then
+            if state.x~=-1 then
+                if not goTo(-1,state.z) then return false end
             end
-            if not goTo(-1,cfg.homeZ) then
-                return false
-            end
-            if not goTo(cfg.homeX,cfg.homeZ) then
-                return false
-            end
-        else
-            if not goTo(state.x,cfg.homeZ) then
-                return false
-            end
-            if not goTo(cfg.homeX,cfg.homeZ) then
-                return false
-            end
+            if not goTo(-1,cfg.homeZ) then return false end
+            if not goTo(cfg.homeX,cfg.homeZ) then return false end
+            return true
+        end
+
+        if state.z~=laneZ then
+            if not goTo(state.x,laneZ) then return false end
+        end
+        if state.x~=approachX then
+            if not goTo(approachX,laneZ) then return false end
+        end
+        if state.z~=cfg.homeZ then
+            if not goTo(approachX,cfg.homeZ) then return false end
+        end
+        if state.x~=cfg.homeX then
+            if not goTo(cfg.homeX,cfg.homeZ) then return false end
         end
         return true
     end
@@ -1324,7 +1381,7 @@ local function runForeman(cfg)
             return false
         end
         faceTracked(DIR_N)
-        state.phase="IDLE"
+        state.phase=active and "SERVICING" or "IDLE"
         saveState()
         sendState("Waiting")
         return true
@@ -1391,7 +1448,12 @@ local function runForeman(cfg)
                     if not ok then
                         state.phase="DOCK_BLOCKED"
                         saveState()
-                        sendState("Supply chest full; dock token retained")
+                        local leftTop=not useTop or leaveSupplyTop()
+                        local yielded=leftTop and exitDockHome()
+                        state.phase="DOCK_BLOCKED"
+                        saveState()
+                        sendState(yielded and "Supply chest full; waiting with cargo at home" or
+                            "Supply chest full; could not safely leave dock")
                         return false
                     end
                 end
@@ -1512,7 +1574,7 @@ local function runForeman(cfg)
                 local protocol = event[4]
                 if protocol == PROTOCOL and type(message) == "table" then
                     if sender==cfg.managerId and message.type=="manager_job" and
-                        message.foremanNumber==number then
+                        message.session==cfg.session and message.foremanNumber==number then
                         upsertRequest({
                             type="service_arrived",
                             requestId=message.requestId,
@@ -1563,8 +1625,12 @@ local function runForeman(cfg)
                             saveDock()
                             grantDock()
                         end
+                        send(message.foremanId,{type="dock_released"})
                     elseif message.type == "dock_grant" then
                         flags.dockGranted = true
+                    elseif message.type=="dock_released" and sender==cfg.controller then
+                        state.dockReleasePending=nil
+                        saveState()
                     elseif message.type == "navigator_setup_start" and number==4 and sender==cfg.controller then
                         if state.navigatorSetupDone then
                             send(cfg.controller,{
@@ -1602,19 +1668,30 @@ local function runForeman(cfg)
                         commissionWave[message.number] = nil
                         saveState()
                         pushInbox(sender,message)
-                    elseif sender==cfg.managerId and message.type == "start_mining" then
+                    elseif sender==cfg.managerId and message.session==cfg.session and message.type == "start_mining" then
                         flags.startMining = true
-                    elseif sender==cfg.managerId and message.type == "recall_command" then
+                    elseif sender==cfg.managerId and message.session==cfg.session and message.type == "recall_command" then
                         flags.recallMode = message.mode or "NORMAL"
-                    elseif sender==cfg.managerId and message.type == "resume_swarm" then
-                        flags.resume=true
-                    elseif sender==cfg.managerId and message.type == "status_query" then
+                    elseif sender==cfg.managerId and message.session==cfg.session and message.type == "resume_swarm" then
+                        if state.phase=="RECALLED_PAUSED" or state.phase=="RECALLING" or state.recallMode or flags.recallMode then
+                            flags.resume=true
+                        end
+                    elseif sender==cfg.managerId and message.session==cfg.session and message.type == "status_query" then
                         sendState("")
+                    elseif sender==cfg.managerId and message.session==cfg.session and message.type=="job_complete_ack" then
+                        local result=resolved[message.requestId]
+                        if result then
+                            result.acknowledged=true
+                            saveQueue()
+                        end
                     else
                         pushInbox(sender,message)
                     end
                 end
             elseif event[1] == "timer" and event[2] == timer then
+                if number~=1 and state.dockReleasePending then
+                    send(cfg.controller,{type="dock_release",foremanId=id})
+                end
                 if now() - lastStatus >= STATUS_INTERVAL then
                     sendState("")
                 end
@@ -1637,9 +1714,24 @@ local function runForeman(cfg)
                     end
                 end
                 for requestId,stamp in pairs(resolved) do
-                    local resolvedAt=tonumber(stamp)
+                    local result=type(stamp)=="table" and stamp or nil
+                    local resolvedAt=result and tonumber(result.stamp)
 
-                    if not resolvedAt or now()-resolvedAt>300 then
+                    if result and not result.acknowledged and result.minerId then
+                        if not result.lastSend or now()-result.lastSend>=2 then
+                            send(cfg.managerId,{
+                                type="job_complete",
+                                requestId=requestId,
+                                foremanId=id,
+                                foremanNumber=number,
+                                minerId=result.minerId,
+                                row=result.row,
+                                service=result.service,
+                                session=cfg.session
+                            })
+                            result.lastSend=now()
+                        end
+                    elseif not resolvedAt or now()-resolvedAt>300 then
                         resolved[requestId]=nil
                     end
                 end
@@ -2995,10 +3087,8 @@ local function runForeman(cfg)
             if not firstIsBootstrap then
                 local laneZ=privateLaneZ()
 
-                if state.z~=laneZ then
-                    if not goTo(state.x,laneZ) then
-                        return false
-                    end
+                if not enterPrivateLane() then
+                    return false
                 end
 
                 if state.x~=firstPending then
@@ -3052,10 +3142,8 @@ local function runForeman(cfg)
 
                     local laneZ=privateLaneZ()
 
-                    if state.z~=laneZ then
-                        if not goTo(state.x,laneZ) then
-                            return false
-                        end
+                    if not enterPrivateLane() then
+                        return false
                     end
 
                     if state.x~=nextRow then
@@ -3898,10 +3986,8 @@ local function runForeman(cfg)
 
         local laneZ=privateLaneZ()
 
-        if state.z~=laneZ then
-            if not goTo(state.x,laneZ) then
-                return false
-            end
+        if not enterPrivateLane() then
+            return false
         end
 
         if state.x~=req.row then
@@ -3980,6 +4066,8 @@ local function runForeman(cfg)
                         })
 
                         if not dumpCargo() then
+                            state.blockedCargo=true
+                            saveState()
                             send(cfg.managerId,{
                                 type="job_blocked",
                                 requestId=req.requestId,
@@ -3990,13 +4078,13 @@ local function runForeman(cfg)
                             })
                             return false
                         end
+                        state.blockedCargo=nil
+                        saveState()
 
                         local laneZ=privateLaneZ()
 
-                        if state.z~=laneZ then
-                            if not goTo(state.x,laneZ) then
-                                return false
-                            end
+                        if not enterPrivateLane() then
+                            return false
                         end
 
                         if state.x~=req.row then
@@ -4032,11 +4120,22 @@ local function runForeman(cfg)
             saveState()
 
             if not dumpCargo() then
+                state.blockedCargo=true
+                saveState()
                 return false
             end
+            state.blockedCargo=nil
+            saveState()
         end
 
-        resolved[req.requestId] = now()
+        resolved[req.requestId] = {
+            stamp=now(),
+            minerId=req.minerId,
+            row=req.row,
+            service=req.service,
+            acknowledged=false
+        }
+        saveQueue()
         send(cfg.managerId,{
             type="job_complete",
             requestId=req.requestId,
@@ -4311,7 +4410,15 @@ local function runForeman(cfg)
             if state.phase=="RECALLED_PAUSED" then
                 sleep(0.2)
             elseif active then
-                if not serviceRequest(active) then
+                local ready=true
+                if state.blockedCargo then
+                    ready=dumpCargo()
+                    if ready then
+                        state.blockedCargo=nil
+                        saveState()
+                    end
+                end
+                if not ready or not serviceRequest(active) then
                     local failed=active
                     local failurePhase=state.phase
                     local blockedReason=nil
@@ -4338,8 +4445,11 @@ local function runForeman(cfg)
                         })
                     end
 
-                    active=nil
-                    queue={}
+                    if blockedReason then
+                        sleep(5)
+                    else
+                        active=nil
+                    end
                     saveQueue()
 
                     if not blockedReason then

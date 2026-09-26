@@ -155,21 +155,35 @@ local function runMinerCommissioning(cfg)
         return true
     end
 
+    local function faceCommissioning(target)
+        if not state.orientationCalibrated then
+            if not establishPlacedMinerNorth() then return false end
+        end
+        while state.dir~=target do
+            if not turtle.turnRight() then return false end
+            state.dir=(state.dir+1)%4
+            save()
+        end
+        return true
+    end
+
     status("miner","COMMISSIONING",{
         row=cfg.row,
         foreman=cfg.foremanNumber,
-        message=state.installerHeld and "Holding Disk Drive" or "Waiting for assigned foreman"
+        message=state.installerHeld and "Holding Disk Drive" or "Waiting for assigned foreman",
+        session=cfg.session
     })
 
     while true do
         local sender,message=rednet.receive(PROTOCOL,1)
 
-        if sender==cfg.managerId and type(message)=="table" then
+        if sender==cfg.managerId and type(message)=="table" and message.session==cfg.session then
             if message.type=="status_query" then
                 status("miner","COMMISSIONING",{
                     row=cfg.row,
                     foreman=cfg.foremanNumber,
-                    message=state.installerHeld and "Holding Disk Drive" or "Commissioning"
+                    message=state.installerHeld and "Holding Disk Drive" or "Commissioning",
+                    session=cfg.session
                 })
             elseif message.type=="maintenance_clear_label" and message.session==cfg.session then
                 local before=os.getComputerLabel()
@@ -182,20 +196,83 @@ local function runMinerCommissioning(cfg)
                     cleared=os.getComputerLabel()==nil,
                     session=cfg.session
                 })
+            elseif message.type=="service_complete" and state.request and message.requestId==state.request.id then
+                local wasDump=state.request.recallDump and true or false
+                state.lastCompletedRequest=state.request.id
+                state.request=nil
+                save()
+                send(cfg.managerId,{type="service_complete_ack",requestId=message.requestId,session=cfg.session})
+                if wasDump and state.phase=="RECALLED_PAUSED" then
+                    faceCommissioning(DIR_N)
+                    send(cfg.managerId,{
+                        type="recall_dump_empty",
+                        role="miner",
+                        row=cfg.row,
+                        id=os.getComputerID(),
+                        x=state.x or cfg.homeX,
+                        y=state.y or cfg.homeY,
+                        z=state.z or cfg.homeZ,
+                        dir=state.dir or cfg.homeDir,
+                        session=cfg.session
+                    })
+                end
+            elseif message.type=="service_complete" and message.requestId==state.lastCompletedRequest then
+                send(cfg.managerId,{type="service_complete_ack",requestId=message.requestId,session=cfg.session})
             elseif message.type=="recall_command" then
                 local mode=message.mode or "NORMAL"
 
-                if mode=="SHUTDOWN" then
+                if state.phase=="RECALLED_PAUSED" and state.recallMode==mode then
+                    send(cfg.managerId,{
+                        type="recall_home",
+                        role="miner",
+                        row=cfg.row,
+                        id=os.getComputerID(),
+                        mode=mode,
+                        labelCleared=false,
+                        x=state.x or cfg.homeX,
+                        y=state.y or cfg.homeY,
+                        z=state.z or cfg.homeZ,
+                        dir=state.dir or cfg.homeDir,
+                        session=cfg.session
+                    })
+                    if mode=="DUMP" and state.request then
+                        send(cfg.managerId,{
+                            type="service_arrived",
+                            row=cfg.row,
+                            requestId=state.request.id,
+                            service="DUMP",
+                            minerId=os.getComputerID(),
+                            foremanId=cfg.foremanId,
+                            foremanNumber=cfg.foremanNumber,
+                            fuel=turtle.getFuelLevel(),
+                            x=state.x or cfg.homeX,
+                            y=state.y or cfg.homeY,
+                            z=state.z or cfg.homeZ,
+                            dir=state.dir or cfg.homeDir,
+                            session=cfg.session
+                        })
+                    elseif mode=="DUMP" and not state.request then
+                        send(cfg.managerId,{
+                            type="recall_dump_empty",
+                            role="miner",
+                            row=cfg.row,
+                            id=os.getComputerID(),
+                            x=state.x or cfg.homeX,
+                            y=state.y or cfg.homeY,
+                            z=state.z or cfg.homeZ,
+                            dir=state.dir or cfg.homeDir,
+                            session=cfg.session
+                        })
+                    end
+                elseif mode=="SHUTDOWN" then
+                    faceCommissioning(DIR_N)
+                    state.recallMode=mode
+                    save()
                     for i=1,5 do
                         os.setComputerLabel(nil)
-
-                        if os.getComputerLabel()==nil then
-                            break
-                        end
-
+                        if os.getComputerLabel()==nil then break end
                         sleep(0.1)
                     end
-
                     send(cfg.managerId,{
                         type="recall_home",
                         role="miner",
@@ -209,7 +286,6 @@ local function runMinerCommissioning(cfg)
                         dir=state.dir or cfg.homeDir,
                         session=cfg.session
                     })
-
                     send(cfg.managerId,{
                         type="recall_shutdown_ready",
                         role="miner",
@@ -221,77 +297,101 @@ local function runMinerCommissioning(cfg)
                         dir=state.dir or cfg.homeDir,
                         session=cfg.session
                     })
-
                     os.shutdown()
                 elseif mode=="NORMAL" then
-                    state.phase="RECALLED_PAUSED"
-                    save()
-
-                    send(cfg.managerId,{
-                        type="recall_home",
-                        role="miner",
-                        row=cfg.row,
-                        id=os.getComputerID(),
-                        mode=mode,
-                        labelCleared=false,
-                        x=state.x or cfg.homeX,
-                        y=state.y or cfg.homeY,
-                        z=state.z or cfg.homeZ,
-                        dir=state.dir or cfg.homeDir,
-                        session=cfg.session
-                    })
+                    if not faceCommissioning(DIR_N) then
+                        state.phase="RECOVERY_LOCK"
+                        save()
+                    else
+                        state.phase="RECALLED_PAUSED"
+                        state.recallMode=mode
+                        save()
+                        send(cfg.managerId,{
+                            type="recall_home",
+                            role="miner",
+                            row=cfg.row,
+                            id=os.getComputerID(),
+                            mode=mode,
+                            labelCleared=false,
+                            x=state.x or cfg.homeX,
+                            y=state.y or cfg.homeY,
+                            z=state.z or cfg.homeZ,
+                            dir=state.dir or cfg.homeDir,
+                            session=cfg.session
+                        })
+                    end
                 elseif mode=="DUMP" then
-                    state.phase="RECALLED_PAUSED"
-                    state.requestSeq=(state.requestSeq or 0)+1
-                    state.request={
-                        id=tostring(os.getComputerID()) .. ":commission_dump:" .. tostring(state.requestSeq),
-                        kind="DUMP",
-                        recallDump=true
-                    }
-                    save()
-
-                    send(cfg.managerId,{
-                        type="recall_home",
-                        role="miner",
-                        row=cfg.row,
-                        id=os.getComputerID(),
-                        mode=mode,
-                        labelCleared=false,
-                        x=state.x or cfg.homeX,
-                        y=state.y or cfg.homeY,
-                        z=state.z or cfg.homeZ,
-                        dir=state.dir or cfg.homeDir,
-                        session=cfg.session
-                    })
-
-                    send(cfg.managerId,{
-                        type="service_arrived",
-                        row=cfg.row,
-                        requestId=state.request.id,
-                        service="DUMP",
-                        minerId=os.getComputerID(),
-                        foremanId=cfg.foremanId,
-                        foremanNumber=cfg.foremanNumber,
-                        fuel=turtle.getFuelLevel(),
-                        x=state.x or cfg.homeX,
-                        y=state.y or cfg.homeY,
-                        z=state.z or cfg.homeZ,
-                        dir=state.dir or cfg.homeDir,
-                        session=cfg.session
-                    })
+                    if not faceCommissioning(DIR_S) then
+                        state.phase="RECOVERY_LOCK"
+                        save()
+                    else
+                        state.phase="RECALLED_PAUSED"
+                        state.recallMode=mode
+                        if not state.request then
+                            state.requestSeq=(state.requestSeq or 0)+1
+                            state.request={
+                                id=tostring(os.getComputerID()) .. ":commission_dump:" .. tostring(state.requestSeq),
+                                kind="DUMP",
+                                recallDump=true
+                            }
+                        end
+                        save()
+                        send(cfg.managerId,{
+                            type="recall_home",
+                            role="miner",
+                            row=cfg.row,
+                            id=os.getComputerID(),
+                            mode=mode,
+                            labelCleared=false,
+                            x=state.x or cfg.homeX,
+                            y=state.y or cfg.homeY,
+                            z=state.z or cfg.homeZ,
+                            dir=state.dir or DIR_S,
+                            session=cfg.session
+                        })
+                        send(cfg.managerId,{
+                            type="service_arrived",
+                            row=cfg.row,
+                            requestId=state.request.id,
+                            service="DUMP",
+                            minerId=os.getComputerID(),
+                            foremanId=cfg.foremanId,
+                            foremanNumber=cfg.foremanNumber,
+                            fuel=turtle.getFuelLevel(),
+                            x=state.x or cfg.homeX,
+                            y=state.y or cfg.homeY,
+                            z=state.z or cfg.homeZ,
+                            dir=state.dir or DIR_S,
+                            session=cfg.session
+                        })
+                    end
                 end
             elseif message.type=="resume_swarm" and state.phase=="RECALLED_PAUSED" then
                 state.phase="COMMISSIONING"
+                state.recallMode=nil
                 save()
             end
 
         elseif sender==cfg.foremanId and type(message)=="table" then
-            if state.phase=="RECALLED_PAUSED" then
+            if message.type=="service_probe" and state.request and message.requestId==state.request.id then
+                if faceCommissioning(DIR_S) then
+                    send(cfg.foremanId,{
+                        type="service_probe_ack",
+                        requestId=message.requestId,
+                        row=cfg.row,
+                        x=state.x or cfg.homeX,
+                        y=state.y or cfg.homeY,
+                        z=state.z or cfg.homeZ,
+                        dir=DIR_S
+                    })
+                end
+            elseif state.phase=="RECALLED_PAUSED" then
                 if message.type=="status_query" then
                     status("miner","RECALLED_PAUSED",{
                         row=cfg.row,
                         foreman=cfg.foremanNumber,
-                        message="Commissioning paused by Regional Manager"
+                        message="Commissioning paused by Regional Manager",
+                        session=cfg.session
                     })
                 end
             elseif message.type=="commission_refuel" then
@@ -395,7 +495,8 @@ local function runMinerCommissioning(cfg)
                         row=cfg.row,
                         foreman=cfg.foremanNumber,
                         recovery=state.recoveryReason,
-                        message="Deployment halted rather than guessing position"
+                        message="Deployment halted rather than guessing position",
+                        session=cfg.session
                     })
                 elseif cfg.tempDeployment then
                     state.phase="MOVING_TO_ORIGIN"
@@ -500,7 +601,8 @@ local function runMinerCommissioning(cfg)
                         y=state.y,
                         z=state.z,
                         dir=state.dir,
-                        message="Ready, north calibrated"
+                        message="Ready, north calibrated",
+                        session=cfg.session
                     })
 
                     sleep(0.5)
@@ -747,7 +849,8 @@ local function runMiner(cfg)
             fuel=turtle.getFuelLevel(),
             request=state.request and state.request.kind or nil,
             recovery=state.recoveryReason,
-            message=message or ""
+            message=message or "",
+            session=cfg.session
         })
         lastStatus = now()
     end
@@ -812,14 +915,58 @@ local function runMiner(cfg)
                             cleared=os.getComputerLabel()==nil,
                             session=cfg.session
                         })
-                    elseif sender == cfg.managerId then
-                        if message.type == "start_mining" or message.type=="resume_swarm" then
-                            flags.start = true
-                            flags.resume = message.type=="resume_swarm"
-                        elseif message.type == "service_complete" and state.request and message.requestId == state.request.id then
+                    elseif sender == cfg.managerId and message.session==cfg.session then
+                        if message.type == "start_mining" then
+                            flags.start=true
+                        elseif message.type=="resume_swarm" then
+                            flags.start=true
+                            if state.phase=="RECALLED_PAUSED" or state.phase=="RECALLING" or state.recallMode or state.recallResume or flags.recallMode then
+                                flags.resume=true
+                            end
+            elseif message.type == "service_complete" and state.request and message.requestId == state.request.id then
                             flags.serviceComplete = true
+                        elseif message.type=="service_complete" and
+                            message.requestId==state.lastCompletedRequest then
+                            send(cfg.managerId,{
+                                type="service_complete_ack",
+                                requestId=message.requestId,
+                                session=cfg.session
+                            })
                         elseif message.type == "recall_command" then
-                            flags.recallMode = message.mode or "NORMAL"
+                            local incomingMode=message.mode or "NORMAL"
+                            if state.recallMode==incomingMode and (state.phase=="RECALLED_PAUSED" or state.phase=="WAITING_SERVICE" or state.phase=="RECALLING") then
+                                if state.phase=="WAITING_SERVICE" and state.request then
+                                    requestPacket(true)
+                                elseif state.phase=="RECALLED_PAUSED" then
+                                    send(cfg.managerId,{
+                                        type="recall_home",
+                                        role="miner",
+                                        row=state.row,
+                                        id=os.getComputerID(),
+                                        mode=incomingMode,
+                                        x=state.x,
+                                        y=state.y,
+                                        z=state.z,
+                                        dir=state.dir,
+                                        session=cfg.session
+                                    })
+                                    if incomingMode=="DUMP" and not state.request then
+                                        send(cfg.managerId,{
+                                            type="recall_dump_empty",
+                                            role="miner",
+                                            row=state.row,
+                                            id=os.getComputerID(),
+                                            x=state.x,
+                                            y=state.y,
+                                            z=state.z,
+                                            dir=state.dir,
+                                            session=cfg.session
+                                        })
+                                    end
+                                end
+                            else
+                                flags.recallMode=incomingMode
+                            end
                         elseif message.type == "hold_position" then
                             state.phase="RECOVERY_LOCK"
                             state.recoveryLocked=true
@@ -1401,7 +1548,14 @@ local function runMiner(cfg)
         flags.serviceComplete=false
         local wasFinal=state.request.finalService and true or false
         local wasRecallDump=state.request.recallDump and true or false
+        state.lastCompletedRequest=state.request.id
         state.request=nil
+        save()
+        send(cfg.managerId,{
+            type="service_complete_ack",
+            requestId=state.lastCompletedRequest,
+            session=cfg.session
+        })
 
         if wasRecallDump then
             state.phase="RECALLED_PAUSED"
@@ -1579,6 +1733,12 @@ local function runMiner(cfg)
                     recallDump=true
                 }
                 save()
+            else
+                state.request.recallDump=true
+                if state.request.kind=="REFUEL" then
+                    state.request.kind="BOTH"
+                end
+                save()
             end
             requestPacket(true)
             state.phase="WAITING_SERVICE"
@@ -1680,6 +1840,43 @@ local function runMiner(cfg)
         return true
     end
 
+    local function waitRecalledPause()
+        while state.phase=="RECALLED_PAUSED" do
+            if flags.recallMode then
+                local nextMode=flags.recallMode
+                flags.recallMode=nil
+                if nextMode~=state.recallMode then
+                    if not recall(nextMode) then return false end
+                end
+            elseif flags.resume then
+                flags.resume=false
+                if not resumeFromRecall() then return false end
+            else
+                sleep(0.1)
+            end
+        end
+        return not state.recoveryLocked
+    end
+
+    local function handleRecallRequest()
+        if not flags.recallMode then
+            return true
+        end
+        local mode=flags.recallMode
+        if not recall(mode) then
+            return false
+        end
+        if state.phase=="WAITING_SERVICE" and state.request and state.request.recallDump then
+            if not service(state.request.kind or "DUMP",false,true) then
+                if flags.recallMode then
+                    return handleRecallRequest()
+                end
+                return false
+            end
+        end
+        return waitRecalledPause()
+    end
+
     send(cfg.managerId,{
         type="node_online",
         role="miner",
@@ -1716,57 +1913,58 @@ local function runMiner(cfg)
         checkpoint()
 
         if state.phase=="RECALLED_PAUSED" then
-            while state.phase=="RECALLED_PAUSED" do
-                if flags.resume then
-                    flags.resume=false
-                    resumeFromRecall()
-                elseif flags.recallMode=="SHUTDOWN" then
-                    recall("SHUTDOWN")
-                end
-                sleep(0.1)
-            end
+            if not waitRecalledPause() then return end
         end
 
         if state.complete then
-            state.phase = "COMPLETE"
+            state.phase="COMPLETE"
             save()
         end
 
-        while state.phase == "WAITING" and not flags.start do
+        while state.phase=="WAITING" and not flags.start do
             if flags.recallMode then
-                recall(flags.recallMode)
+                if not handleRecallRequest() then return end
             elseif flags.resume then
                 flags.resume=false
-                resumeFromRecall()
+                if not resumeFromRecall() then return end
             end
             sleep(0.1)
         end
 
-        if state.phase == "COMPLETE" then
+        if state.phase=="COMPLETE" then
             while true do
                 if flags.recallMode then
-                    recall(flags.recallMode)
+                    if not handleRecallRequest() then return end
                 elseif flags.resume then
                     flags.resume=false
-                    resumeFromRecall()
+                    if not resumeFromRecall() then return end
                 end
                 sleep(0.2)
             end
         end
 
-        if state.phase == "WAITING_SERVICE" or state.phase == "RETURNING_SERVICE" then
+        if state.phase=="WAITING_SERVICE" or state.phase=="RETURNING_SERVICE" then
             local kind=state.request and state.request.kind or "DUMP"
-            service(kind,state.request and state.request.finalService,true)
-        elseif state.phase == "RETURNING_MINE" then
-            returnToMine()
-        elseif state.phase == "MINING" then
+            local ok=service(kind,state.request and state.request.finalService,true)
+            if not ok and flags.recallMode then
+                if not handleRecallRequest() then return end
+            end
+            if state.phase=="RECALLED_PAUSED" then
+                if not waitRecalledPause() then return end
+            end
+        elseif state.phase=="RETURNING_MINE" then
+            if not returnToMine() then return end
+        elseif state.phase=="MINING" then
         else
             state.phase="WAITING"
             save()
 
             while not flags.start do
                 if flags.recallMode then
-                    recall(flags.recallMode or "NORMAL")
+                    if not handleRecallRequest() then return end
+                elseif flags.resume then
+                    flags.resume=false
+                    if not resumeFromRecall() then return end
                 end
                 sleep(0.1)
             end
@@ -1786,10 +1984,16 @@ local function runMiner(cfg)
         local function finishMining()
             sendState("Bedrock reached")
 
-            if not service("DUMP",true) then
-                if flags.recallMode then
-                    recall(flags.recallMode)
+            local serviceOk=service("DUMP",true)
+            if not serviceOk and flags.recallMode then
+                if not handleRecallRequest() then return false end
+                if state.phase=="WAITING_SERVICE" or state.phase=="RETURNING_SERVICE" then
+                    serviceOk=service("DUMP",true,true)
                 end
+            end
+
+            if not serviceOk then
+                return false
             end
 
             state.complete=true
@@ -1807,7 +2011,7 @@ local function runMiner(cfg)
 
             while true do
                 if flags.recallMode then
-                    recall(flags.recallMode)
+                    if not handleRecallRequest() then return false end
                 end
                 sleep(0.2)
             end
@@ -1815,7 +2019,11 @@ local function runMiner(cfg)
 
         while true do
             if flags.recallMode then
-                recall(flags.recallMode)
+                if not handleRecallRequest() then return end
+            end
+
+            if state.phase=="RECALLED_PAUSED" then
+                if not waitRecalledPause() then return end
             end
 
             if state.dir~=DIR_N and state.dir~=DIR_S then
@@ -1829,35 +2037,47 @@ local function runMiner(cfg)
 
             local kind=neededService()
             if kind then
-                if not service(kind) and flags.recallMode then
-                    recall(flags.recallMode)
+                local ok=service(kind)
+                if not ok and flags.recallMode then
+                    if not handleRecallRequest() then return end
+                end
+                if state.phase=="RECALLED_PAUSED" then
+                    if not waitRecalledPause() then return end
                 end
             end
 
             if state.dir==DIR_N then
                 while state.pos<15 do
                     if flags.recallMode then
-                        recall(flags.recallMode)
+                        if not handleRecallRequest() then return end
                     end
 
-                    local s=neededService()
-                    if s then
-                        service(s)
+                    local needed=neededService()
+                    if needed then
+                        local ok=service(needed)
+                        if not ok and flags.recallMode then
+                            if not handleRecallRequest() then return end
+                        end
+                        if state.phase=="RECALLED_PAUSED" then
+                            if not waitRecalledPause() then return end
+                        end
                     end
 
                     clearMiningColumn()
 
-                    if not digForward() then
-                        if flags.recallMode then
-                            recall(flags.recallMode)
-                        end
+                    if flags.recallMode then
+                        if not handleRecallRequest() then return end
+                    end
+
+                    if not digForward() and flags.recallMode then
+                        if not handleRecallRequest() then return end
                     end
                 end
 
                 clearMiningColumn()
 
                 if descendMiningBand()==0 then
-                    finishMining()
+                    if not finishMining() then return end
                 end
 
                 if not face(DIR_S) then
@@ -1871,27 +2091,35 @@ local function runMiner(cfg)
             else
                 while state.pos>0 do
                     if flags.recallMode then
-                        recall(flags.recallMode)
+                        if not handleRecallRequest() then return end
                     end
 
-                    local s=neededService()
-                    if s then
-                        service(s)
+                    local needed=neededService()
+                    if needed then
+                        local ok=service(needed)
+                        if not ok and flags.recallMode then
+                            if not handleRecallRequest() then return end
+                        end
+                        if state.phase=="RECALLED_PAUSED" then
+                            if not waitRecalledPause() then return end
+                        end
                     end
 
                     clearMiningColumn()
 
-                    if not digForward() then
-                        if flags.recallMode then
-                            recall(flags.recallMode)
-                        end
+                    if flags.recallMode then
+                        if not handleRecallRequest() then return end
+                    end
+
+                    if not digForward() and flags.recallMode then
+                        if not handleRecallRequest() then return end
                     end
                 end
 
                 clearMiningColumn()
 
                 if descendMiningBand()==0 then
-                    finishMining()
+                    if not finishMining() then return end
                 end
 
                 if not face(DIR_N) then

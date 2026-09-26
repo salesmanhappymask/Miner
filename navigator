@@ -300,7 +300,8 @@ local function runNavigator(cfg)
                     x=state.x,
                     y=state.y,
                     z=state.z,
-                    message="Recall home reached but Navigator label could not be cleared"
+                    message="Recall home reached but Navigator label could not be cleared",
+                    session=cfg.session
                 })
                 return false
             end
@@ -324,15 +325,62 @@ local function runNavigator(cfg)
     end
 
     local function sendNavigatorStatus()
-        status("navigator","GPS_HOST",{
+        status("navigator",state.recalled and "RECALLED_PAUSED" or "GPS_HOST",{
             number=cfg.number,
             x=state.x,
             y=state.y,
             z=state.z,
-            gpsHost=true,
+            gpsHost=not state.recalled,
             modemSide=modemSide,
-            message="GPS host active"
+            message=state.recalled and "Navigator recalled" or "GPS host active",
+            session=cfg.session
         })
+    end
+
+    local function resumeNavigator()
+        if not state.recalled then
+            return true
+        end
+
+        local site=NAVIGATOR_SITES[cfg.number]
+        if not site then
+            return false
+        end
+
+        if state.y<10 then
+            if not vertical(10) then return false end
+        end
+
+        while state.x<site.x do
+            if not step(DIR_E) then return false end
+        end
+        while state.x>site.x do
+            if not step(DIR_W) then return false end
+        end
+        while state.z<site.z do
+            if not step(DIR_N) then return false end
+        end
+        while state.z>site.z do
+            if not step(DIR_S) then return false end
+        end
+
+        if not vertical(site.y) then
+            return false
+        end
+
+        if not face(DIR_N) then
+            return false
+        end
+
+        state.recalled=false
+        state.recallMode=nil
+        save()
+        cfg.x=state.x
+        cfg.y=state.y
+        cfg.z=state.z
+        saveTable("node.cfg",cfg)
+        sendNavigatorStatus()
+        return true
     end
 
     sendNavigatorStatus()
@@ -348,7 +396,7 @@ local function runNavigator(cfg)
             local replyChannel=event[4]
             local message=event[5]
 
-            if side==modemSide and channel==gps.CHANNEL_GPS and message=="PING" then
+            if side==modemSide and channel==gps.CHANNEL_GPS and message=="PING" and not state.recalled then
                 modem.transmit(replyChannel,gps.CHANNEL_GPS,{state.x,state.y,state.z})
             end
         elseif event[1]=="rednet_message" then
@@ -356,7 +404,7 @@ local function runNavigator(cfg)
             local message=event[3]
             local protocol=event[4]
 
-            if sender==cfg.managerId and protocol==PROTOCOL and type(message)=="table" then
+            if sender==cfg.managerId and protocol==PROTOCOL and type(message)=="table" and message.session==cfg.session then
                 if message.type=="status_query" then
                     sendNavigatorStatus()
                 elseif message.type=="recall_command" then
@@ -366,7 +414,19 @@ local function runNavigator(cfg)
                             x=state.x,
                             y=state.y,
                             z=state.z,
-                            message="Navigator recall route blocked"
+                            message="Navigator recall route blocked",
+                            session=cfg.session
+                        })
+                    end
+                elseif message.type=="resume_swarm" then
+                    if not resumeNavigator() then
+                        status("navigator","NAVIGATION_ERROR",{
+                            number=cfg.number,
+                            x=state.x,
+                            y=state.y,
+                            z=state.z,
+                            message="Navigator could not return to GPS site",
+                            session=cfg.session
                         })
                     end
                 end

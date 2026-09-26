@@ -54,8 +54,10 @@ local function runRegionalManager()
                 active=false,
                 homeMiners={},
                 homeForemen={},
+                homeNavigators={},
                 emptied={},
-                shutdown={}
+                shutdown={},
+                targets={miners={},foremen={},navigators={}}
             }
         }
         saveTableLight("regional_manager.tmp",data)
@@ -82,14 +84,47 @@ local function runRegionalManager()
         active=false,
         homeMiners={},
         homeForemen={},
+        homeNavigators={},
         emptied={},
-        shutdown={}
+        shutdown={},
+        targets={miners={},foremen={},navigators={}}
     }
     data.recall.homeMiners=data.recall.homeMiners or {}
     data.recall.homeForemen=data.recall.homeForemen or {}
     data.recall.homeNavigators=data.recall.homeNavigators or {}
     data.recall.emptied=data.recall.emptied or {}
     data.recall.shutdown=data.recall.shutdown or {}
+    data.recall.targets=data.recall.targets or {miners={},foremen={},navigators={}}
+    data.recall.targets.miners=data.recall.targets.miners or {}
+    data.recall.targets.foremen=data.recall.targets.foremen or {}
+    data.recall.targets.navigators=data.recall.targets.navigators or {}
+
+    for _,registry in ipairs({data.nodes,data.foremen,data.miners,data.navigators}) do
+        for _,entry in pairs(registry) do
+            if type(entry)=="table" then
+                entry.lastSeen=-1000000
+            end
+        end
+    end
+
+    local bootNow=now()
+    for _,request in pairs(data.requests) do
+        if type(request)=="table" then
+            request.created=bootNow
+            request.updated=bootNow
+            request.retryAfter=0
+            if request.status=="COMPLETE" then
+                request.completed=bootNow
+                request.lastCompletionSend=0
+            end
+        end
+    end
+    for _,job in pairs(data.foremanJobs) do
+        if type(job)=="table" then
+            job.assigned=bootNow
+            job.lastSend=nil
+        end
+    end
 
     local pairNonce=tostring(managerId) .. ":" .. tostring(os.time()) .. ":" .. tostring(math.random(100000,999999))
     local managerBootTime=now()
@@ -100,6 +135,8 @@ local function runRegionalManager()
     local lastPair=0
     local lastRecall=0
     local lastDispatch=0
+    local resumeUntil=0
+    local lastResumeSend=0
     local managerDirty=false
     local lastManagerFlush=0
 
@@ -396,19 +433,22 @@ local function runRegionalManager()
 
         local bottom=h-1
         if data.recall.mode then
-            local mh,fh,empty=0,0,0
-            for i=1,16 do
-                if data.recall.homeMiners[i] then mh=mh+1 end
-                if data.recall.emptied[i] then empty=empty+1 end
+            local mh,fh,nh,empty,tm,tf,tn=0,0,0,0,0,0,0
+            local targets=data.recall.targets or {miners={},foremen={},navigators={}}
+            for row in pairs(targets.miners or {}) do
+                tm=tm+1
+                if data.recall.homeMiners[row] then mh=mh+1 end
+                if data.recall.emptied[row] then empty=empty+1 end
             end
-            for i=1,4 do
-                if data.recall.homeForemen[i] then fh=fh+1 end
+            for n in pairs(targets.foremen or {}) do
+                tf=tf+1
+                if data.recall.homeForemen[n] then fh=fh+1 end
             end
-            local nh=0
-            for i=1,4 do
-                if data.recall.homeNavigators and data.recall.homeNavigators[i] then nh=nh+1 end
+            for n in pairs(targets.navigators or {}) do
+                tn=tn+1
+                if data.recall.homeNavigators and data.recall.homeNavigators[n] then nh=nh+1 end
             end
-            ui.field("recall_status",3,bottom,w-4,string.format("%s M:%d/16 F:%d/4 N:%d/4 E:%d/16",tostring(data.recall.mode),mh,fh,nh,empty),C_WARN,C_INSET)
+            ui.field("recall_status",3,bottom,w-4,string.format("%s M:%d/%d F:%d/%d N:%d/%d E:%d/%d",tostring(data.recall.mode),mh,tm,fh,tf,nh,tn,empty,tm),C_WARN,C_INSET)
         else
             ui.field("recall_status",3,bottom,w-4,"",C_MUTED,C_INSET)
         end
@@ -499,7 +539,8 @@ local function runRegionalManager()
             homeForemen={},
             homeNavigators={},
             emptied={},
-            shutdown={}
+            shutdown={},
+            targets={miners={},foremen={},navigators={}}
         }
         masterLastSeen=now()
         save()
@@ -582,10 +623,17 @@ local function runRegionalManager()
             local n=tonumber(message.number)
             data.foremen[n]=data.foremen[n] or {}
             for k,v in pairs(node) do data.foremen[n][k]=v end
+            if data.recall.active then data.recall.targets.foremen[n]=sender end
         elseif message.role=="miner" then
             local row=tonumber(message.row)
             data.miners[row]=data.miners[row] or {}
             for k,v in pairs(node) do data.miners[row][k]=v end
+            if data.recall.active then
+                data.recall.targets.miners[row]=sender
+                if data.recall.mode=="DUMP" and data.recall.foremenFinalizing then
+                    data.recall.foremenFinalizing=nil
+                end
+            end
         elseif message.role=="navigator" then
             local n=tonumber(message.number)
             data.navigators[n]=data.navigators[n] or {}
@@ -593,6 +641,7 @@ local function runRegionalManager()
             data.navigators[n].x=message.x
             data.navigators[n].y=message.y
             data.navigators[n].z=message.z
+            if data.recall.active then data.recall.targets.navigators[n]=sender end
         end
 
         save()
@@ -647,6 +696,8 @@ local function runRegionalManager()
 
         local existing=data.requests[requestId]
 
+        if existing and existing.minerId~=sender then return end
+
         if not existing then
             existing={
                 requestId=requestId,
@@ -664,6 +715,10 @@ local function runRegionalManager()
             data.requests[requestId]=existing
         else
             existing.service=mergeServiceKind(existing.service,message.service)
+            local job=data.foremanJobs[existing.foremanNumber]
+            if job and job.requestId==requestId then
+                job.service=existing.service
+            end
             existing.arrived=existing.arrived or message.type=="service_arrived"
             existing.status=existing.arrived and ((existing.status=="WAITING_ARRIVAL") and "PENDING" or existing.status) or existing.status
             existing.updated=now()
@@ -676,6 +731,14 @@ local function runRegionalManager()
             row=row,
             managerId=managerId
         })
+
+        if existing.status=="COMPLETE" then
+            send(sender,{
+                type="service_complete",
+                requestId=requestId,
+                session=data.session
+            })
+        end
 
         save()
     end
@@ -717,24 +780,34 @@ local function runRegionalManager()
                     data.foremanJobs[n]=nil
                     request.status=request.arrived and "PENDING" or "WAITING_ARRIVAL"
                     request.updated=now()
-                elseif foreman.state=="IDLE" and
-                    now()-(tonumber(job.assigned) or tonumber(request.updated) or now())>=5 then
-                    data.foremanJobs[n]=nil
-                    request.status=request.arrived and "PENDING" or "WAITING_ARRIVAL"
-                    request.updated=now()
                 end
             end
         end
 
+        local pending={}
         for requestId,request in pairs(data.requests) do
             if type(request)~="table" then
                 data.requests[requestId]=nil
             else
-            if request.status=="BLOCKED" and now()>=(request.retryAfter or 0) then
-                request.status="PENDING"
+                if request.arrived and (request.status=="PENDING" or request.status=="ASSIGNING") then
+                    pending[#pending+1]={id=requestId,request=request}
+                end
             end
+        end
 
-            if request.arrived and (request.status=="PENDING" or request.status=="ASSIGNING") then
+        table.sort(pending,function(a,b)
+            if a.request.created~=b.request.created then
+                return a.request.created<b.request.created
+            end
+            if a.request.row~=b.request.row then
+                return a.request.row<b.request.row
+            end
+            return a.id<b.id
+        end)
+
+        for i=1,#pending do
+                local requestId=pending[i].id
+                local request=pending[i].request
                 local n=request.foremanNumber
                 local f=data.foremen[n]
 
@@ -750,8 +823,6 @@ local function runRegionalManager()
                     request.foremanId=f.id
                     request.updated=now()
                 end
-            end
-            end
         end
 
         for n,job in pairs(data.foremanJobs) do
@@ -775,84 +846,85 @@ local function runRegionalManager()
         end
     end
 
+    local function forEachKnownNode(role,callback)
+        local seen={}
+
+        local function visit(entry,entryRole)
+            if type(entry)~="table" then return end
+            local id=tonumber(entry.id)
+            local resolvedRole=entry.role or entryRole
+            if id and id~=managerId and not seen[id] and (not role or resolvedRole==role) then
+                seen[id]=true
+                callback(id,resolvedRole,entry)
+            end
+        end
+
+        for _,node in pairs(data.nodes) do visit(node,node.role) end
+        for _,foreman in pairs(data.foremen) do visit(foreman,"foreman") end
+        for _,miner in pairs(data.miners) do visit(miner,"miner") end
+        for _,navigator in pairs(data.navigators) do visit(navigator,"navigator") end
+    end
+
+    local function sendControl(packet,role,doBroadcast)
+        if doBroadcast then
+            broadcast(packet)
+        end
+        forEachKnownNode(role,function(id)
+            send(id,packet)
+        end)
+    end
+
     local function sendRecallToNodes(mode,minersOnly)
-        local sent={}
-
-        local function sendOne(nodeId)
-            nodeId=tonumber(nodeId)
-            if nodeId and nodeId~=managerId and not sent[nodeId] then
-                sent[nodeId]=true
-                send(nodeId,{
-                    type="recall_command",
-                    mode=mode,
-                    session=data.session
-                })
-            end
-        end
-
-        if minersOnly then
-            for _,miner in pairs(data.miners) do
-                if type(miner)=="table" then
-                    sendOne(miner.id)
-                end
-            end
-            for _,node in pairs(data.nodes) do
-                if type(node)=="table" and node.role=="miner" then
-                    sendOne(node.id)
-                end
-            end
-        else
-            broadcast({
-                type="recall_command",
-                mode=mode,
-                session=data.session
-            })
-            for _,node in pairs(data.nodes) do
-                if type(node)=="table" then
-                    sendOne(node.id)
-                end
-            end
-            for _,miner in pairs(data.miners) do
-                if type(miner)=="table" then sendOne(miner.id) end
-            end
-            for _,foreman in pairs(data.foremen) do
-                if type(foreman)=="table" then sendOne(foreman.id) end
-            end
-            for _,navigator in pairs(data.navigators) do
-                if type(navigator)=="table" then sendOne(navigator.id) end
-            end
-        end
+        local packet={
+            type="recall_command",
+            mode=mode,
+            session=data.session
+        }
+        sendControl(packet,minersOnly and "miner" or nil,not minersOnly)
     end
 
     local function wakeForemenForDump()
-        local sent={}
-        for _,foreman in pairs(data.foremen) do
-            if type(foreman)=="table" then
-                local foremanId=tonumber(foreman.id)
-                if foremanId and not sent[foremanId] then
-                    sent[foremanId]=true
-                    send(foremanId,{
-                        type="resume_swarm",
-                        session=data.session
-                    })
-                end
-            end
-        end
-        for _,node in pairs(data.nodes) do
-            if type(node)=="table" and node.role=="foreman" then
-                local foremanId=tonumber(node.id)
-                if foremanId and not sent[foremanId] then
-                    sent[foremanId]=true
-                    send(foremanId,{
-                        type="resume_swarm",
-                        session=data.session
-                    })
-                end
-            end
-        end
+        sendControl({
+            type="resume_swarm",
+            session=data.session,
+            reason="DUMP_SERVICE"
+        },"foreman",false)
+    end
+
+    local function sendDumpFinalRecall()
+        local packet={
+            type="recall_command",
+            mode="NORMAL",
+            session=data.session
+        }
+        sendControl(packet,"foreman",false)
+        sendControl(packet,"navigator",false)
     end
 
     local function beginRecall(mode)
+        local targets={miners={},foremen={},navigators={}}
+        for row=1,WORKER_COUNT do
+            local miner=data.miners[row]
+            if type(miner)=="table" and miner.id then targets.miners[row]=tonumber(miner.id) end
+        end
+        for n=1,FOREMAN_COUNT do
+            local foreman=data.foremen[n]
+            if type(foreman)=="table" and foreman.id then targets.foremen[n]=tonumber(foreman.id) end
+            local navigator=data.navigators[n]
+            if type(navigator)=="table" and navigator.id then targets.navigators[n]=tonumber(navigator.id) end
+        end
+        for _,node in pairs(data.nodes) do
+            if type(node)=="table" and node.id then
+                if node.role=="miner" and tonumber(node.row) then
+                    targets.miners[tonumber(node.row)]=tonumber(node.id)
+                elseif node.role=="foreman" and tonumber(node.number) then
+                    targets.foremen[tonumber(node.number)]=tonumber(node.id)
+                elseif node.role=="navigator" and tonumber(node.number) then
+                    targets.navigators[tonumber(node.number)]=tonumber(node.id)
+                end
+            end
+        end
+
         data.recall={
             state=mode=="DUMP" and "DUMP_RECALLING" or (mode=="SHUTDOWN" and "SHUTDOWN_RECALL" or "RECALLING"),
             mode=mode,
@@ -861,7 +933,8 @@ local function runRegionalManager()
             homeForemen={},
             homeNavigators={},
             emptied={},
-            shutdown={}
+            shutdown={},
+            targets=targets
         }
 
         if mode=="NORMAL" or mode=="SHUTDOWN" then
@@ -885,13 +958,23 @@ local function runRegionalManager()
     end
 
     local function resumeSwarm()
-        if data.recall.state~="RECALLED_PAUSED" and data.recall.state~="DUMP_RECALLED_PAUSED" then
+        if data.recall.mode=="SHUTDOWN" or data.recall.state=="SHUTDOWN_RECALL" or data.recall.state=="SHUTDOWN_COMPLETE" then
+            return
+        end
+
+        local resumable=
+            data.recall.active or
+            data.recall.state=="RECALLED_PAUSED" or
+            data.recall.state=="DUMP_RECALLED_PAUSED"
+
+        if not resumable then
             return
         end
 
         data.recall.state="NORMAL"
         data.recall.mode=nil
         data.recall.active=false
+        data.recall.foremenFinalizing=nil
 
         for _,request in pairs(data.requests) do
             if request.status=="SUSPENDED" then
@@ -899,12 +982,12 @@ local function runRegionalManager()
             end
         end
 
-        for _,node in pairs(data.nodes) do
-            send(node.id,{
-                type="resume_swarm",
-                session=data.session
-            })
-        end
+        sendControl({
+            type="resume_swarm",
+            session=data.session
+        },nil,true)
+        resumeUntil=now()+10
+        lastResumeSend=now()
 
         save()
         flushManager(true)
@@ -914,57 +997,58 @@ local function runRegionalManager()
 
     local function recallCounts()
         local mh,fh,nh,empty,shut=0,0,0,0,0
+        local tm,tf,tn=0,0,0
+        local targets=data.recall.targets or {miners={},foremen={},navigators={}}
 
-        for i=1,16 do
-            if data.recall.homeMiners[i] then mh=mh+1 end
-            if data.recall.emptied[i] then empty=empty+1 end
+        for row in pairs(targets.miners or {}) do
+            tm=tm+1
+            if data.recall.homeMiners[row] then mh=mh+1 end
+            if data.recall.emptied[row] then empty=empty+1 end
         end
 
-        for i=1,4 do
-            if data.recall.homeForemen[i] then fh=fh+1 end
-            if data.recall.homeNavigators[i] then nh=nh+1 end
+        for n in pairs(targets.foremen or {}) do
+            tf=tf+1
+            if data.recall.homeForemen[n] then fh=fh+1 end
         end
 
-        for _ in pairs(data.recall.shutdown or {}) do
-            shut=shut+1
+        for n in pairs(targets.navigators or {}) do
+            tn=tn+1
+            if data.recall.homeNavigators[n] then nh=nh+1 end
         end
 
-        return mh,fh,nh,empty,shut
+        for _,id in pairs(targets.miners or {}) do if data.recall.shutdown[id] then shut=shut+1 end end
+        for _,id in pairs(targets.foremen or {}) do if data.recall.shutdown[id] then shut=shut+1 end end
+        for _,id in pairs(targets.navigators or {}) do if data.recall.shutdown[id] then shut=shut+1 end end
+
+        return mh,fh,nh,empty,shut,tm,tf,tn
     end
 
     local function updateRecallState()
         if not data.recall.active then return end
 
-        local mh,fh,nh,empty,shut=recallCounts()
+        local mh,fh,nh,empty,shut,tm,tf,tn=recallCounts()
 
         if data.recall.mode=="NORMAL" then
-            if mh>=16 and fh>=4 and nh>=4 then
+            if mh>=tm and fh>=tf and nh>=tn then
                 data.recall.state="RECALLED_PAUSED"
                 data.recall.active=false
                 save()
             end
         elseif data.recall.mode=="DUMP" then
-            if mh>=16 and empty>=16 then
+            if mh>=tm and empty>=tm then
                 if not data.recall.foremenFinalizing then
                     data.recall.foremenFinalizing=true
-                    for n=1,4 do
-                        local f=data.foremen[n]
-                        if f and f.id then
-                            send(f.id,{
-                                type="recall_command",
-                                mode="NORMAL",
-                                session=data.session
-                            })
-                        end
-                    end
-                elseif fh>=4 then
+                    sendDumpFinalRecall()
+                    lastRecall=now()
+                    save()
+                elseif fh>=tf and nh>=tn then
                     data.recall.state="DUMP_RECALLED_PAUSED"
                     data.recall.active=false
                     save()
                 end
             end
         elseif data.recall.mode=="SHUTDOWN" then
-            if shut>=24 then
+            if shut>=(tm+tf+tn) then
                 data.recall.state="SHUTDOWN_COMPLETE"
                 data.recall.active=false
                 save()
@@ -1008,6 +1092,10 @@ local function runRegionalManager()
             return false
         end
 
+        if data.swarmStarted then
+            return true
+        end
+
         local foremen,miners=registeredCounts()
 
         if foremen<4 or miners<16 then
@@ -1022,16 +1110,14 @@ local function runRegionalManager()
         data.swarmStarted=true
         save()
 
-        for _,node in pairs(data.nodes) do
-            send(node.id,{
-                type="start_mining",
-                session=data.session
-            })
-            send(node.id,{
-                type="resume_swarm",
-                session=data.session
-            })
-        end
+        sendControl({
+            type="start_mining",
+            session=data.session
+        },nil,true)
+        sendControl({
+            type="resume_swarm",
+            session=data.session
+        },nil,true)
 
         return true
     end
@@ -1046,22 +1132,16 @@ local function runRegionalManager()
             recallState=data.recall.state
         })
 
-        for _,node in pairs(data.nodes) do
-            send(node.id,{
-                type="status_query",
-                session=data.session
-            })
+        sendControl({
+            type="status_query",
+            session=data.session
+        },nil,false)
 
-            if data.recall.state=="NORMAL" and data.swarmStarted then
-                send(node.id,{
-                    type="start_mining",
-                    session=data.session
-                })
-                send(node.id,{
-                    type="resume_swarm",
-                    session=data.session
-                })
-            end
+        if data.recall.state=="NORMAL" and data.swarmStarted then
+            sendControl({
+                type="start_mining",
+                session=data.session
+            },nil,false)
         end
     end
 
@@ -1132,7 +1212,7 @@ local function runRegionalManager()
                 elseif message.type=="node_register" then
                     registerNode(sender,message)
 
-                elseif message.type=="node_online" then
+                elseif message.type=="node_online" and message.session==data.session then
                     if sender==data.masterForemanId and message.role=="foreman" and tonumber(message.number)==1 and message.session==data.session then
                         masterLastSeen=now()
                     end
@@ -1189,7 +1269,7 @@ local function runRegionalManager()
                     save()
                     releaseSwarm()
 
-                elseif message.type=="status" then
+                elseif message.type=="status" and message.session==data.session then
                     if sender==data.masterForemanId and message.role=="foreman" and tonumber(message.number)==1 and message.session==data.session then
                         masterLastSeen=now()
                     end
@@ -1222,27 +1302,6 @@ local function runRegionalManager()
                     end
 
                     save()
-
-                    if message.role=="foreman" and message.number and message.state=="IDLE" then
-                        local n=tonumber(message.number)
-                        local job=data.foremanJobs[n]
-
-                        if job then
-                            local request=data.requests[job.requestId]
-                            local age=now()-(tonumber(job.assigned) or tonumber(request and request.updated) or now())
-
-                            if age>=5 then
-                                data.foremanJobs[n]=nil
-
-                                if request and request.status~="COMPLETE" then
-                                    request.status=request.arrived and "PENDING" or "WAITING_ARRIVAL"
-                                    request.updated=now()
-                                end
-
-                                save()
-                            end
-                        end
-                    end
 
                     if message.role=="foreman" and message.setupDone then
                         releaseSwarm()
@@ -1296,22 +1355,25 @@ local function runRegionalManager()
                         })
                     end
 
-                elseif message.type=="service_request" or message.type=="service_arrived" then
+                elseif (message.type=="service_request" or message.type=="service_arrived") and message.session==data.session then
                     upsertServiceRequest(sender,message)
 
                 elseif message.type=="job_accepted" and message.session==data.session then
                     local request=data.requests[message.requestId]
-                    if request then
-                        request.status="IN_PROGRESS"
+                    local job=data.foremanJobs[message.foremanNumber]
+                    if request and request.status~="COMPLETE" and job and job.requestId==message.requestId and
+                        data.foremen[message.foremanNumber] and data.foremen[message.foremanNumber].id==sender then
+                        if request.status~="BLOCKED" then request.status="IN_PROGRESS" end
                         request.updated=now()
-                        local job=data.foremanJobs[message.foremanNumber]
-                        if job then job.accepted=true end
+                        job.accepted=true
                         save()
                     end
 
                 elseif message.type=="job_progress" and message.session==data.session then
                     local request=data.requests[message.requestId]
-                    if request then
+                    local job=request and data.foremanJobs[request.foremanNumber]
+                    if request and request.status~="COMPLETE" and job and job.requestId==message.requestId and
+                        data.foremen[request.foremanNumber] and data.foremen[request.foremanNumber].id==sender then
                         request.status="IN_PROGRESS"
                         request.phase=message.phase
                         request.trips=(request.trips or 0)+1
@@ -1321,18 +1383,20 @@ local function runRegionalManager()
 
                 elseif message.type=="job_blocked" and message.session==data.session then
                     local request=data.requests[message.requestId]
-                    if request then
+                    local job=request and data.foremanJobs[request.foremanNumber]
+                    if request and request.status~="COMPLETE" and job and job.requestId==message.requestId and
+                        data.foremen[request.foremanNumber] and data.foremen[request.foremanNumber].id==sender then
                         request.status="BLOCKED"
                         request.blockReason=message.reason
-                        request.retryAfter=now()+5
                         request.updated=now()
-                        clearForemanJob(request.foremanNumber,message.requestId)
                         save()
                     end
 
                 elseif message.type=="job_failed" and message.session==data.session then
                     local request=data.requests[message.requestId]
-                    if request then
+                    local job=request and data.foremanJobs[request.foremanNumber]
+                    if request and request.status~="COMPLETE" and job and job.requestId==message.requestId and
+                        data.foremen[request.foremanNumber] and data.foremen[request.foremanNumber].id==sender then
                         request.status="PENDING"
                         request.lastError=message.reason
                         request.updated=now()
@@ -1342,26 +1406,36 @@ local function runRegionalManager()
 
                 elseif message.type=="job_complete" and message.session==data.session then
                     local request=data.requests[message.requestId]
-                    if request then
+                    if request and request.minerId==message.minerId and request.row==tonumber(message.row) and
+                        request.foremanNumber==tonumber(message.foremanNumber) and
+                        data.foremen[request.foremanNumber] and data.foremen[request.foremanNumber].id==sender then
                         request.status="COMPLETE"
                         request.updated=now()
                         request.completed=now()
                         clearForemanJob(request.foremanNumber,message.requestId)
+                        save()
+                        flushManager(true)
                         send(request.minerId,{
                             type="service_complete",
                             requestId=request.requestId,
                             session=data.session
                         })
-                        if data.recall.mode=="DUMP" then
-                            data.recall.emptied[request.row]=true
-                        end
+                        request.lastCompletionSend=now()
+                        send(sender,{type="job_complete_ack",requestId=message.requestId,session=data.session})
+                    end
+
+                elseif message.type=="service_complete_ack" and message.session==data.session then
+                    local request=data.requests[message.requestId]
+                    if request and request.status=="COMPLETE" and request.minerId==sender then
+                        request.minerAcknowledged=true
                         save()
                     end
 
                 elseif message.type=="recall_home" and message.session==data.session then
                     if message.role=="miner" and message.row then
                         local row=tonumber(message.row)
-                        if message.x==row and message.y==0 and message.z==0 and message.dir==DIR_N then
+                        local homeFacing=message.dir==DIR_N or (message.mode=="DUMP" and message.dir==DIR_S)
+                        if message.x==row and message.y==0 and message.z==0 and homeFacing then
                             data.recall.homeMiners[row]=true
                         end
                     elseif message.role=="foreman" and message.number then
@@ -1380,8 +1454,13 @@ local function runRegionalManager()
                     save()
 
                 elseif message.type=="recall_dump_empty" and message.session==data.session and message.row then
-                    data.recall.emptied[tonumber(message.row)]=true
-                    save()
+                    local row=tonumber(message.row)
+                    local miner=data.miners[row]
+                    if data.recall.mode=="DUMP" and miner and miner.id==sender and
+                        message.x==row and message.y==0 and message.z==0 and message.dir==DIR_N then
+                        data.recall.emptied[row]=true
+                        save()
+                    end
 
                 elseif message.type=="recall_shutdown_ready" and message.session==data.session then
                     data.recall.shutdown[sender]=true
@@ -1478,20 +1557,42 @@ local function runRegionalManager()
             end
 
             if data.recall.active and now()-lastRecall>=3 then
-                if data.recall.mode=="DUMP" and not data.recall.foremenFinalizing then
-                    wakeForemenForDump()
-                    sendRecallToNodes("DUMP",true)
+                if data.recall.mode=="DUMP" then
+                    if data.recall.foremenFinalizing then
+                        sendDumpFinalRecall()
+                    else
+                        wakeForemenForDump()
+                        sendRecallToNodes("DUMP",true)
+                    end
                 elseif data.recall.mode=="NORMAL" or data.recall.mode=="SHUTDOWN" then
                     sendRecallToNodes(data.recall.mode,false)
                 end
                 lastRecall=now()
             end
 
+            if now()<resumeUntil and now()-lastResumeSend>=2 then
+                sendControl({
+                    type="resume_swarm",
+                    session=data.session
+                },nil,true)
+                lastResumeSend=now()
+            end
+
             refreshGpsReady()
             updateRecallState()
 
             for requestId,request in pairs(data.requests) do
-                if request.status=="COMPLETE" and now()-(request.completed or now())>300 then
+                if request.status=="COMPLETE" and not request.minerAcknowledged and
+                    now()-(request.lastCompletionSend or 0)>=2 then
+                    send(request.minerId,{
+                        type="service_complete",
+                        requestId=requestId,
+                        session=data.session
+                    })
+                    request.lastCompletionSend=now()
+                end
+                if request.status=="COMPLETE" and request.minerAcknowledged and
+                    now()-(request.completed or now())>300 then
                     data.requests[requestId]=nil
                 end
             end
