@@ -1,38 +1,45 @@
-local path = ({...})[1] or "sniff.log"
-local url = "https://paste.c-net.org/"
-if not http or not http.request then error("HTTP unavailable") end
+local args = {...}
+local path = args[1] or "sniff.log"
+local endpoint = "https://pastebin.com/api/api_post.php"
+local key = "0ec2eb25b6166c0c27a394ae118ad829"
+
+if not http or not http.request then error("HTTP API unavailable") end
 if not fs.exists(path) or fs.isDir(path) then error("File not found: " .. path) end
 local file = fs.open(path, "r")
 if not file then error("Cannot read: " .. path) end
 local content = file.readAll()
 file.close()
-if not content or content == "" then error("Log is empty") end
-print("Uploading " .. tostring(#content) .. " bytes...")
-local timer = os.startTimer(30)
-local ok, result, reason = pcall(http.request, url, content, {
-    ["Content-Type"] = "text/plain",
-    ["X-FileName"] = fs.getName(path),
-    ["x-uuid"] = ""
+if not content or content == "" then error("File is empty") end
+
+local body = "api_option=paste&api_dev_key=" .. key ..
+    "&api_paste_private=1&api_paste_name=" .. textutils.urlEncode(fs.getName(path)) ..
+    "&api_paste_code=" .. textutils.urlEncode(content)
+
+print("Sending " .. tostring(#content) .. " bytes to Pastebin...")
+local timer = os.startTimer(35)
+local ok, started, reason = pcall(http.request, endpoint, body, {
+    ["Content-Type"] = "application/x-www-form-urlencoded",
+    ["User-Agent"] = "ComputerCraft/1.63"
 })
-if not ok then error("Request error: " .. tostring(result)) end
-if result == false then error("Request refused: " .. tostring(reason)) end
+if not ok then error("Request error: " .. tostring(started)) end
+if started == false then error("Request refused: " .. tostring(reason)) end
+
 while true do
     local event, address, value = os.pullEvent()
-    if event == "http_success" and address == url then
-        local status = value.getResponseCode and value.getResponseCode() or nil
+    if event == "http_success" and address == endpoint then
+        local code = value.getResponseCode and value.getResponseCode() or nil
         local response = value.readAll()
         value.close()
-        if status and status < 200 or status and status >= 300 then
-            error("HTTP " .. tostring(status) .. ": " .. tostring(response):sub(1, 200))
+        local link = response and response:match("(https?://pastebin%.com/[%w]+)")
+        if link then
+            print("Paste URL:")
+            print(link)
+            break
         end
-        local link = response and response:match("(https://paste%.c%-net%.org/[%w%-_]+)")
-        if not link then error("Unexpected response: " .. tostring(response):sub(1, 200)) end
-        print("Log URL:")
-        print(link)
-        break
-    elseif event == "http_failure" and address == url then
-        error("Upload failed: " .. tostring(value))
+        error("Pastebin response " .. tostring(code or "?") .. ": " .. tostring(response):sub(1, 300))
+    elseif event == "http_failure" and address == endpoint then
+        error("Connection failed: " .. tostring(value))
     elseif event == "timer" and address == timer then
-        error("No response after 30 seconds. The server may block uploads to this site.")
+        error("No response after 35 seconds. Pastebin uploads may be blocked by the server or connection.")
     end
 end
