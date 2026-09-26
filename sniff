@@ -1,45 +1,102 @@
 local args = {...}
 local path = args[1] or "sniff.log"
-local endpoint = "https://pastebin.com/api/api_post.php"
-local key = "0ec2eb25b6166c0c27a394ae118ad829"
 
-if not http or not http.request then error("HTTP API unavailable") end
+if not http or not http.post then
+    error("HTTP API is unavailable")
+end
+
+if not fs.exists(path) or fs.isDir(path) then
+    error("File not found: " .. path)
+end
+
+local path = ({...})[1] or "sniff.log"
+if not http or not http.post then error("HTTP unavailable") end
 if not fs.exists(path) or fs.isDir(path) then error("File not found: " .. path) end
 local file = fs.open(path, "r")
+if not file then
+    error("Cannot read: " .. path)
+end
 if not file then error("Cannot read: " .. path) end
 local content = file.readAll()
 file.close()
-if not content or content == "" then error("File is empty") end
 
-local body = "api_option=paste&api_dev_key=" .. key ..
-    "&api_paste_private=1&api_paste_name=" .. textutils.urlEncode(fs.getName(path)) ..
-    "&api_paste_code=" .. textutils.urlEncode(content)
-
-print("Sending " .. tostring(#content) .. " bytes to Pastebin...")
-local timer = os.startTimer(35)
-local ok, started, reason = pcall(http.request, endpoint, body, {
-    ["Content-Type"] = "application/x-www-form-urlencoded",
-    ["User-Agent"] = "ComputerCraft/1.63"
-})
-if not ok then error("Request error: " .. tostring(started)) end
-if started == false then error("Request refused: " .. tostring(reason)) end
-
-while true do
-    local event, address, value = os.pullEvent()
-    if event == "http_success" and address == endpoint then
-        local code = value.getResponseCode and value.getResponseCode() or nil
-        local response = value.readAll()
-        value.close()
-        local link = response and response:match("(https?://pastebin%.com/[%w]+)")
-        if link then
-            print("Paste URL:")
-            print(link)
-            break
-        end
-        error("Pastebin response " .. tostring(code or "?") .. ": " .. tostring(response):sub(1, 300))
-    elseif event == "http_failure" and address == endpoint then
-        error("Connection failed: " .. tostring(value))
-    elseif event == "timer" and address == timer then
-        error("No response after 35 seconds. Pastebin uploads may be blocked by the server or connection.")
-    end
+if not content or content == "" then
+    error("File is empty: " .. path)
 end
+
+local function jsonString(value)
+    local out = {'"'}
+    for i = 1, #value do
+        local byte = value:byte(i)
+        if byte == 34 then
+            out[#out + 1] = '\\"'
+        elseif byte == 92 then
+            out[#out + 1] = '\\\\'
+        elseif byte < 32 then
+            out[#out + 1] = string.format("\\u%04x", byte)
+        else
+            out[#out + 1] = string.char(byte)
+        end
+    end
+    out[#out + 1] = '"'
+    return table.concat(out)
+end
+
+local name = fs.getName(path)
+local body = '{"description":"ComputerCraft sniffer log","public":false,"files":{' ..
+    jsonString(name) .. ':{"content":' .. jsonString(content) .. '}}}'
+
+print("GitHub token with Gists write permission:")
+local token = read("*")
+if not token or token == "" then
+    error("No token entered")
+end
+
+local headers = {
+    ["Authorization"] = "Bearer " .. token,
+    ["Accept"] = "application/vnd.github+json",
+    ["Content-Type"] = "application/json",
+    ["User-Agent"] = "ComputerCraft-Gist-Upload"
+}
+
+print("Uploading " .. name .. " (" .. #content .. " bytes)...")
+local ok, response, reason = pcall(http.post, "https://api.github.com/gists", body, headers)
+token = nil
+headers = nil
+body = nil
+
+if not ok then
+    error("Upload error: " .. tostring(response))
+end
+if not response then
+    error("Upload failed: " .. tostring(reason or "no response"))
+end
+
+if not content or content == "" then error("Log is empty") end
+print("Uploading " .. tostring(#content) .. " bytes...")
+local ok, response, reason = pcall(http.post, "https://paste.rs/", content, {
+    ["Content-Type"] = "text/plain"
+})
+if not ok then error(tostring(response)) end
+if not response then error("Upload failed: " .. tostring(reason or "no response")) end
+local status = response.getResponseCode and response.getResponseCode() or nil
+local result = response.readAll()
+local link = response.readAll()
+response.close()
+
+if status and status ~= 201 then
+    error("GitHub returned " .. tostring(status) .. ": " .. tostring(result):sub(1, 300))
+end
+
+local url = result and result:match('"html_url"%s*:%s*"(https://gist%.github%.com/[^\"]+)"')
+if not url then
+    error("No Gist URL in response: " .. tostring(result):sub(1, 300))
+if status and status ~= 201 then error("Upload status " .. tostring(status) .. ": " .. tostring(link)) end
+if not link or not link:match("^https://paste%.rs/[%w%-_]+%s*$") then
+    error("Unexpected response: " .. tostring(link):sub(1, 300))
+end
+
+print("Gist created:")
+print(url)
+print("Log URL:")
+print(link)
