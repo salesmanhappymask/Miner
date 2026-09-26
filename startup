@@ -1,8 +1,8 @@
 local REGIONAL_MANAGER = 0
 local MASTER_FOREMAN = 0
 
-local VERSION = 47
-local PROTOCOL = "miner_swarm_v47"
+local VERSION = 48
+local PROTOCOL = "miner_swarm_v48"
 local WORKER_COUNT = 16
 local FOREMAN_COUNT = 4
 local NAVIGATOR_COUNT = 4
@@ -1857,6 +1857,18 @@ local function runMiner(cfg)
                         elseif message.type == "refuel_now" and state.request and message.requestId == state.request.id then
                             flags.refuelNow = true
                         end
+                    elseif message.type=="maintenance_clear_label" and
+                        message.session==cfg.session then
+                        local before=os.getComputerLabel()
+                        os.setComputerLabel(nil)
+                        send(sender,{
+                            type="maintenance_label_cleared",
+                            row=state.row,
+                            id=os.getComputerID(),
+                            before=before,
+                            cleared=os.getComputerLabel()==nil,
+                            session=cfg.session
+                        })
                     elseif sender == cfg.managerId then
                         if message.type == "start_mining" or message.type=="resume_swarm" then
                             flags.start = true
@@ -2720,7 +2732,7 @@ local function runMiner(cfg)
 
             while not flags.start do
                 if flags.recallMode then
-                    recall()
+                    recall(flags.recallMode or "NORMAL")
                 end
                 sleep(0.1)
             end
@@ -2737,27 +2749,27 @@ local function runMiner(cfg)
             local kind = neededService()
             if kind then
                 if not service(kind) then
-                    recall()
+                    recall(flags.recallMode or "NORMAL")
                 end
             end
 
             if state.dir == DIR_N then
                 while state.pos < 15 do
                     if flags.recallMode then
-                        recall()
+                        recall(flags.recallMode or "NORMAL")
                     end
                     local s = neededService()
                     if s then
                         service(s)
                     end
                     if not digForward() then
-                        recall()
+                        recall(flags.recallMode or "NORMAL")
                     end
                 end
                 if not descendMine() then
                     sendState("Bedrock reached")
                     if not service("DUMP", true) then
-                        recall()
+                        recall(flags.recallMode or "NORMAL")
                     end
                     state.complete = true
                     state.phase = "COMPLETE"
@@ -2772,7 +2784,7 @@ local function runMiner(cfg)
                     })
                     while true do
                         if flags.recallMode then
-                            recall()
+                            recall(flags.recallMode or "NORMAL")
                         end
                         sleep(0.2)
                     end
@@ -2781,20 +2793,20 @@ local function runMiner(cfg)
             else
                 while state.pos > 0 do
                     if flags.recallMode then
-                        recall()
+                        recall(flags.recallMode or "NORMAL")
                     end
                     local s = neededService()
                     if s then
                         service(s)
                     end
                     if not digForward() then
-                        recall()
+                        recall(flags.recallMode or "NORMAL")
                     end
                 end
                 if not descendMine() then
                     sendState("Bedrock reached")
                     if not service("DUMP", true) then
-                        recall()
+                        recall(flags.recallMode or "NORMAL")
                     end
                     state.complete = true
                     state.phase = "COMPLETE"
@@ -2809,7 +2821,7 @@ local function runMiner(cfg)
                     })
                     while true do
                         if flags.recallMode then
-                            recall()
+                            recall(flags.recallMode or "NORMAL")
                         end
                         sleep(0.2)
                     end
@@ -2950,7 +2962,7 @@ local function runForeman(cfg)
         saveTableLight(statePath,state)
     end
 
-    local qdata = loadTable(queuePath) or {queue={},active=nil,resolved={}}
+    local qdata = loadTableLight(queuePath) or {queue={},active=nil,resolved={}}
     local queue = qdata.queue or {}
     local active = qdata.active
     local resolved = qdata.resolved or {}
@@ -7431,6 +7443,28 @@ local function runRegionalManager()
     end
 
     local function dispatchJobs()
+        for n,job in pairs(data.foremanJobs) do
+            local request=data.requests[job.requestId]
+            local foreman=data.foremen[n]
+
+            if not request or request.status=="COMPLETE" then
+                data.foremanJobs[n]=nil
+            elseif tonumber(request.foremanNumber)~=tonumber(n) then
+                data.foremanJobs[n]=nil
+                request.status=request.arrived and "PENDING" or "WAITING_ARRIVAL"
+                request.updated=now()
+            elseif not foreman or not foreman.id then
+                data.foremanJobs[n]=nil
+                request.status=request.arrived and "PENDING" or "WAITING_ARRIVAL"
+                request.updated=now()
+            elseif foreman.state=="IDLE" and
+                now()-(tonumber(job.assigned) or tonumber(request.updated) or now())>=5 then
+                data.foremanJobs[n]=nil
+                request.status=request.arrived and "PENDING" or "WAITING_ARRIVAL"
+                request.updated=now()
+            end
+        end
+
         for requestId,request in pairs(data.requests) do
             if request.status=="BLOCKED" and now()>=(request.retryAfter or 0) then
                 request.status="PENDING"
@@ -7828,6 +7862,27 @@ local function runRegionalManager()
 
                     save()
 
+                    if message.role=="foreman" and message.number and message.state=="IDLE" then
+                        local n=tonumber(message.number)
+                        local job=data.foremanJobs[n]
+
+                        if job then
+                            local request=data.requests[job.requestId]
+                            local age=now()-(tonumber(job.assigned) or tonumber(request and request.updated) or now())
+
+                            if age>=5 then
+                                data.foremanJobs[n]=nil
+
+                                if request and request.status~="COMPLETE" then
+                                    request.status=request.arrived and "PENDING" or "WAITING_ARRIVAL"
+                                    request.updated=now()
+                                end
+
+                                save()
+                            end
+                        end
+                    end
+
                     if message.role=="foreman" and message.setupDone then
                         releaseSwarm()
                     end
@@ -8087,7 +8142,7 @@ local function runMaster()
     local newMaster=false
 
     if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v47.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v48.")
     end
 
     if not cfg then
@@ -8206,7 +8261,7 @@ else
     if not cfg then
         bootstrap()
     elseif cfg.version~=VERSION then
-        error("Old node state detected. Clear node.cfg and old state before using v47.")
+        error("Old node state detected. Clear node.cfg and old state before using v48.")
     elseif cfg.role=="miner" then
         setRegionalManager(cfg.managerId)
         if cfg.commissioned then
