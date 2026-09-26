@@ -660,22 +660,54 @@ function pairMasterWithRegionalManager()
     end
 
     local myId=os.getComputerID()
-    local lastBroadcast=0
+    local lastSeek=-10
+    local lastLookup=-10
+    local lookupId=nil
+
+    local function showPairing(status)
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.white)
+        term.clear()
+        term.setCursorPos(1,1)
+        print("Master Foreman " .. tostring(myId))
+        print("Pairing with Regional Manager")
+        print("")
+        print(status)
+    end
+
+    showPairing("Searching...")
 
     while true do
-        if now()-lastBroadcast>=2 then
-            broadcast({
+        if now()-lastLookup>=2 then
+            local ok,result=pcall(rednet.lookup,PROTOCOL,"regional_manager")
+            if ok then
+                lookupId=tonumber(result)
+            end
+            lastLookup=now()
+        end
+
+        if now()-lastSeek>=1 then
+            local packet={
                 type="master_pair_seek",
                 version=VERSION,
                 masterForemanId=myId
-            })
-            lastBroadcast=now()
+            }
+            if lookupId and lookupId~=myId then
+                send(lookupId,packet)
+                showPairing("Manager found: " .. tostring(lookupId) .. " / requesting pair")
+            else
+                showPairing("Searching... broadcasting pair request")
+            end
+            broadcast(packet)
+            lastSeek=now()
         end
 
         local sender,message=rednet.receive(PROTOCOL,0.5)
 
         if sender and type(message)=="table" and
-            message.type=="manager_pair_offer" and message.version==VERSION then
+            message.type=="manager_pair_offer" and message.version==VERSION and
+            (not message.masterForemanId or tonumber(message.masterForemanId)==myId) then
+            showPairing("Offer from Manager " .. tostring(sender))
             send(sender,{
                 type="master_pair_accept",
                 version=VERSION,
@@ -689,8 +721,9 @@ function pairMasterWithRegionalManager()
                 local s,m=rednet.receive(PROTOCOL,0.5)
                 if s==sender and type(m)=="table" and
                     m.type=="manager_pair_confirm" and
-                    m.version==VERSION and m.masterForemanId==myId and
+                    m.version==VERSION and tonumber(m.masterForemanId)==myId and
                     m.nonce==message.nonce and m.session then
+                    showPairing("Paired with Manager " .. tostring(sender))
                     send(sender,{
                         type="master_pair_complete",
                         version=VERSION,
@@ -703,11 +736,12 @@ function pairMasterWithRegionalManager()
                     return sender,m.session
                 end
             end
+            showPairing("Offer timed out / retrying")
         end
     end
 end
 
-function registerNodeWithManager(cfg)
+function registerNodeWithManager(cfg,timeout)
     local managerId=tonumber(cfg and cfg.managerId)
     if not managerId then
         return false
@@ -734,7 +768,7 @@ function registerNodeWithManager(cfg)
         z=cfg.z
     }
 
-    local deadline=now()+15
+    local deadline=now()+(tonumber(timeout) or 15)
     local lastSend=-10
 
     while now()<deadline do

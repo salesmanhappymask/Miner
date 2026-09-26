@@ -4375,7 +4375,7 @@ local function runMaster()
             setRegionalManager(cfg.managerId)
         end
 
-        if not cfg.managerId or not cfg.session or not registerNodeWithManager(cfg) then
+        if not cfg.managerId or not cfg.session or not registerNodeWithManager(cfg,3) then
             local managerId,session=pairMasterWithRegionalManager()
             cfg.managerId=managerId
             cfg.masterForemanId=id

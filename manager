@@ -19,6 +19,8 @@ local function runRegionalManager()
 
     local managerId=os.getComputerID()
     setRegionalManager(managerId)
+    pcall(rednet.unhost,PROTOCOL)
+    pcall(rednet.host,PROTOCOL,"regional_manager")
 
     local mon=peripheral.wrap("right")
     mon.setTextScale(0.5)
@@ -92,6 +94,7 @@ local function runRegionalManager()
     local pairNonce=tostring(managerId) .. ":" .. tostring(os.time()) .. ":" .. tostring(math.random(100000,999999))
     local managerBootTime=now()
     local masterLastSeen=nil
+    local pairStatus="Waiting for Master Foreman"
     local input=""
     local lastQuery=0
     local lastPair=0
@@ -449,6 +452,7 @@ local function runRegionalManager()
             type="manager_pair_offer",
             version=VERSION,
             managerId=managerId,
+            masterForemanId=target,
             nonce=pairNonce,
             session=data.session
         }
@@ -1018,9 +1022,15 @@ local function runRegionalManager()
 
             if protocol==PROTOCOL and type(message)=="table" then
                 if message.type=="master_pair_seek" and message.version==VERSION then
+                    pairStatus="Pair request from Master " .. tostring(sender)
                     if canReplaceMaster(sender) then
                         sendPairOffer(sender)
+                        pairStatus="Offer sent to Master " .. tostring(sender)
+                    else
+                        pairStatus="Master " .. tostring(sender) .. " blocked by active pairing"
                     end
+                    drawTerminal()
+                    drawMonitor()
 
                 elseif message.type=="master_pair_accept" and message.version==VERSION and
                     tonumber(message.managerId)==managerId and message.nonce==pairNonce then
@@ -1043,6 +1053,9 @@ local function runRegionalManager()
                             session=data.session,
                             nonce=message.nonce
                         })
+                        pairStatus="Pair confirmed with Master " .. tostring(sender)
+                        drawTerminal()
+                        drawMonitor()
                     end
 
                 elseif message.type=="master_pair_complete" and message.version==VERSION and
