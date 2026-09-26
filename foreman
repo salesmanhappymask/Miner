@@ -3806,6 +3806,49 @@ local function runForeman(cfg)
         return true
     end
 
+    local function pauseForSetupRecall()
+        if not flags.recallMode then
+            return false
+        end
+
+        local mode=flags.recallMode
+        flags.recallMode=nil
+
+        if not recallForeman(mode) then
+            return false
+        end
+
+        if mode=="SHUTDOWN" then
+            return true
+        end
+
+        while state.phase=="RECALLED_PAUSED" do
+            if flags.recallMode then
+                local nextMode=flags.recallMode
+                flags.recallMode=nil
+
+                if not recallForeman(nextMode) then
+                    return false
+                end
+
+                if nextMode=="SHUTDOWN" then
+                    return true
+                end
+            elseif flags.resume then
+                flags.resume=false
+                state.recallMode=nil
+                state.phase=state.setupDone and "IDLE" or "WAITING_SETUP"
+                saveState()
+                sendState("Regional Manager resumed setup")
+                break
+            else
+                sleep(0.2)
+            end
+        end
+
+        return true
+    end
+
     local function serviceRequest(req)
         active = req
         saveQueue()

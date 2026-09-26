@@ -171,10 +171,91 @@ local function runMinerCommissioning(cfg)
                     foreman=cfg.foremanNumber,
                     message=state.installerHeld and "Holding Disk Drive" or "Commissioning"
                 })
+            elseif message.type=="maintenance_clear_label" and message.session==cfg.session then
+                local before=os.getComputerLabel()
+                os.setComputerLabel(nil)
+                send(sender,{
+                    type="maintenance_label_cleared",
+                    row=cfg.row,
+                    id=os.getComputerID(),
+                    before=before,
+                    cleared=os.getComputerLabel()==nil,
+                    session=cfg.session
+                })
+            elseif message.type=="recall_command" then
+                local mode=message.mode or "NORMAL"
+
+                if mode=="SHUTDOWN" then
+                    for i=1,5 do
+                        os.setComputerLabel(nil)
+
+                        if os.getComputerLabel()==nil then
+                            break
+                        end
+
+                        sleep(0.1)
+                    end
+
+                    send(cfg.managerId,{
+                        type="recall_home",
+                        role="miner",
+                        row=cfg.row,
+                        id=os.getComputerID(),
+                        mode=mode,
+                        labelCleared=os.getComputerLabel()==nil,
+                        x=state.x or cfg.homeX,
+                        y=state.y or cfg.homeY,
+                        z=state.z or cfg.homeZ,
+                        dir=state.dir or cfg.homeDir,
+                        session=cfg.session
+                    })
+
+                    send(cfg.managerId,{
+                        type="recall_shutdown_ready",
+                        role="miner",
+                        row=cfg.row,
+                        id=os.getComputerID(),
+                        x=state.x or cfg.homeX,
+                        y=state.y or cfg.homeY,
+                        z=state.z or cfg.homeZ,
+                        dir=state.dir or cfg.homeDir,
+                        session=cfg.session
+                    })
+
+                    os.shutdown()
+                elseif mode=="NORMAL" then
+                    state.phase="RECALLED_PAUSED"
+                    save()
+
+                    send(cfg.managerId,{
+                        type="recall_home",
+                        role="miner",
+                        row=cfg.row,
+                        id=os.getComputerID(),
+                        mode=mode,
+                        labelCleared=false,
+                        x=state.x or cfg.homeX,
+                        y=state.y or cfg.homeY,
+                        z=state.z or cfg.homeZ,
+                        dir=state.dir or cfg.homeDir,
+                        session=cfg.session
+                    })
+                end
+            elseif message.type=="resume_swarm" and state.phase=="RECALLED_PAUSED" then
+                state.phase="COMMISSIONING"
+                save()
             end
 
         elseif sender==cfg.foremanId and type(message)=="table" then
-            if message.type=="commission_refuel" then
+            if state.phase=="RECALLED_PAUSED" then
+                if message.type=="status_query" then
+                    status("miner","RECALLED_PAUSED",{
+                        row=cfg.row,
+                        foreman=cfg.foremanNumber,
+                        message="Commissioning paused by Regional Manager"
+                    })
+                end
+            elseif message.type=="commission_refuel" then
                 turtle.select(1)
                 local count=turtle.getItemCount(1)
 
@@ -1580,38 +1661,7 @@ local function runMiner(cfg)
         minerId=os.getComputerID()
     })
 
-    local function pauseForSetupRecall()
-        if not flags.recallMode then
-            return false
-        end
 
-        local mode=flags.recallMode
-        flags.recallMode=nil
-        recallForeman(mode)
-
-        if mode=="SHUTDOWN" then
-            return true
-        end
-
-        while state.phase=="RECALLED_PAUSED" do
-            if flags.recallMode then
-                local nextMode=flags.recallMode
-                flags.recallMode=nil
-                recallForeman(nextMode)
-            elseif flags.resume then
-                flags.resume=false
-                state.recallMode=nil
-                state.phase="WAITING_SETUP"
-                saveState()
-                sendState("Regional Manager resumed setup")
-                break
-            else
-                sleep(0.2)
-            end
-        end
-
-        return true
-    end
 
     local function workLoop()
         if state.recoveryLocked then
