@@ -136,6 +136,7 @@ local function runForeman(cfg)
     local resolved=type(qdata.resolved)=="table" and qdata.resolved or {}
     local peers = {}
     local intents = {}
+    local recallTravel=false
     local inbox = {}
     local commissionWave = {}
     local flags = {
@@ -398,28 +399,43 @@ local function runForeman(cfg)
         end
     end
 
-    local function occupied(tx,tz)
+    local function peerAt(tx,tz,ty)
+        ty=ty==nil and state.y or ty
+
         for pid,p in pairs(peers) do
-            if pid ~= id and p.x == tx and p.z == tz and now() - (p.lastSeen or 0) < 8 then
-                return true
+            if pid~=id and p.x==tx and p.z==tz and
+                tonumber(p.y or 0)==tonumber(ty) and
+                now()-(p.lastSeen or 0)<8 then
+                return pid,p
             end
         end
-        return false
+
+        return nil,nil
     end
 
-    local function lowerIntentWins(tx,tz)
+    local function occupied(tx,tz,ty)
+        local pid=peerAt(tx,tz,ty)
+        return pid~=nil
+    end
+
+    local function lowerIntentWins(tx,tz,ty)
+        ty=ty==nil and state.y or ty
+
         for pid,p in pairs(intents) do
-            if pid ~= id and p.x == tx and p.z == tz and now() - (p.lastSeen or 0) < 1 then
-                if (p.number or 99) < number then
+            if pid~=id and p.x==tx and p.z==tz and
+                tonumber(p.y or 0)==tonumber(ty) and
+                now()-(p.lastSeen or 0)<1 then
+                if (p.number or 99)<number then
                     return true
                 end
             end
         end
+
         return false
     end
 
     local function moveVertical(targetY)
-        if flags.recallMode then
+        if flags.recallMode and not recallTravel then
             return false
         end
 
@@ -510,62 +526,345 @@ local function runForeman(cfg)
         return peripheral.getType("front")~="drive"
     end
 
-    local function moveStep(targetDir)
-        if flags.recallMode then
-            return false
+    local function gpsSample(timeout)
+        if not gps or not gps.locate then
+            return nil
         end
 
-        if not ensureGroundLevel() then
-            state.phase="VERTICAL_ERROR"
-            saveState()
-            sendState("Horizontal movement blocked because foreman is not at staging height")
-            return false
+        local ok,x,y,z=pcall(gps.locate,timeout or 1,false)
+
+        if ok and x and y and z then
+            return {x=x,y=y,z=z}
         end
 
-        if not faceTracked(targetDir) then
-            return false
-        end
-        local tx = state.x
-        local tz = state.z
-        if targetDir == DIR_N then
-            tz = tz + 1
-        elseif targetDir == DIR_E then
-            tx = tx + 1
-        elseif targetDir == DIR_S then
-            tz = tz - 1
-        else
-            tx = tx - 1
+        return nil
+    end
+
+    local function gpsVerifyDisplacement(anchor,horizontal,vertical)
+        if not anchor then
+            return true
         end
 
-        if tx<-3 or tx>17 or tz<-6 or tz>2 then
+        local pos=gpsSample(1)
+
+        if not pos then
+            return true
+        end
+
+        local hd=math.abs(pos.x-anchor.x)+math.abs(pos.z-anchor.z)
+        local vd=pos.y-anchor.y
+
+        if hd~=horizontal or vd~=vertical then
             state.recoveryLocked=true
-            state.recoveryReason="Foreman movement would leave operating area"
+            state.recoveryReason="GPS verification disagreed with Foreman collision detour"
             state.phase="RECOVERY_LOCK"
             saveState()
             sendState(state.recoveryReason)
             return false
         end
 
-        local attempts = 0
-        while attempts < MOVE_RETRY_LIMIT do
-            attempts = attempts + 1
-            if not occupied(tx,tz) then
+        return true
+    end
+
+    local function nextCoordinate(dir,x,z)
+        x=x or state.x
+        z=z or state.z
+
+        if dir==DIR_N then
+            z=z+1
+        elseif dir==DIR_E then
+            x=x+1
+        elseif dir==DIR_S then
+            z=z-1
+        else
+            x=x-1
+        end
+
+        return x,z
+    end
+
+    local function oppositeDir(dir)
+        return (dir+2)%4
+    end
+
+    local function withinForemanArea(x,z)
+        return x>=-3 and x<=17 and z>=-6 and z<=2
+    end
+
+    local function stepAtCurrentHeight(targetDir)
+        if state.recoveryLocked then
+            return false
+        end
+
+        if not faceTracked(targetDir) then
+            return false
+        end
+
+        local tx,tz=nextCoordinate(targetDir)
+
+        if not withinForemanArea(tx,tz) then
+            return false
+        end
+
+        if occupied(tx,tz,state.y) then
+            return false
+        end
+
+        broadcast({
+            type="move_intent",
+            foremanId=id,
+            number=number,
+            x=tx,
+            z=tz,
+            y=state.y
+        })
+
+        intents[id]={
+            number=number,
+            x=tx,
+            z=tz,
+            y=state.y,
+            lastSeen=now()
+        }
+
+        sleep(MOVE_RESERVE_TIME)
+
+        if occupied(tx,tz,state.y) or lowerIntentWins(tx,tz,state.y) then
+            intents[id]=nil
+            return false
+        end
+
+        if turtle.detect() then
+            intents[id]=nil
+            return false
+        end
+
+        local intent={
+            seq=state.seq+1,
+            fuelBefore=turtle.getFuelLevel(),
+            from={x=state.x,z=state.z,y=state.y,dir=state.dir},
+            to={x=tx,z=tz,y=state.y,dir=state.dir}
+        }
+
+        state.motionIntent=intent
+        saveState()
+
+        if not turtle.forward() then
+            intents[id]=nil
+            state.motionIntent=nil
+            saveState()
+            return false
+        end
+
+        state.x=tx
+        state.z=tz
+        state.seq=intent.seq
+        intents[id]=nil
+        checkpointForeman()
+        state.motionIntent=nil
+        saveState()
+
+        broadcast({
+            type="foreman_position",
+            foremanId=id,
+            number=number,
+            x=state.x,
+            z=state.z,
+            y=state.y,
+            phase=state.phase
+        })
+
+        return true
+    end
+
+    local function restoreFromOverpass(targetDir,moved)
+        local back=oppositeDir(targetDir)
+
+        for i=1,moved do
+            if not stepAtCurrentHeight(back) then
+                state.recoveryLocked=true
+                state.recoveryReason="Foreman collision bypass could not retreat safely"
+                state.phase="RECOVERY_LOCK"
+                saveState()
+                sendState(state.recoveryReason)
+                return false
+            end
+        end
+
+        if state.y~=0 and not moveVertical(0) then
+            state.recoveryLocked=true
+            state.recoveryReason="Foreman collision bypass could not return to ground"
+            state.phase="RECOVERY_LOCK"
+            saveState()
+            sendState(state.recoveryReason)
+            return false
+        end
+
+        return true
+    end
+
+    local function resolvePeerCollision(targetDir,blocker)
+        if type(blocker)~="table" then
+            return false
+        end
+
+        local blockerNumber=tonumber(blocker.number) or 99
+
+        if number<blockerNumber then
+            local deadline=now()+3
+
+            while now()<deadline do
+                local tx,tz=nextCoordinate(targetDir)
+
+                if not occupied(tx,tz,0) then
+                    return true
+                end
+
+                sleep(0.1)
+            end
+
+            return false
+        end
+
+        local firstX,firstZ=nextCoordinate(targetDir)
+        local secondX,secondZ=nextCoordinate(targetDir,firstX,firstZ)
+
+        if not withinForemanArea(secondX,secondZ) then
+            return false
+        end
+
+        if occupied(secondX,secondZ,0) then
+            return false
+        end
+
+        local anchor=gpsSample(1)
+        local moved=0
+
+        state.phase="COLLISION_BYPASS"
+        saveState()
+        sendState("Yielding to Foreman-" .. tostring(blockerNumber))
+
+        if turtle.detectUp() then
+            state.phase="COLLISION_WAIT"
+            saveState()
+            sendState("Collision bypass blocked above")
+            return false
+        end
+
+        if not moveVertical(1) then
+            return false
+        end
+
+        for i=1,2 do
+            if not stepAtCurrentHeight(targetDir) then
+                restoreFromOverpass(targetDir,moved)
+                state.phase="COLLISION_WAIT"
+                saveState()
+                sendState("Collision bypass route unavailable")
+                return false
+            end
+
+            moved=moved+1
+        end
+
+        local deadline=now()+3
+
+        while occupied(state.x,state.z,0) and now()<deadline do
+            sleep(0.1)
+        end
+
+        if occupied(state.x,state.z,0) then
+            restoreFromOverpass(targetDir,moved)
+            state.phase="COLLISION_WAIT"
+            saveState()
+            sendState("Collision bypass landing occupied")
+            return false
+        end
+
+        if not moveVertical(0) then
+            restoreFromOverpass(targetDir,moved)
+            return false
+        end
+
+        if not gpsVerifyDisplacement(anchor,2,0) then
+            return false
+        end
+
+        state.phase="MOVING"
+        saveState()
+        sendState("Collision bypass complete")
+        return true
+    end
+
+    local function moveStep(targetDir)
+        if flags.recallMode and not recallTravel then
+            return false,"RECALL"
+        end
+
+        if not ensureGroundLevel() then
+            state.phase="VERTICAL_ERROR"
+            saveState()
+            sendState("Horizontal movement blocked because foreman is not at staging height")
+            return false,"VERTICAL"
+        end
+
+        if not faceTracked(targetDir) then
+            return false,"TURN"
+        end
+
+        local tx,tz=nextCoordinate(targetDir)
+
+        if not withinForemanArea(tx,tz) then
+            state.recoveryLocked=true
+            state.recoveryReason="Foreman movement would leave operating area"
+            state.phase="RECOVERY_LOCK"
+            saveState()
+            sendState(state.recoveryReason)
+            return false,"BOUNDS"
+        end
+
+        local attempts=0
+
+        while attempts<MOVE_RETRY_LIMIT do
+            attempts=attempts+1
+
+            local blockerId,blocker=peerAt(tx,tz,state.y)
+
+            if blockerId then
+                if attempts>=3 then
+                    state.phase="COLLISION_WAIT"
+                    saveState()
+                    sendState("Foreman-" .. tostring(blocker.number or "?") .. " occupies next tile")
+                    return false,"PEER",blocker
+                end
+            else
                 broadcast({
                     type="move_intent",
                     foremanId=id,
                     number=number,
                     x=tx,
-                    z=tz
+                    z=tz,
+                    y=state.y
                 })
-                intents[id] = {number=number,x=tx,z=tz,lastSeen=now()}
+
+                intents[id]={
+                    number=number,
+                    x=tx,
+                    z=tz,
+                    y=state.y,
+                    lastSeen=now()
+                }
+
                 sleep(MOVE_RESERVE_TIME)
-                if not occupied(tx,tz) and not lowerIntentWins(tx,tz) then
+
+                if not occupied(tx,tz,state.y) and not lowerIntentWins(tx,tz,state.y) then
                     local intent={
                         seq=state.seq+1,
                         fuelBefore=turtle.getFuelLevel(),
                         from={x=state.x,z=state.z,y=state.y,dir=state.dir},
                         to={x=tx,z=tz,y=state.y,dir=state.dir}
                     }
+
                     state.motionIntent=intent
                     saveState()
 
@@ -577,6 +876,7 @@ local function runForeman(cfg)
                         checkpointForeman()
                         state.motionIntent=nil
                         saveState()
+
                         broadcast({
                             type="foreman_position",
                             foremanId=id,
@@ -586,42 +886,83 @@ local function runForeman(cfg)
                             y=state.y,
                             phase=state.phase
                         })
+
                         return true
                     else
                         state.motionIntent=nil
                         saveState()
+
+                        local physicalPeerId,physicalPeer=peerAt(tx,tz,state.y)
+
+                        if physicalPeerId and attempts>=3 then
+                            intents[id]=nil
+                            return false,"PEER",physicalPeer
+                        end
                     end
                 end
             end
+
             sleep(0.2)
         end
 
-        state.phase = "BLOCKED"
+        intents[id]=nil
+        state.phase="BLOCKED"
         saveState()
         sendState("Movement blocked at " .. tostring(tx) .. "," .. tostring(tz))
-        return false
+        return false,"BLOCKED"
+    end
+
+    local function travelAxis(targetDir,targetTest)
+        local collisionRetries=0
+
+        while targetTest() do
+            local ok,reason,blocker=moveStep(targetDir)
+
+            if ok then
+                collisionRetries=0
+            elseif reason=="PEER" then
+                collisionRetries=collisionRetries+1
+
+                if collisionRetries>4 then
+                    return false
+                end
+
+                if not resolvePeerCollision(targetDir,blocker) then
+                    sleep(0.25)
+                end
+            else
+                return false
+            end
+        end
+
+        return true
     end
 
     local function goTo(tx,tz)
         if state.recoveryLocked then
             return false
         end
+
         if not ensureGroundLevel() then
             return false
         end
 
-        while state.x < tx do
-            if not moveStep(DIR_E) then return false end
+        if not travelAxis(DIR_E,function() return state.x<tx end) then
+            return false
         end
-        while state.x > tx do
-            if not moveStep(DIR_W) then return false end
+
+        if not travelAxis(DIR_W,function() return state.x>tx end) then
+            return false
         end
-        while state.z < tz do
-            if not moveStep(DIR_N) then return false end
+
+        if not travelAxis(DIR_N,function() return state.z<tz end) then
+            return false
         end
-        while state.z > tz do
-            if not moveStep(DIR_S) then return false end
+
+        if not travelAxis(DIR_S,function() return state.z>tz end) then
+            return false
         end
+
         return true
     end
 
@@ -1190,6 +1531,7 @@ local function runForeman(cfg)
                             number=message.number,
                             x=message.x,
                             z=message.z,
+                            y=message.y,
                             phase=message.phase,
                             lastSeen=now()
                         }
@@ -1198,6 +1540,7 @@ local function runForeman(cfg)
                             number=message.number,
                             x=message.x,
                             z=message.z,
+                            y=message.y,
                             lastSeen=now()
                         }
                     elseif message.type == "dock_request" and number == 1 then
@@ -3384,7 +3727,11 @@ local function runForeman(cfg)
         state.phase="RECALLING"
         saveState()
 
-        if not returnHome() then
+        recallTravel=true
+        local reachedHome=returnHome()
+        recallTravel=false
+
+        if not reachedHome then
             state.phase="RECOVERY_LOCK"
             state.recoveryLocked=true
             state.recoveryReason="Foreman recall could not reach home"
