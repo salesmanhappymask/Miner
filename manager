@@ -90,6 +90,8 @@ local function runRegionalManager()
     data.recall.shutdown=data.recall.shutdown or {}
 
     local pairNonce=tostring(managerId) .. ":" .. tostring(os.time()) .. ":" .. tostring(math.random(100000,999999))
+    local managerBootTime=now()
+    local masterLastSeen=nil
     local input=""
     local lastQuery=0
     local lastPair=0
@@ -457,6 +459,49 @@ local function runRegionalManager()
         end
     end
 
+    local function canReplaceMaster(sender)
+        if not data.masterForemanId or tonumber(data.masterForemanId)==tonumber(sender) then
+            return true
+        end
+        if now()-managerBootTime<5 then
+            return false
+        end
+        return not masterLastSeen or now()-masterLastSeen>=5
+    end
+
+    local function resetForMaster(sender)
+        data.masterForemanId=sender
+        data.session=tostring(managerId) .. ":" .. tostring(os.time()) .. ":" .. tostring(math.random(100000,999999))
+        data.paired=true
+        data.nodes={}
+        data.foremen={}
+        data.miners={}
+        data.navigators={}
+        data.authority={}
+        data.requests={}
+        data.foremanJobs={}
+        data.commissioningComplete=false
+        data.swarmStarted=false
+        data.gpsReady=false
+        data.minerSetupApproved=false
+        data.minerSetupDeclined=false
+        data.minerSetupGateRequested=false
+        data.minerSetupConfirm=false
+        data.recall={
+            state="NORMAL",
+            mode=nil,
+            active=false,
+            homeMiners={},
+            homeForemen={},
+            homeNavigators={},
+            emptied={},
+            shutdown={}
+        }
+        masterLastSeen=now()
+        save()
+        flushManager(true)
+    end
+
     local function validateRegistration(sender,message)
         if message.version~=VERSION or tonumber(message.managerId)~=managerId then
             return false
@@ -524,6 +569,10 @@ local function runRegionalManager()
         }
 
         data.nodes[sender]=node
+
+        if sender==data.masterForemanId and message.role=="foreman" and tonumber(message.number)==1 then
+            masterLastSeen=now()
+        end
 
         if message.role=="foreman" then
             local n=tonumber(message.number)
@@ -969,17 +1018,22 @@ local function runRegionalManager()
 
             if protocol==PROTOCOL and type(message)=="table" then
                 if message.type=="master_pair_seek" and message.version==VERSION then
-                    if not data.masterForemanId or tonumber(data.masterForemanId)==tonumber(sender) then
+                    if canReplaceMaster(sender) then
                         sendPairOffer(sender)
                     end
 
                 elseif message.type=="master_pair_accept" and message.version==VERSION and
-                    tonumber(message.managerId)==managerId then
-                    if not data.masterForemanId or tonumber(data.masterForemanId)==tonumber(sender) then
-                        data.masterForemanId=sender
-                        data.session=data.session or (tostring(managerId) .. ":" .. tostring(os.time()) .. ":" .. tostring(math.random(100000,999999)))
-                        data.paired=true
-                        save()
+                    tonumber(message.managerId)==managerId and message.nonce==pairNonce then
+                    if canReplaceMaster(sender) then
+                        if not data.masterForemanId or tonumber(data.masterForemanId)~=tonumber(sender) then
+                            resetForMaster(sender)
+                        else
+                            data.masterForemanId=sender
+                            data.session=data.session or (tostring(managerId) .. ":" .. tostring(os.time()) .. ":" .. tostring(math.random(100000,999999)))
+                            data.paired=true
+                            masterLastSeen=now()
+                            save()
+                        end
 
                         send(sender,{
                             type="manager_pair_confirm",
@@ -1000,6 +1054,10 @@ local function runRegionalManager()
                     registerNode(sender,message)
 
                 elseif message.type=="node_online" then
+                    if sender==data.masterForemanId and message.role=="foreman" and tonumber(message.number)==1 and message.session==data.session then
+                        masterLastSeen=now()
+                    end
+
                     data.nodes[sender]={
                         id=sender,
                         role=message.role,
@@ -1053,6 +1111,10 @@ local function runRegionalManager()
                     releaseSwarm()
 
                 elseif message.type=="status" then
+                    if sender==data.masterForemanId and message.role=="foreman" and tonumber(message.number)==1 and message.session==data.session then
+                        masterLastSeen=now()
+                    end
+
                     message.lastSeen=now()
                     local node=data.nodes[sender] or {}
                     node.id=sender
