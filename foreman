@@ -938,6 +938,10 @@ local function runForeman(cfg)
         return true
     end
 
+    local function privateLaneZ()
+        return 1-number
+    end
+
     local function goTo(tx,tz)
         if state.recoveryLocked then
             return false
@@ -2989,9 +2993,26 @@ local function runForeman(cfg)
             local firstIsBootstrap=number==1 and firstPending==1 and not state.firstInstallerRecovered
 
             if not firstIsBootstrap then
-                if not goTo(firstPending,0) then
-                    return false
+                local laneZ=privateLaneZ()
+
+                if state.z~=laneZ then
+                    if not goTo(state.x,laneZ) then
+                        return false
+                    end
                 end
+
+                if state.x~=firstPending then
+                    if not goTo(firstPending,laneZ) then
+                        return false
+                    end
+                end
+
+                if state.z~=0 then
+                    if not goTo(firstPending,0) then
+                        return false
+                    end
+                end
+
                 faceTracked(DIR_N)
                 saveState()
             end
@@ -3029,19 +3050,22 @@ local function runForeman(cfg)
                 if row<last then
                     local nextRow=row+1
 
-                    if useBootstrapDrive then
-                        if not goTo(nextRow,0) then
-                            return false
-                        end
-                    else
-                        if state.x~=row or state.z~=0 then
-                            state.phase="PLACEMENT_ERROR"
-                            saveState()
-                            sendState("Foreman left staging line after commissioning")
-                            return false
-                        end
+                    local laneZ=privateLaneZ()
 
-                        if not moveStep(DIR_E) then
+                    if state.z~=laneZ then
+                        if not goTo(state.x,laneZ) then
+                            return false
+                        end
+                    end
+
+                    if state.x~=nextRow then
+                        if not goTo(nextRow,laneZ) then
+                            return false
+                        end
+                    end
+
+                    if state.z~=0 then
+                        if not goTo(nextRow,0) then
                             return false
                         end
                     end
@@ -3872,8 +3896,24 @@ local function runForeman(cfg)
             return false
         end
 
-        if not goTo(req.row,0) then
-            return false
+        local laneZ=privateLaneZ()
+
+        if state.z~=laneZ then
+            if not goTo(state.x,laneZ) then
+                return false
+            end
+        end
+
+        if state.x~=req.row then
+            if not goTo(req.row,laneZ) then
+                return false
+            end
+        end
+
+        if state.z~=0 then
+            if not goTo(req.row,0) then
+                return false
+            end
         end
 
         if state.x~=req.row or state.z~=0 or state.y~=0 then
@@ -3951,8 +3991,24 @@ local function runForeman(cfg)
                             return false
                         end
 
-                        if not goTo(req.row,0) then
-                            return false
+                        local laneZ=privateLaneZ()
+
+                        if state.z~=laneZ then
+                            if not goTo(state.x,laneZ) then
+                                return false
+                            end
+                        end
+
+                        if state.x~=req.row then
+                            if not goTo(req.row,laneZ) then
+                                return false
+                            end
+                        end
+
+                        if state.z~=0 then
+                            if not goTo(req.row,0) then
+                                return false
+                            end
                         end
 
                         if not verifyServiceMiner(req) then
