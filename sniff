@@ -1,9 +1,13 @@
 local args = {...}
 local token = args[1]
 local path = args[2] or "sniff.log"
-if not token or not token:match("^[%x%-]+$") then
-    error("Usage: getlog <webhook.site ID> [file]")
+if not token or token == "" then
+    print("Enter webhook.site ID or full URL:")
+    token = read()
 end
+token = tostring(token or ""):match("webhook%.site/([%w%-]+)") or tostring(token or ""):match("([%w%-]+)")
+if not token or #token < 8 then error("Invalid webhook.site ID") end
+print("Using ID: " .. token)
 if not http or not http.request then error("HTTP unavailable") end
 if not fs.exists(path) or fs.isDir(path) then error("File not found: " .. path) end
 local file = fs.open(path, "r")
