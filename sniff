@@ -1,93 +1,48 @@
 local args = {...}
-local path = args[1] or "sniff.log"
-
-if not http or not http.request then
-    error("HTTP API is unavailable")
+local token = args[1]
+local path = args[2] or "sniff.log"
+if not token or not token:match("^[%x%-]+$") then
+    error("Usage: getlog <webhook.site ID> [file]")
 end
-
-if not fs.exists(path) or fs.isDir(path) then
-    error("File not found: " .. path)
-end
-
+if not http or not http.request then error("HTTP unavailable") end
+if not fs.exists(path) or fs.isDir(path) then error("File not found: " .. path) end
 local file = fs.open(path, "r")
-if not file then
-    error("Cannot read: " .. path)
-end
+if not file then error("Cannot read: " .. path) end
 local content = file.readAll()
 file.close()
+if not content or content == "" then error("File is empty") end
 
-if not content or content == "" then
-    error("File is empty: " .. path)
-end
+local omitted = math.max(0, #content - 32000)
+if omitted > 0 then content = content:sub(omitted + 1) end
+local size = 600
+local total = math.ceil(#content / size)
+local base = "https://webhook.site/" .. token
+print("Sending " .. #content .. " bytes in " .. total .. " GET requests")
+if omitted > 0 then print("Earlier " .. omitted .. " bytes omitted") end
 
-local function jsonString(value)
-    local out = {'"'}
-    for i = 1, #value do
-        local byte = value:byte(i)
-        if byte == 34 then
-            out[#out + 1] = '\\"'
-        elseif byte == 92 then
-            out[#out + 1] = '\\\\'
-        elseif byte < 32 then
-            out[#out + 1] = string.format("\\u%04x", byte)
-        else
-            out[#out + 1] = string.char(byte)
+for part = 1, total do
+    local chunk = content:sub((part - 1) * size + 1, part * size)
+    local url = base .. "?part=" .. part .. "&total=" .. total ..
+        "&omitted=" .. omitted .. "&data=" .. textutils.urlEncode(chunk)
+    local timer = os.startTimer(15)
+    local ok, started, reason = pcall(http.request, url)
+    if not ok then error("Part " .. part .. ": " .. tostring(started)) end
+    if started == false then error("Part " .. part .. ": " .. tostring(reason)) end
+    while true do
+        local event, address, value = os.pullEvent()
+        if event == "http_success" and address == url then
+            local status = value.getResponseCode and value.getResponseCode() or nil
+            value.close()
+            if status and (status < 200 or status >= 300) then
+                error("Part " .. part .. ": HTTP " .. status)
+            end
+            print(part .. "/" .. total)
+            break
+        elseif event == "http_failure" and address == url then
+            error("Part " .. part .. ": " .. tostring(value))
+        elseif event == "timer" and address == timer then
+            error("Part " .. part .. ": no GET response after 15 seconds")
         end
     end
-    out[#out + 1] = '"'
-    return table.concat(out)
 end
-
-local name = fs.getName(path)
-local body = '{"description":"ComputerCraft sniffer log","public":false,"files":{' ..
-    jsonString(name) .. ':{"content":' .. jsonString(content) .. '}}}'
-
-print("Enter the token in pieces, about 10 characters each.")
-print("Press Enter on an empty line when finished.")
-local parts = {}
-while true do
-    local part = read("*")
-    if not part or part == "" then break end
-    parts[#parts + 1] = part
-end
-local token = table.concat(parts)
-if token == "" then error("No token entered") end
-
-local headers = {
-    ["Authorization"] = "Bearer " .. token,
-    ["Accept"] = "application/vnd.github+json",
-    ["Content-Type"] = "application/json",
-    ["User-Agent"] = "ComputerCraft-Gist-Upload"
-}
-
-local url = "https://api.github.com/gists"
-print("Uploading " .. name .. " (" .. #content .. " bytes)...")
-local timer = os.startTimer(40)
-local ok, started, reason = pcall(http.request, url, body, headers)
-token = nil
-parts = nil
-headers = nil
-body = nil
-if not ok then error("Request error: " .. tostring(started)) end
-if started == false then error("Request refused: " .. tostring(reason)) end
-
-while true do
-    local event, address, value = os.pullEvent()
-    if event == "http_success" and address == url then
-        local status = value.getResponseCode and value.getResponseCode() or nil
-        local result = value.readAll()
-        value.close()
-        if status and status ~= 201 then
-            error("GitHub returned " .. tostring(status) .. ": " .. tostring(result):sub(1, 300))
-        end
-        local link = result and result:match('"html_url"%s*:%s*"(https://gist%.github%.com/[^\"]+)"')
-        if not link then error("GitHub response: " .. tostring(result):sub(1, 300)) end
-        print("Gist created:")
-        print(link)
-        break
-    elseif event == "http_failure" and address == url then
-        error("Connection failed: " .. tostring(value))
-    elseif event == "timer" and address == timer then
-        error("No response after 40 seconds. The server may block outgoing uploads.")
-    end
-end
+print("Transfer complete. Send the webhook.site URL.")
