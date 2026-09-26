@@ -1,85 +1,23 @@
-local args = {...}
-local path = args[1] or "sniff.log"
-
-if not http or not http.post then
-    error("HTTP API is unavailable")
-end
-
-if not fs.exists(path) or fs.isDir(path) then
-    error("File not found: " .. path)
-end
-
+local path = ({...})[1] or "sniff.log"
+if not http or not http.post then error("HTTP unavailable") end
+if not fs.exists(path) or fs.isDir(path) then error("File not found: " .. path) end
 local file = fs.open(path, "r")
-if not file then
-    error("Cannot read: " .. path)
-end
+if not file then error("Cannot read: " .. path) end
 local content = file.readAll()
 file.close()
-
-if not content or content == "" then
-    error("File is empty: " .. path)
-end
-
-local function jsonString(value)
-    local out = {'"'}
-    for i = 1, #value do
-        local byte = value:byte(i)
-        if byte == 34 then
-            out[#out + 1] = '\\"'
-        elseif byte == 92 then
-            out[#out + 1] = '\\\\'
-        elseif byte < 32 then
-            out[#out + 1] = string.format("\\u%04x", byte)
-        else
-            out[#out + 1] = string.char(byte)
-        end
-    end
-    out[#out + 1] = '"'
-    return table.concat(out)
-end
-
-local name = fs.getName(path)
-local body = '{"description":"ComputerCraft sniffer log","public":false,"files":{' ..
-    jsonString(name) .. ':{"content":' .. jsonString(content) .. '}}}'
-
-print("GitHub token with Gists write permission:")
-local token = read("*")
-if not token or token == "" then
-    error("No token entered")
-end
-
-local headers = {
-    ["Authorization"] = "Bearer " .. token,
-    ["Accept"] = "application/vnd.github+json",
-    ["Content-Type"] = "application/json",
-    ["User-Agent"] = "ComputerCraft-Gist-Upload"
-}
-
-print("Uploading " .. name .. " (" .. #content .. " bytes)...")
-local ok, response, reason = pcall(http.post, "https://api.github.com/gists", body, headers)
-token = nil
-headers = nil
-body = nil
-
-if not ok then
-    error("Upload error: " .. tostring(response))
-end
-if not response then
-    error("Upload failed: " .. tostring(reason or "no response"))
-end
-
+if not content or content == "" then error("Log is empty") end
+print("Uploading " .. tostring(#content) .. " bytes...")
+local ok, response, reason = pcall(http.post, "https://paste.rs/", content, {
+    ["Content-Type"] = "text/plain"
+})
+if not ok then error(tostring(response)) end
+if not response then error("Upload failed: " .. tostring(reason or "no response")) end
 local status = response.getResponseCode and response.getResponseCode() or nil
-local result = response.readAll()
+local link = response.readAll()
 response.close()
-
-if status and status ~= 201 then
-    error("GitHub returned " .. tostring(status) .. ": " .. tostring(result):sub(1, 300))
+if status and status ~= 201 then error("Upload status " .. tostring(status) .. ": " .. tostring(link)) end
+if not link or not link:match("^https://paste%.rs/[%w%-_]+%s*$") then
+    error("Unexpected response: " .. tostring(link):sub(1, 300))
 end
-
-local url = result and result:match('"html_url"%s*:%s*"(https://gist%.github%.com/[^\"]+)"')
-if not url then
-    error("No Gist URL in response: " .. tostring(result):sub(1, 300))
-end
-
-print("Gist created:")
-print(url)
+print("Log URL:")
+print(link)
