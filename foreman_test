@@ -1,0 +1,257 @@
+local PROTOCOL = "turtle_transfer_test_v1"
+local LOG = "foreman_transfer.log"
+local DISTANCE_TO_MINER = 3
+
+local function writeLog(message)
+    local line = string.format("[%.3f] %s", os.clock(), tostring(message))
+    print(line)
+    local h = fs.open(LOG, "a")
+    if h then
+        h.writeLine(line)
+        h.close()
+    end
+end
+
+local function resetLog()
+    if fs.exists(LOG) then
+        fs.delete(LOG)
+    end
+    writeLog("Foreman transfer test starting")
+    writeLog("Computer ID: " .. tostring(os.getComputerID()))
+    writeLog("Fuel level: " .. tostring(turtle.getFuelLevel()))
+end
+
+local function openWireless()
+    for _, side in ipairs({"left","right","top","bottom","front","back"}) do
+        if peripheral.getType(side) == "modem" then
+            local ok, wireless = pcall(peripheral.call, side, "isWireless")
+            if ok and wireless then
+                rednet.open(side)
+                writeLog("Opened wireless modem on " .. side)
+                return side
+            end
+        end
+    end
+
+    error("No wireless modem found")
+end
+
+local function countInventory()
+    local total = 0
+    for slot = 1,16 do
+        local count = turtle.getItemCount(slot)
+        if count > 0 then
+            writeLog("Slot " .. slot .. " contains " .. count .. " item(s)")
+            total = total + count
+        end
+    end
+    writeLog("Total items in inventory: " .. total)
+    return total
+end
+
+local function totalItems()
+    local total = 0
+    for slot = 1,16 do
+        total = total + turtle.getItemCount(slot)
+    end
+    return total
+end
+
+local function sendError(minerId, message)
+    writeLog("ERROR: " .. tostring(message))
+    if minerId then
+        rednet.send(minerId, {
+            type = "TEST_ERROR",
+            error = tostring(message)
+        }, PROTOCOL)
+    end
+end
+
+local function moveForwardOne(step)
+    writeLog("Moving forward, step " .. step .. " of " .. DISTANCE_TO_MINER)
+    local ok, reason = turtle.forward()
+    writeLog("turtle.forward() returned " .. tostring(ok) .. ", " .. tostring(reason))
+    return ok
+end
+
+local function turnAround()
+    writeLog("Turning around")
+    local a = turtle.turnRight()
+    writeLog("First turtle.turnRight() returned " .. tostring(a))
+    local b = turtle.turnRight()
+    writeLog("Second turtle.turnRight() returned " .. tostring(b))
+    return a and b
+end
+
+resetLog()
+openWireless()
+
+writeLog("Initial Foreman inventory scan")
+countInventory()
+writeLog("Broadcasting HELLO_FOREMAN")
+
+rednet.broadcast({
+    type = "HELLO_FOREMAN",
+    foremanId = os.getComputerID()
+}, PROTOCOL)
+
+local minerId = nil
+local minerHello = nil
+local deadline = os.clock() + 15
+
+while not minerId and os.clock() < deadline do
+    local sender, message, protocol = rednet.receive(PROTOCOL, 1)
+
+    if sender then
+        writeLog("Received message from " .. tostring(sender) .. ": " .. textutils.serialize(message))
+    end
+
+    if type(message) == "table" and message.type == "HELLO_MINER" then
+        minerId = sender
+        minerHello = message
+    end
+end
+
+if not minerId then
+    sendError(nil, "No Miner responded to HELLO_FOREMAN")
+    error("No Miner responded")
+end
+
+writeLog("Paired with Miner " .. tostring(minerId))
+writeLog("Miner reports selected slot " .. tostring(minerHello.selectedSlot))
+writeLog("Miner reports " .. tostring(minerHello.count) .. " item(s) ready")
+
+for step = 1,DISTANCE_TO_MINER do
+    if not moveForwardOne(step) then
+        sendError(minerId, "Movement toward Miner failed at step " .. step)
+        error("Movement toward Miner failed")
+    end
+end
+
+writeLog("Arrived at Miner position")
+writeLog("Requesting transfer")
+
+rednet.send(minerId, {
+    type = "REQUEST_TRANSFER"
+}, PROTOCOL)
+
+local ready = nil
+deadline = os.clock() + 10
+
+while not ready and os.clock() < deadline do
+    local sender, message, protocol = rednet.receive(PROTOCOL, 1)
+
+    if sender then
+        writeLog("Received message from " .. tostring(sender) .. ": " .. textutils.serialize(message))
+    end
+
+    if sender == minerId and type(message) == "table" and message.type == "TRANSFER_READY" then
+        ready = message
+    end
+end
+
+if not ready then
+    sendError(minerId, "Miner never sent TRANSFER_READY")
+    error("Transfer handshake timed out")
+end
+
+writeLog("Miner reports transfer slot " .. tostring(ready.slot))
+writeLog("Miner reports transfer count " .. tostring(ready.count))
+
+local before = totalItems()
+writeLog("Foreman inventory before suck: " .. before)
+
+local requested = tonumber(ready.count) or 64
+if requested < 1 then requested = 64 end
+if requested > 64 then requested = 64 end
+
+writeLog("Calling turtle.suck(" .. requested .. ")")
+local suckResult, suckReason = turtle.suck(requested)
+writeLog("turtle.suck returned " .. tostring(suckResult) .. ", " .. tostring(suckReason))
+
+local after = totalItems()
+local gained = after - before
+
+writeLog("Foreman inventory after suck: " .. after)
+writeLog("Items gained: " .. gained)
+countInventory()
+
+rednet.send(minerId, {
+    type = "TRANSFER_RESULT",
+    suckResult = suckResult,
+    reason = suckReason,
+    gained = gained
+}, PROTOCOL)
+
+writeLog("Sent TRANSFER_RESULT to Miner")
+
+local post = nil
+deadline = os.clock() + 10
+
+while not post and os.clock() < deadline do
+    local sender, message, protocol = rednet.receive(PROTOCOL, 1)
+
+    if sender then
+        writeLog("Received message from " .. tostring(sender) .. ": " .. textutils.serialize(message))
+    end
+
+    if sender == minerId and type(message) == "table" and message.type == "MINER_POST_TRANSFER" then
+        post = message
+    end
+end
+
+if post then
+    writeLog("Miner reports " .. tostring(post.remaining) .. " item(s) remaining")
+else
+    writeLog("WARNING: Miner did not send MINER_POST_TRANSFER")
+end
+
+if not turnAround() then
+    sendError(minerId, "Could not turn around")
+    error("Turn failed")
+end
+
+for step = 1,DISTANCE_TO_MINER do
+    if not moveForwardOne(step) then
+        sendError(minerId, "Return movement failed at step " .. step)
+        error("Return movement failed")
+    end
+end
+
+writeLog("Returned to Foreman start point")
+writeLog("Chest should now be directly in front")
+
+local beforeDrop = totalItems()
+writeLog("Foreman inventory before chest deposit: " .. beforeDrop)
+
+for slot = 1,16 do
+    local count = turtle.getItemCount(slot)
+    if count > 0 then
+        turtle.select(slot)
+        writeLog("Dropping slot " .. slot .. " containing " .. count .. " item(s) into chest")
+        local ok, reason = turtle.drop()
+        writeLog("turtle.drop() returned " .. tostring(ok) .. ", " .. tostring(reason))
+        writeLog("Slot " .. slot .. " now contains " .. turtle.getItemCount(slot))
+    end
+end
+
+turtle.select(1)
+
+local afterDrop = totalItems()
+writeLog("Foreman inventory after chest deposit: " .. afterDrop)
+countInventory()
+
+if afterDrop == 0 then
+    writeLog("SUCCESS: Foreman inventory emptied into chest")
+else
+    writeLog("NOTICE: Foreman still contains " .. afterDrop .. " item(s)")
+end
+
+rednet.send(minerId, {
+    type = "TEST_COMPLETE",
+    gained = gained,
+    remainingOnForeman = afterDrop
+}, PROTOCOL)
+
+writeLog("Sent TEST_COMPLETE")
+writeLog("Foreman transfer test finished")
