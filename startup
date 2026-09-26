@@ -100,6 +100,7 @@ elseif REGIONAL_MANAGER==1 then
     roleFile="manager"
     roleName="regional_manager"
 elseif MASTER_FOREMAN==1 then
+    os.setComputerLabel("Foreman-1")
     roleFile="foreman"
     roleName="master_foreman"
 elseif cfg then

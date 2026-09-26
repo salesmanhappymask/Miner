@@ -4312,9 +4312,10 @@ local function runMaster()
 
     local cfg=loadTable("node.cfg")
     local newMaster=false
+    local id=os.getComputerID()
 
     if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v50.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v54.")
     end
 
     if not cfg then
@@ -4325,7 +4326,7 @@ local function runMaster()
             version=VERSION,
             role="foreman",
             number=1,
-            controller=os.getComputerID(),
+            controller=id,
             rowStart=1,
             rowEnd=4,
             homeX=0,
@@ -4335,19 +4336,51 @@ local function runMaster()
             startDir=DIR_N,
             master=true,
             managerId=managerId,
-            masterForemanId=os.getComputerID(),
+            masterForemanId=id,
             session=session,
-            foremen={[1]=os.getComputerID()}
+            foremen={[1]=id}
         }
+
         saveTable("node.cfg",cfg)
     else
-        setRegionalManager(cfg.managerId)
+        local wasMaster=
+            cfg.role=="foreman" and
+            tonumber(cfg.number)==1 and
+            cfg.master==true and
+            tonumber(cfg.masterForemanId)==id
 
-        if not registerNodeWithManager(cfg) then
+        if not wasMaster then
+            newMaster=true
+        end
+
+        cfg.version=VERSION
+        cfg.role="foreman"
+        cfg.number=1
+        cfg.controller=id
+        cfg.rowStart=1
+        cfg.rowEnd=4
+        cfg.homeX=0
+        cfg.homeZ=-2
+        cfg.startX=0
+        cfg.startZ=0
+        cfg.startDir=DIR_N
+        cfg.master=true
+        cfg.masterForemanId=id
+        cfg.foremen=type(cfg.foremen)=="table" and cfg.foremen or {}
+        cfg.foremen[1]=id
+
+        saveTable("node.cfg",cfg)
+
+        if cfg.managerId then
+            setRegionalManager(cfg.managerId)
+        end
+
+        if not cfg.managerId or not cfg.session or not registerNodeWithManager(cfg) then
             local managerId,session=pairMasterWithRegionalManager()
             cfg.managerId=managerId
-            cfg.masterForemanId=os.getComputerID()
+            cfg.masterForemanId=id
             cfg.session=session
+            cfg.foremen[1]=id
             saveTable("node.cfg",cfg)
         end
     end
