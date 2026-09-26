@@ -98,6 +98,7 @@ local function runRegionalManager()
     data.recall.targets.miners=data.recall.targets.miners or {}
     data.recall.targets.foremen=data.recall.targets.foremen or {}
     data.recall.targets.navigators=data.recall.targets.navigators or {}
+    data.recall.packReady=data.recall.packReady or {}
 
     for _,registry in ipairs({data.nodes,data.foremen,data.miners,data.navigators}) do
         for _,entry in pairs(registry) do
@@ -108,6 +109,9 @@ local function runRegionalManager()
     end
 
     local bootNow=now()
+    if data.recall.state=="PACK_COLLECT" then
+        data.recall.collectAfter=bootNow+15
+    end
     for _,request in pairs(data.requests) do
         if type(request)=="table" then
             request.created=bootNow
@@ -283,6 +287,7 @@ local function runRegionalManager()
         end
 
         data.gpsReady=ready==NAVIGATOR_COUNT
+        if data.gpsReady then data.minerSetupApproved=true end
         return ready
     end
 
@@ -467,9 +472,7 @@ local function runRegionalManager()
         print("2 = Dump & Recall")
         print("3 = Shutdown Recall")
         print("4 = Resume")
-        if foremenReadyForMinerSetup() then
-            print("5 = Begin Miner Setup")
-        end
+        print("6 = Pack it up")
         print("")
         if data.minerSetupConfirm and foremenReadyForMinerSetup() then
             print("Begin miner setup? Y/N")
@@ -670,6 +673,14 @@ local function runRegionalManager()
             send(sender,{type="recall_command",mode=message.role=="miner" and "DUMP" or "NORMAL",session=data.session})
         elseif data.recall.state=="SHUTDOWN_COMPLETE" then
             send(sender,{type="recall_command",mode="SHUTDOWN",session=data.session})
+        elseif data.recall.mode=="PACK" then
+            if data.recall.state=="PACK_RECALL" then
+                send(sender,{type="recall_command",mode="PACK",session=data.session})
+            elseif data.recall.state=="PACK_CLEAR" and sender~=data.recall.targets.miners[16] then
+                send(sender,{type="pack_clear",session=data.session})
+            elseif data.recall.state=="PACK_COLLECT" and sender==data.recall.targets.miners[16] then
+                send(sender,{type="pack_collect",session=data.session})
+            end
         elseif data.recall.active then
             if data.recall.mode~="DUMP" or message.role=="miner" then
                 send(sender,{type="recall_command",mode=data.recall.mode,session=data.session})
@@ -687,9 +698,20 @@ local function runRegionalManager()
         return "BOTH"
     end
 
+    local function registeredNodeSender(role,number,sender)
+        local index=tonumber(number)
+        if not index then return false end
+        local registry=role=="miner" and data.miners or
+            role=="foreman" and data.foremen or
+            role=="navigator" and data.navigators
+        local node=registry and registry[index]
+        return node and node.id==sender or false
+    end
+
     local function upsertServiceRequest(sender,message)
         local row=tonumber(message.row)
         if not row or row<1 or row>16 then return end
+        if not registeredNodeSender("miner",row,sender) then return end
 
         local requestId=tostring(message.requestId or "")
         if requestId=="" then return end
@@ -902,6 +924,10 @@ local function runRegionalManager()
     end
 
     local function beginRecall(mode)
+        if data.recall.mode=="PACK" and
+            (data.recall.state=="PACK_CLEAR" or data.recall.state=="PACK_COLLECT") then
+            return false
+        end
         local targets={miners={},foremen={},navigators={}}
         for row=1,WORKER_COUNT do
             local miner=data.miners[row]
@@ -925,8 +951,27 @@ local function runRegionalManager()
             end
         end
 
+        if mode=="PACK" then
+            if not data.commissioningComplete then
+                print("Pack blocked: commissioning is incomplete")
+                return false
+            end
+            for row=1,WORKER_COUNT do
+                if not targets.miners[row] then
+                    print("Pack blocked: Miner-" .. tostring(row) .. " is not registered")
+                    return false
+                end
+            end
+            for n=1,FOREMAN_COUNT do
+                if not targets.foremen[n] or not targets.navigators[n] then
+                    print("Pack blocked: Foreman/GPS-" .. tostring(n) .. " is not registered")
+                    return false
+                end
+            end
+        end
+
         data.recall={
-            state=mode=="DUMP" and "DUMP_RECALLING" or (mode=="SHUTDOWN" and "SHUTDOWN_RECALL" or "RECALLING"),
+            state=mode=="DUMP" and "DUMP_RECALLING" or (mode=="SHUTDOWN" and "SHUTDOWN_RECALL" or (mode=="PACK" and "PACK_RECALL" or "RECALLING")),
             mode=mode,
             active=true,
             homeMiners={},
@@ -934,10 +979,11 @@ local function runRegionalManager()
             homeNavigators={},
             emptied={},
             shutdown={},
+            packReady={},
             targets=targets
         }
 
-        if mode=="NORMAL" or mode=="SHUTDOWN" then
+        if mode=="NORMAL" or mode=="SHUTDOWN" or mode=="PACK" then
             for requestId,request in pairs(data.requests) do
                 if request.status~="COMPLETE" then
                     request.status="SUSPENDED"
@@ -958,7 +1004,7 @@ local function runRegionalManager()
     end
 
     local function resumeSwarm()
-        if data.recall.mode=="SHUTDOWN" or data.recall.state=="SHUTDOWN_RECALL" or data.recall.state=="SHUTDOWN_COMPLETE" then
+        if data.recall.mode=="SHUTDOWN" or data.recall.mode=="PACK" or data.recall.state=="SHUTDOWN_RECALL" or data.recall.state=="SHUTDOWN_COMPLETE" then
             return
         end
 
@@ -1042,9 +1088,11 @@ local function runRegionalManager()
                     lastRecall=now()
                     save()
                 elseif fh>=tf and nh>=tn then
+                    local continuePacking=data.recall.packAfterDump
                     data.recall.state="DUMP_RECALLED_PAUSED"
                     data.recall.active=false
                     save()
+                    if continuePacking then beginRecall("PACK") end
                 end
             end
         elseif data.recall.mode=="SHUTDOWN" then
@@ -1052,6 +1100,28 @@ local function runRegionalManager()
                 data.recall.state="SHUTDOWN_COMPLETE"
                 data.recall.active=false
                 save()
+            end
+        elseif data.recall.mode=="PACK" then
+            if data.recall.state=="PACK_RECALL" and mh==16 and fh==4 and nh==4 and
+                tonumber(data.recall.packFreeSlots or 0)>=15 then
+                data.recall.state="PACK_CLEAR"
+                save()
+            elseif data.recall.state=="PACK_CLEAR" then
+                local ready=0
+                for _,id in pairs(data.recall.targets.miners) do
+                    if id~=data.recall.targets.miners[16] and data.recall.packReady[id] then ready=ready+1 end
+                end
+                for _,id in pairs(data.recall.targets.foremen) do
+                    if data.recall.packReady[id] then ready=ready+1 end
+                end
+                for _,id in pairs(data.recall.targets.navigators) do
+                    if data.recall.packReady[id] then ready=ready+1 end
+                end
+                if ready==23 then
+                    data.recall.state="PACK_COLLECT"
+                    data.recall.collectAfter=now()+15
+                    save()
+                end
             end
         end
     end
@@ -1431,23 +1501,33 @@ local function runRegionalManager()
                         save()
                     end
 
-                elseif message.type=="recall_home" and message.session==data.session then
+                elseif message.type=="recall_home" and message.session==data.session and
+                    data.recall.active and (message.mode==data.recall.mode or
+                        (data.recall.mode=="DUMP" and message.mode=="NORMAL")) then
                     if message.role=="miner" and message.row then
                         local row=tonumber(message.row)
                         local homeFacing=message.dir==DIR_N or (message.mode=="DUMP" and message.dir==DIR_S)
-                        if message.x==row and message.y==0 and message.z==0 and homeFacing then
+                        if registeredNodeSender("miner",row,sender) and
+                            message.x==row and message.y==0 and message.z==0 and homeFacing then
                             data.recall.homeMiners[row]=true
+                            if data.recall.mode=="PACK" and row==16 then
+                                data.recall.packFreeSlots=tonumber(message.freeSlots) or 0
+                            end
                         end
                     elseif message.role=="foreman" and message.number then
                         local n=tonumber(message.number)
-                        local expectedZ=-(n+1)
-                        if message.x==0 and message.y==0 and message.z==expectedZ and message.dir==DIR_N then
+                        local idle=n and FOREMAN_IDLE[n]
+                        if n and registeredNodeSender("foreman",n,sender) and
+                            idle and message.x==idle.x and message.y==idle.y and
+                            message.z==idle.z and message.dir==DIR_N then
                             data.recall.homeForemen[n]=true
                         end
                     elseif message.role=="navigator" and message.number then
                         local n=tonumber(message.number)
-                        local expectedZ=-(n+1)
-                        if message.x==0 and message.y==1 and message.z==expectedZ and message.dir==DIR_N then
+                        local idle=n and NAVIGATOR_RECALL[n]
+                        if n and registeredNodeSender("navigator",n,sender) and
+                            idle and message.x==idle.x and message.y==idle.y and
+                            message.z==idle.z and message.dir==DIR_N then
                             data.recall.homeNavigators[n]=true
                         end
                     end
@@ -1463,18 +1543,38 @@ local function runRegionalManager()
                     end
 
                 elseif message.type=="recall_shutdown_ready" and message.session==data.session then
-                    data.recall.shutdown[sender]=true
-                    if message.role=="miner" and message.row then
-                        data.recall.homeMiners[tonumber(message.row)]=true
-                    elseif message.role=="foreman" and message.number then
-                        data.recall.homeForemen[tonumber(message.number)]=true
-                    elseif message.role=="navigator" and message.number then
-                        data.recall.homeNavigators[tonumber(message.number)]=true
+                    local index=message.role=="miner" and message.row or message.number
+                    if registeredNodeSender(message.role,index,sender) then
+                        data.recall.shutdown[sender]=true
+                        if message.role=="miner" then
+                            data.recall.homeMiners[tonumber(index)]=true
+                        elseif message.role=="foreman" then
+                            data.recall.homeForemen[tonumber(index)]=true
+                        elseif message.role=="navigator" then
+                            data.recall.homeNavigators[tonumber(index)]=true
+                        end
+                        save()
                     end
+
+                elseif message.type=="pack_ready" and message.session==data.session and
+                    data.recall.mode=="PACK" and
+                    (data.recall.state=="PACK_CLEAR" or data.recall.state=="PACK_COLLECT") then
+                    local index=message.role=="miner" and message.row or message.number
+                    if registeredNodeSender(message.role,index,sender) and
+                        sender~=data.recall.targets.miners[16] then
+                        data.recall.packReady[sender]=true
+                        save()
+                        send(sender,{type="pack_ready_ack",session=data.session})
+                    end
+
+                elseif message.type=="pack_done" and message.session==data.session and
+                    data.recall.mode=="PACK" and sender==data.recall.targets.miners[16] then
+                    data.recall.state="PACK_COMPLETE"
+                    data.recall.active=false
                     save()
 
                 elseif message.type=="miner_complete" and message.session==data.session and message.row then
-                    local m=data.miners[tonumber(message.row)]
+                    local m=registeredNodeSender("miner",message.row,sender) and data.miners[tonumber(message.row)]
                     if m then
                         m.state="COMPLETE"
                         m.lastSeen=now()
@@ -1526,6 +1626,12 @@ local function runRegionalManager()
                     beginRecall("DUMP")
                 elseif command=="3" then
                     beginRecall("SHUTDOWN")
+                elseif command=="6" then
+                    if data.commissioningComplete then
+                        beginRecall("DUMP")
+                        data.recall.packAfterDump=true
+                        save()
+                    end
                 elseif command=="4" then
                     resumeSwarm()
                 elseif command=="5" and foremenReadyForMinerSetup() then
@@ -1550,7 +1656,7 @@ local function runRegionalManager()
                 lastQuery=now()
             end
 
-            if now()-lastDispatch>=0.5 and data.recall.state~="RECALLED_PAUSED" and
+            if now()-lastDispatch>=0.5 and data.recall.mode~="PACK" and data.recall.state~="RECALLED_PAUSED" and
                 data.recall.state~="DUMP_RECALLED_PAUSED" and data.recall.state~="SHUTDOWN_COMPLETE" then
                 dispatchJobs()
                 lastDispatch=now()
@@ -1563,6 +1669,23 @@ local function runRegionalManager()
                     else
                         wakeForemenForDump()
                         sendRecallToNodes("DUMP",true)
+                    end
+                elseif data.recall.mode=="PACK" then
+                    if data.recall.state=="PACK_RECALL" then
+                        sendRecallToNodes("PACK",false)
+                    elseif data.recall.state=="PACK_CLEAR" then
+                        for _,id in pairs(data.recall.targets.miners) do
+                            if id~=data.recall.targets.miners[16] and not data.recall.packReady[id] then
+                                send(id,{type="pack_clear",session=data.session})
+                            end
+                        end
+                        for _,group in ipairs({data.recall.targets.foremen,data.recall.targets.navigators}) do
+                            for _,id in pairs(group) do
+                                if not data.recall.packReady[id] then send(id,{type="pack_clear",session=data.session}) end
+                            end
+                        end
+                    elseif data.recall.state=="PACK_COLLECT" and now()>=(data.recall.collectAfter or 0) then
+                        send(data.recall.targets.miners[16],{type="pack_collect",session=data.session})
                     end
                 elseif data.recall.mode=="NORMAL" or data.recall.mode=="SHUTDOWN" then
                     sendRecallToNodes(data.recall.mode,false)

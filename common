@@ -1,13 +1,37 @@
-VERSION = 54
-PROTOCOL = "miner_swarm_v54"
+VERSION = 55
+PROTOCOL = "miner_swarm_v55"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
 NAVIGATOR_SITES = {
-    [1]={x=1,y=10,z=0},
-    [2]={x=16,y=10,z=0},
-    [3]={x=1,y=10,z=15},
-    [4]={x=16,y=14,z=15}
+    [1]={x=-1,y=10,z=-2},
+    [2]={x=18,y=10,z=-2},
+    [3]={x=17,y=10,z=15},
+    [4]={x=0,y=14,z=15}
+}
+FOREMAN_IDLE = {
+    [1]={x=1,y=0,z=-1},
+    [2]={x=5,y=0,z=-1},
+    [3]={x=9,y=0,z=-1},
+    [4]={x=13,y=0,z=-1}
+}
+FOREMAN_DUMP = {
+    [1]={x=1,y=0,z=-2},
+    [2]={x=5,y=0,z=-2},
+    [3]={x=9,y=0,z=-2},
+    [4]={x=13,y=0,z=-2}
+}
+FOREMAN_FUEL = {
+    [1]={x=2,y=0,z=-2},
+    [2]={x=6,y=0,z=-2},
+    [3]={x=10,y=0,z=-2},
+    [4]={x=14,y=0,z=-2}
+}
+NAVIGATOR_RECALL = {
+    [1]={x=1,y=1,z=-1},
+    [2]={x=5,y=1,z=-1},
+    [3]={x=9,y=1,z=-1},
+    [4]={x=13,y=1,z=-1}
 }
 REQUEST_REPEAT = 10
 STATUS_INTERVAL = 10
@@ -193,9 +217,24 @@ function itemText(item)
     return lower(item.name) .. " " .. lower(item.rawName)
 end
 
+function enderChestFrequency(item)
+    if type(item)~="table" then return nil end
+    local text=itemText(item)
+    if not string.find(text,"ender",1,true) or not string.find(text,"chest",1,true) then
+        return nil
+    end
+    local damage=tonumber(item.damage or item.itemDamage or item.damageValue or item.metadata or item.meta)
+    if not damage or damage<0 or math.floor(damage/4096)~=0 then return nil end
+    return damage%4096
+end
+
 function matchesItem(item, kind)
     local text = itemText(item)
-    if kind == "coal" then
+    if kind == "ender_dump" then
+        return enderChestFrequency(item)==0
+    elseif kind == "ender_fuel" then
+        return enderChestFrequency(item)==11
+    elseif kind == "coal" then
         return string.find(text, "coal", 1, true) ~= nil
     elseif kind == "disk_drive" then
         return string.find(text, "disk drive", 1, true) ~= nil or string.find(text, "diskdrive", 1, true) ~= nil
@@ -820,4 +859,3 @@ function ensureManagerRegistration(cfg)
     end
     return true
 end
-

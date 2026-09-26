@@ -132,16 +132,8 @@ local function runNavigator(cfg)
             return false
         end
 
-        if not vertical(1) then
+        if not vertical(10) then
             return false
-        end
-
-        if cfg.number==4 then
-            if not step(DIR_E) then return false end
-        elseif cfg.number==3 then
-            if not step(DIR_N) then return false end
-        elseif cfg.number==2 then
-            if not step(DIR_W) then return false end
         end
 
         announceTraveling()
@@ -235,9 +227,11 @@ local function runNavigator(cfg)
     local function recallNavigator(mode)
         mode=mode or "NORMAL"
 
-        local targetX=0
-        local targetY=1
-        local targetZ=-(tonumber(cfg.number)+1)
+        local target=NAVIGATOR_RECALL[tonumber(cfg.number)]
+        if not target then return false end
+        local targetX=target.x
+        local targetY=target.y
+        local targetZ=target.z
 
         local alreadyHome=
             state.x==targetX and
@@ -418,6 +412,17 @@ local function runNavigator(cfg)
                             session=cfg.session
                         })
                     end
+                elseif message.type=="pack_clear" and state.recalled and state.recallMode=="PACK" then
+                    if clearNavigatorLabel() then
+                        state.packReady=true
+                        save()
+                        send(cfg.managerId,{
+                            type="pack_ready",role="navigator",number=cfg.number,
+                            session=cfg.session
+                        })
+                    end
+                elseif message.type=="pack_ready_ack" and state.packReady then
+                    os.shutdown()
                 elseif message.type=="resume_swarm" then
                     if not resumeNavigator() then
                         status("navigator","NAVIGATION_ERROR",{
@@ -433,6 +438,12 @@ local function runNavigator(cfg)
             end
         elseif event[1]=="timer" and event[2]==timer then
             sendNavigatorStatus()
+            if state.packReady then
+                send(cfg.managerId,{
+                    type="pack_ready",role="navigator",number=cfg.number,
+                    session=cfg.session
+                })
+            end
             timer=os.startTimer(5)
         end
     end

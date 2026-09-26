@@ -684,10 +684,31 @@ local function runMiner(cfg)
     state.resumeDir=tonumber(state.resumeDir) or DIR_N
 
     local function poseValid()
+        if cfg.row==16 and (state.phase=="PACK_COLLECT" or state.phase=="PACK_DONE") then
+            return state.originEstablished==true and cfg.orientationCalibrated==true and
+                state.x>=1 and state.x<=16 and state.y==0 and state.z==0 and state.dir==DIR_W
+        end
         return state.originEstablished==true and cfg.orientationCalibrated==true and
             state.x==cfg.homeX and state.y<=cfg.homeY and
             state.z>=cfg.shaftMinZ and state.z<=cfg.shaftMaxZ and
             state.dir>=DIR_N and state.dir<=DIR_W
+    end
+
+    if state.phase=="PACK_COLLECT" and state.packStepIntent and
+        state.packStepIntent.stage=="MOVING" then
+        local fuel=turtle.getFuelLevel()
+        if type(fuel)=="number" and type(state.packStepIntent.fuelBefore)=="number" then
+            if fuel<state.packStepIntent.fuelBefore then
+                state.x=state.x-1
+                state.packStepIntent=nil
+            else
+                state.packStepIntent.stage="DUG"
+            end
+        else
+            state.recoveryLocked=true
+            state.recoveryReason="Cannot resolve interrupted Miner-16 pack move"
+        end
+        saveTableLight(path,state)
     end
 
     local function minerSnapshot()
@@ -819,6 +840,7 @@ local function runMiner(cfg)
         serviceProbe=nil,
         refuelNow=false,
         serviceComplete=false,
+        packCollect=false,
         newForeman=nil
     }
     local lastStatus = 0
@@ -829,6 +851,14 @@ local function runMiner(cfg)
         state.depth=-state.y
         state.pos=state.z
         saveTableLight(path,state)
+    end
+
+    local function freeInventorySlots()
+        local count=0
+        for slot=1,16 do
+            if turtle.getItemCount(slot)==0 then count=count+1 end
+        end
+        return count
     end
 
     local function checkpoint()
@@ -948,6 +978,7 @@ local function runMiner(cfg)
                                         y=state.y,
                                         z=state.z,
                                         dir=state.dir,
+                                        freeSlots=freeInventorySlots(),
                                         session=cfg.session
                                     })
                                     if incomingMode=="DUMP" and not state.request then
@@ -967,6 +998,21 @@ local function runMiner(cfg)
                             else
                                 flags.recallMode=incomingMode
                             end
+                        elseif message.type=="pack_clear" and state.phase=="RECALLED_PAUSED" and
+                            state.recallMode=="PACK" and cfg.row~=16 then
+                            os.setComputerLabel(nil)
+                            if os.getComputerLabel()==nil then
+                                state.packReady=true
+                                save()
+                                send(cfg.managerId,{
+                                    type="pack_ready",role="miner",row=cfg.row,session=cfg.session
+                                })
+                            end
+                        elseif message.type=="pack_ready_ack" and state.packReady then
+                            os.shutdown()
+                        elseif message.type=="pack_collect" and cfg.row==16 and
+                            state.recallMode=="PACK" then
+                            flags.packCollect=true
                         elseif message.type == "hold_position" then
                             state.phase="RECOVERY_LOCK"
                             state.recoveryLocked=true
@@ -1494,15 +1540,15 @@ local function runMiner(cfg)
             return false
         end
 
+        flags.serviceProbe=nil
+        flags.refuelNow=false
+        flags.serviceComplete=false
+
         state.phase="WAITING_SERVICE"
         save()
         checkpoint()
         requestPacket(true)
         sendState("Waiting south-facing for Foreman-" .. tostring(cfg.foremanNumber))
-
-        flags.serviceProbe=nil
-        flags.refuelNow=false
-        flags.serviceComplete=false
 
         while not flags.serviceComplete do
             if flags.recallMode then
@@ -1720,6 +1766,7 @@ local function runMiner(cfg)
             y=state.y,
             z=state.z,
             dir=state.dir,
+            freeSlots=freeInventorySlots(),
             session=cfg.session
         })
 
@@ -1840,9 +1887,21 @@ local function runMiner(cfg)
         return true
     end
 
+    local collectPackedMiners
+
     local function waitRecalledPause()
         while state.phase=="RECALLED_PAUSED" do
-            if flags.recallMode then
+            if flags.packCollect and cfg.row==16 and state.recallMode=="PACK" then
+                flags.packCollect=false
+                state.phase="PACK_COLLECT"
+                save()
+                return collectPackedMiners()
+            elseif state.packReady and now()-(state.lastPackSend or -10)>=2 then
+                send(cfg.managerId,{
+                    type="pack_ready",role="miner",row=cfg.row,session=cfg.session
+                })
+                state.lastPackSend=now()
+            elseif flags.recallMode then
                 local nextMode=flags.recallMode
                 flags.recallMode=nil
                 if nextMode~=state.recallMode then
@@ -1856,6 +1915,76 @@ local function runMiner(cfg)
             end
         end
         return not state.recoveryLocked
+    end
+
+    collectPackedMiners=function()
+        if cfg.row~=16 or state.recallMode~="PACK" or state.z~=0 or state.y~=0 then
+            return false
+        end
+        if state.x==16 and freeInventorySlots()<15 then
+            state.recoveryLocked=true
+            state.recoveryReason="Miner-16 needs 15 free inventory slots for packing"
+            save()
+            sendState(state.recoveryReason)
+            return false
+        end
+        if state.dir~=DIR_W then
+            if not face(DIR_W) then return false end
+        end
+        state.phase="PACK_COLLECT"
+        save()
+        while state.x>1 do
+            if not state.packStepIntent then
+                if not turtle.inspect then
+                    state.recoveryLocked=true
+                    state.recoveryReason="Turtle inspect unavailable for safe pack collection"
+                    save()
+                    sendState(state.recoveryReason)
+                    return false
+                end
+                local found,block=turtle.inspect()
+                if not found or type(block)~="table" or
+                    not string.find(lower(block.name),"turtle",1,true) then
+                    state.recoveryLocked=true
+                    state.recoveryReason="Expected parked miner immediately west at x=" .. tostring(state.x-1)
+                    save()
+                    sendState(state.recoveryReason)
+                    return false
+                end
+                if not turtle.dig() then
+                    state.recoveryLocked=true
+                    state.recoveryReason="Could not break parked miner at x=" .. tostring(state.x-1)
+                    save()
+                    sendState(state.recoveryReason)
+                    return false
+                end
+                state.packStepIntent={stage="DUG"}
+                save()
+            end
+            state.packStepIntent.stage="MOVING"
+            state.packStepIntent.fuelBefore=turtle.getFuelLevel()
+            save()
+            if not turtle.forward() then
+                state.recoveryLocked=true
+                state.recoveryReason="Pack collection blocked at x=" .. tostring(state.x-1)
+                save()
+                sendState(state.recoveryReason)
+                return false
+            end
+            state.x=state.x-1
+            state.packStepIntent=nil
+            save()
+        end
+        os.setComputerLabel(nil)
+        if os.getComputerLabel()~=nil then return false end
+        state.phase="PACK_DONE"
+        save()
+        for i=1,5 do
+            send(cfg.managerId,{type="pack_done",row=16,session=cfg.session})
+            sleep(0.1)
+        end
+        os.shutdown()
+        return true
     end
 
     local function handleRecallRequest()
@@ -1912,8 +2041,26 @@ local function runMiner(cfg)
 
         checkpoint()
 
+        if state.phase=="PACK_DONE" then
+            for i=1,5 do
+                send(cfg.managerId,{type="pack_done",row=16,session=cfg.session})
+                sleep(0.1)
+            end
+            os.shutdown()
+            return
+        end
+
+        if state.phase=="PACK_COLLECT" then
+            collectPackedMiners()
+            return
+        end
+
         if state.phase=="RECALLED_PAUSED" then
             if not waitRecalledPause() then return end
+            if state.phase=="PACK_COLLECT" then
+                collectPackedMiners()
+                return
+            end
         end
 
         if state.complete then

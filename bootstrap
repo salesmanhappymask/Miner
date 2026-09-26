@@ -57,10 +57,10 @@ local function bootstrap()
             controller = configured.controller,
             rowStart = configured.rowStart,
             rowEnd = configured.rowEnd,
-            homeX = 0,
-            homeZ = -(configured.number + 1),
+            homeX = FOREMAN_IDLE[configured.number].x,
+            homeZ = -1,
             startX = 1,
-            startZ = -1,
+            startZ = 0,
             placementMode = detectedPlacementMode,
             placementSupported = placementSupported,
             startDir = detectedStartDir,
@@ -231,7 +231,7 @@ local function bootstrap()
                         saveDeploy()
                     end
 
-                    local laneX=cfg.number
+                    local laneX=cfg.homeX
 
                     if not deployFace(DIR_E) then
                         error("Cannot face east for Foreman deployment")
@@ -305,7 +305,7 @@ local function bootstrap()
             z=site.z,
             startX=1,
             startY=0,
-            startZ=-1,
+            startZ=0,
             placementSupported=placementSupported,
             placementMode=detectedPlacementMode,
             startDir=detectedStartDir,

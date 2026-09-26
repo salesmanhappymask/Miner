@@ -41,12 +41,7 @@ local function runForeman(cfg)
     state.dir=tonumber(state.dir) or DIR_N
 
     local function foremanPoseValid()
-        if number==4 and state.navigatorSetupActive then
-            return state.x>=-3 and state.x<=17 and state.z>=-6 and state.z<=15 and
-                state.y>=0 and state.y<=15 and state.dir>=DIR_N and state.dir<=DIR_W
-        end
-
-        return state.x>=-3 and state.x<=17 and state.z>=-6 and state.z<=2 and
+        return state.x>=0 and state.x<=18 and state.z>=-2 and state.z<=15 and
             state.y>=0 and state.y<=1 and state.dir>=DIR_N and state.dir<=DIR_W
     end
 
@@ -623,7 +618,7 @@ local function runForeman(cfg)
     end
 
     local function withinForemanArea(x,z)
-        return x>=-3 and x<=17 and z>=-6 and z<=2
+        return x>=0 and x<=18 and z>=-2 and z<=0
     end
 
     local function stepAtCurrentHeight(targetDir)
@@ -974,8 +969,7 @@ local function runForeman(cfg)
     end
 
     local function privateLaneZ()
-        if number==1 then return 0 end
-        return -number
+        return -1
     end
 
     local function goTo(tx,tz)
@@ -1139,36 +1133,12 @@ local function runForeman(cfg)
 
         state.phase="NAVIGATION_ERROR"
         saveState()
-        sendState("Expected " .. tostring(kind) .. " chest directly north at dock coordinate")
+        sendState("Expected " .. tostring(kind) .. " chest directly south of the foreman lane")
         return false
     end
 
     local function goPrivateHome()
-        local laneZ=privateLaneZ()
-        local approachX=cfg.rowStart
-
-        if state.x<=0 and state.z~=laneZ then
-            if state.x~=-1 then
-                if not goTo(-1,state.z) then return false end
-            end
-            if not goTo(-1,cfg.homeZ) then return false end
-            if not goTo(cfg.homeX,cfg.homeZ) then return false end
-            return true
-        end
-
-        if state.z~=laneZ then
-            if not goTo(state.x,laneZ) then return false end
-        end
-        if state.x~=approachX then
-            if not goTo(approachX,laneZ) then return false end
-        end
-        if state.z~=cfg.homeZ then
-            if not goTo(approachX,cfg.homeZ) then return false end
-        end
-        if state.x~=cfg.homeX then
-            if not goTo(cfg.homeX,cfg.homeZ) then return false end
-        end
-        return true
+        return goTo(cfg.homeX,cfg.homeZ)
     end
 
     local function returnHome()
@@ -1199,6 +1169,42 @@ local function runForeman(cfg)
         return true
     end
 
+    local function ensureEnderPair()
+        if state.chestsReady then return true end
+        if not goPrivateHome() then return false end
+
+        local function placeChest(kind,flag,tx)
+            if state[flag] then return true end
+            if not goTo(tx,cfg.homeZ) or not faceTracked(DIR_S) then return false end
+            if turtle.detect() then
+                state.phase="CHEST_RECOVERY_LOCK"
+                state.recoveryLocked=true
+                state.recoveryReason="Chest present without a saved placement at " .. tostring(tx)
+                saveState()
+                sendState(state.recoveryReason)
+                return false
+            end
+            if not selfSelectKind(kind) or not turtle.place() then
+                state.phase="WAITING_ENDER_CHEST"
+                saveState()
+                sendState("Cannot place " .. kind .. " for Foreman-" .. tostring(number))
+                return false
+            end
+            state[flag]=true
+            saveState()
+            return true
+        end
+
+        if not placeChest("ender_dump","dumpChestPlaced",cfg.homeX) then return false end
+        if not placeChest("ender_fuel","fuelChestPlaced",cfg.homeX+1) then return false end
+        if not goPrivateHome() or not faceTracked(DIR_N) then return false end
+        state.chestsReady=true
+        saveState()
+        checkpointForeman()
+        sendState("Ender chest pair ready")
+        return true
+    end
+
     local function prepareDockTrip()
         if state.x ~= cfg.homeX or state.z ~= cfg.homeZ then
             if not goPrivateHome() then
@@ -1212,93 +1218,21 @@ local function runForeman(cfg)
     end
 
     local function atSupply()
-        requestDock()
-
-        if not goDockBypass(0) then
-            state.phase="DOCK_BLOCKED"
-            saveState()
-            sendState("Supply dock path blocked; token retained")
-            return false
-        end
-
-        faceTracked(DIR_N)
-        saveState()
-
-        if state.x~=0 or state.z~=0 or state.y~=0 then
-            state.phase="NAVIGATION_ERROR"
-            saveState()
-            sendState("Supply dock coordinate mismatch")
-            return false
-        end
-
-        if not verifyDockInventory("supply") then
-            return false
-        end
-
-        return true
+        if not goPrivateHome() or not faceTracked(DIR_S) then return false end
+        return verifyDockInventory("dump ender")
     end
 
     local function atFuel()
-        requestDock()
-
-        if not goDockBypass(-2) then
-            state.phase="DOCK_BLOCKED"
-            saveState()
-            sendState("Fuel dock path blocked; token retained")
-            return false
-        end
-
-        faceTracked(DIR_N)
-        saveState()
-
-        if state.x~=-2 or state.z~=0 or state.y~=0 then
-            state.phase="NAVIGATION_ERROR"
-            saveState()
-            sendState("Fuel dock coordinate mismatch")
-            return false
-        end
-
-        if not verifyDockInventory("fuel") then
-            return false
-        end
-
-        return true
+        if not goTo(cfg.homeX+1,cfg.homeZ) or not faceTracked(DIR_S) then return false end
+        return verifyDockInventory("fuel ender")
     end
 
     local function exitDockToLane()
-        if state.x ~= -1 then
-            if not goTo(-1,state.z) then
-                return false
-            end
-        end
-
-        if state.z ~= cfg.homeZ then
-            if not goTo(-1,cfg.homeZ) then
-                return false
-            end
-        end
-
-        if not goTo(cfg.homeX,cfg.homeZ) then
-            return false
-        end
-
-        releaseDock()
-        return true
+        return goPrivateHome()
     end
 
     local function leaveDockJunction()
-        if state.y~=0 and not moveVertical(0) then
-            return false
-        end
-
-        if state.x~=-1 or state.z~=0 then
-            if not goTo(-1,0) then
-                return false
-            end
-        end
-
-        releaseDock()
-        return true
+        return goPrivateHome()
     end
 
     local function enterSupplyTop()
@@ -1417,17 +1351,7 @@ local function runForeman(cfg)
     end
 
     local function dumpCargo()
-        local useTop=(number%2)==0
-
-        if useTop then
-            if not enterSupplyTop() then
-                return false
-            end
-        else
-            if not atSupply() then
-                return false
-            end
-        end
+        if not atSupply() then return false end
 
         for slot=1,16 do
             local item=selfItem(slot)
@@ -1437,23 +1361,14 @@ local function runForeman(cfg)
                 turtle.select(slot)
 
                 while turtle.getItemCount(slot)>0 do
-                    local ok
-
-                    if useTop then
-                        ok=turtle.dropDown()
-                    else
-                        ok=turtle.drop()
-                    end
-
-                    if not ok then
+                    if not turtle.drop() then
                         state.phase="DOCK_BLOCKED"
                         saveState()
-                        local leftTop=not useTop or leaveSupplyTop()
-                        local yielded=leftTop and exitDockHome()
+                        local yielded=exitDockHome()
                         state.phase="DOCK_BLOCKED"
                         saveState()
-                        sendState(yielded and "Supply chest full; waiting with cargo at home" or
-                            "Supply chest full; could not safely leave dock")
+                        sendState(yielded and "Dump ender chest full; waiting with cargo at idle" or
+                            "Dump ender chest full; could not leave safely")
                         return false
                     end
                 end
@@ -1478,13 +1393,6 @@ local function runForeman(cfg)
             state.bootstrapDrivePending=false
             state.bootstrapDriveSlot=nil
             saveState()
-        end
-
-        if useTop and not leaveSupplyTop() then
-            state.phase="DOCK_BLOCKED"
-            saveState()
-            sendState("Could not leave top supply dump position")
-            return false
         end
 
         return exitDockHome()
@@ -1592,7 +1500,7 @@ local function runForeman(cfg)
                             foremanNumber=number,
                             session=cfg.session
                         })
-                    elseif message.type == "foreman_position" then
+                    elseif message.type == "foreman_position" and sender==message.foremanId then
                         peers[message.foremanId] = {
                             number=message.number,
                             x=message.x,
@@ -1601,7 +1509,7 @@ local function runForeman(cfg)
                             phase=message.phase,
                             lastSeen=now()
                         }
-                    elseif message.type == "move_intent" then
+                    elseif message.type == "move_intent" and sender==message.foremanId then
                         intents[message.foremanId] = {
                             number=message.number,
                             x=message.x,
@@ -1609,7 +1517,9 @@ local function runForeman(cfg)
                             y=message.y,
                             lastSeen=now()
                         }
-                    elseif message.type == "dock_request" and number == 1 then
+                    elseif message.type == "dock_request" and number == 1 and
+                        sender==message.foremanId and cfg.foremen and
+                        cfg.foremen[tonumber(message.number)]==sender then
                         if dock.holder == message.foremanId then
                             send(message.foremanId,{type="dock_grant"})
                         else
@@ -1619,14 +1529,16 @@ local function runForeman(cfg)
                             end
                             grantDock()
                         end
-                    elseif message.type == "dock_release" and number == 1 then
+                    elseif message.type == "dock_release" and number == 1 and
+                        sender==message.foremanId and cfg.foremen and
+                        (cfg.foremen[2]==sender or cfg.foremen[3]==sender or cfg.foremen[4]==sender) then
                         if dock.holder == message.foremanId then
                             dock.holder = nil
                             saveDock()
                             grantDock()
                         end
                         send(message.foremanId,{type="dock_released"})
-                    elseif message.type == "dock_grant" then
+                    elseif message.type == "dock_grant" and sender==cfg.controller then
                         flags.dockGranted = true
                     elseif message.type=="dock_released" and sender==cfg.controller then
                         state.dockReleasePending=nil
@@ -1672,6 +1584,19 @@ local function runForeman(cfg)
                         flags.startMining = true
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type == "recall_command" then
                         flags.recallMode = message.mode or "NORMAL"
+                    elseif sender==cfg.managerId and message.session==cfg.session and message.type=="pack_clear" and
+                        state.phase=="RECALLED_PAUSED" and state.recallMode=="PACK" then
+                        os.setComputerLabel(nil)
+                        if os.getComputerLabel()==nil then
+                            state.packReady=true
+                            saveState()
+                            send(cfg.managerId,{
+                                type="pack_ready",role="foreman",number=number,session=cfg.session
+                            })
+                        end
+                    elseif sender==cfg.managerId and message.session==cfg.session and message.type=="pack_ready_ack" and
+                        state.packReady then
+                        os.shutdown()
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type == "resume_swarm" then
                         if state.phase=="RECALLED_PAUSED" or state.phase=="RECALLING" or state.recallMode or flags.recallMode then
                             flags.resume=true
@@ -1761,7 +1686,7 @@ local function runForeman(cfg)
     end
 
     local function verifyServiceMiner(req)
-        if state.x~=req.row or state.z~=0 or state.y~=0 then
+        if state.x~=req.row or state.z~=-1 or state.y~=0 then
             state.phase="SERVICE_ALIGNMENT_ERROR"
             saveState()
             sendState("Foreman is not at Miner-" .. tostring(req.row) .. " service coordinate")
@@ -2207,7 +2132,8 @@ local function runForeman(cfg)
             return true
         end
 
-        if selfCount("floppy") < 1 then
+        if selfCount("floppy") < 1 and not
+            (number==1 and not state.firstInstallerRecovered) then
             state.phase="WAITING_SUPPLIES"
             saveState()
             sendState("Missing miner floppy")
@@ -2245,15 +2171,15 @@ local function runForeman(cfg)
         end
 
         local targetX=row
-        local targetZ=1
-        local stagingZ=0
+        local targetZ=0
+        local stagingZ=-1
         local temporary=false
 
         if useBootstrapDrive then
             targetX=1
-            targetZ=-1
-            stagingZ=-2
-            temporary=true
+            targetZ=0
+            stagingZ=-1
+            temporary=false
 
             if state.x~=targetX or state.z~=stagingZ then
                 if not goTo(targetX,stagingZ) then
@@ -2596,11 +2522,7 @@ local function runForeman(cfg)
             end
         end
 
-        if not goDockBypass(0) then
-            return false
-        end
-
-        if not faceTracked(DIR_N) or not verifyDockInventory("supply") then
+        if not atSupply() then
             return false
         end
 
@@ -2670,10 +2592,10 @@ local function runForeman(cfg)
             return false
         end
 
-        local needed = WORKER_SETUP_COAL * 4
-        local pulled = takeNamedIntoSelf("coal",needed)
+        local needed = math.max(0,WORKER_SETUP_COAL * 4-selfCount("coal"))
+        local pulled = needed>0 and takeNamedIntoSelf("coal",needed) or 0
 
-        if pulled < needed then
+        if pulled < needed or selfCount("coal")<WORKER_SETUP_COAL * 4 then
             state.phase="WAITING_FUEL"
             saveState()
             sendState("Need 60 coal for assigned miners")
@@ -3058,6 +2980,7 @@ local function runForeman(cfg)
         state.phase="COMMISSIONING"
         state.commissionedRows = state.commissionedRows or {}
         saveState()
+        if not ensureEnderPair() then return false end
         sendState("Collecting miner startup fuel")
 
         if not loadCommissionFuel() then
@@ -3097,8 +3020,8 @@ local function runForeman(cfg)
                     end
                 end
 
-                if state.z~=0 then
-                    if not goTo(firstPending,0) then
+                if state.z~=-1 then
+                    if not goTo(firstPending,-1) then
                         return false
                     end
                 end
@@ -3121,8 +3044,8 @@ local function runForeman(cfg)
                         return false
                     end
                 else
-                    if state.x~=row or state.z~=0 then
-                        if not goTo(row,0) then
+                    if state.x~=row or state.z~=-1 then
+                        if not goTo(row,-1) then
                             return false
                         end
                         faceTracked(DIR_N)
@@ -3152,8 +3075,8 @@ local function runForeman(cfg)
                         end
                     end
 
-                    if state.z~=0 then
-                        if not goTo(nextRow,0) then
+                    if state.z~=-1 then
+                        if not goTo(nextRow,-1) then
                             return false
                         end
                     end
@@ -3161,7 +3084,7 @@ local function runForeman(cfg)
                     faceTracked(DIR_N)
                     saveState()
 
-                    if state.x~=nextRow or state.z~=0 or state.dir~=DIR_N then
+                    if state.x~=nextRow or state.z~=-1 or state.dir~=DIR_N then
                         state.phase="PLACEMENT_ERROR"
                         saveState()
                         sendState("Could not stage for next miner")
@@ -3228,7 +3151,7 @@ local function runForeman(cfg)
     end
 
     local function masterFuelAndLoadCoal()
-        if not goTo(-2,0) then
+        if not goTo(0,-1) then
             return false
         end
 
@@ -3238,7 +3161,7 @@ local function runForeman(cfg)
             return false
         end
 
-        local needed = 212 - selfCount("coal")
+        local needed = 20 - selfCount("coal")
         if needed > 0 then
             if takeNamedIntoSelf("coal",needed) < needed then
                 return false
@@ -3249,24 +3172,14 @@ local function runForeman(cfg)
     end
 
     local function masterLoadSupplies()
-        if not goTo(0,0) then
+        if not goTo(0,-1) then
             return false
         end
 
         faceTracked(DIR_N)
 
-        local needDrives = 5 - selfCount("disk_drive")
+        local needDrives = 1 - selfCount("disk_drive")
         if needDrives > 0 and takeNamedIntoSelf("disk_drive",needDrives) < needDrives then
-            return false
-        end
-
-        local needMiners = 16 - selfCount("wireless_mining_turtle")
-        if needMiners > 0 and takeNamedIntoSelf("wireless_mining_turtle",needMiners) < needMiners then
-            return false
-        end
-
-        local needForemen = 3 - selfCount("narcissistic_wireless_turtle")
-        if needForemen > 0 and takeNamedIntoSelf("narcissistic_wireless_turtle",needForemen) < needForemen then
             return false
         end
 
@@ -3275,11 +3188,40 @@ local function runForeman(cfg)
             return false
         end
 
-        local needFloppies = 4 - selfCount("floppy")
+        local needFloppies = 1 - selfCount("floppy")
         if needFloppies > 0 and takeNamedIntoSelf("floppy",needFloppies) < needFloppies then
             return false
         end
 
+        return true
+    end
+
+    local function masterLoadForemanPackage(n)
+        if not goTo(0,-1) or not faceTracked(DIR_N) then return false end
+        local needs={
+            {"narcissistic_wireless_turtle",1},
+            {"disk_drive",1},
+            {"floppy",1},
+            {"wireless_mining_turtle",4},
+            {"ender_dump",1},
+            {"ender_fuel",1},
+            {"coal",80}
+        }
+        if n==1 then
+            needs[1]={"wireless_mining_turtle",0}
+            needs[3]={"floppy",0}
+            needs[5]={"ender_dump",1}
+            needs[6]={"ender_fuel",1}
+        end
+        for _,entry in ipairs(needs) do
+            local remaining=entry[2]-selfCount(entry[1])
+            if remaining>0 and takeNamedIntoSelf(entry[1],remaining)<remaining then
+                state.phase="WAITING_SUPPLIES"
+                saveState()
+                sendState("Missing " .. entry[1] .. " for Foreman-" .. tostring(n))
+                return false
+            end
+        end
         return true
     end
 
@@ -3288,7 +3230,7 @@ local function runForeman(cfg)
             return false
         end
 
-        if not goTo(1,-2) then
+        if not goTo(1,-1) then
             return false
         end
 
@@ -3401,7 +3343,7 @@ local function runForeman(cfg)
             return nil
         end
 
-        if not goTo(1,-2) then
+        if not goTo(1,-1) then
             return nil
         end
 
@@ -3519,11 +3461,13 @@ local function runForeman(cfg)
             or selfCount("disk_drive")<1
             or selfCount("floppy")<1
             or selfCount("wireless_mining_turtle")<4
-            or selfCount("coal")<64 then
+            or selfCount("ender_dump")<1
+            or selfCount("ender_fuel")<1
+            or selfCount("coal")<80 then
             return nil
         end
 
-        if not goTo(1,-2) then
+        if not goTo(1,-1) then
             return nil
         end
 
@@ -3597,7 +3541,7 @@ local function runForeman(cfg)
             end
         end
 
-        if not selfDropKind("coal",64) then
+        if not selfDropKind("coal",80) then
             return nil
         end
         if not selfDropKind("disk_drive",1) then
@@ -3609,6 +3553,8 @@ local function runForeman(cfg)
         if not selfDropKind("wireless_mining_turtle",4) then
             return nil
         end
+        if not selfDropKind("ender_dump",1) then return nil end
+        if not selfDropKind("ender_fuel",1) then return nil end
 
         local deployed=nil
         local lastDeploy=0
@@ -3649,7 +3595,7 @@ local function runForeman(cfg)
             if not masterFuelAndLoadCoal() then
                 state.phase="WAITING_SUPPLIES"
                 saveState()
-                sendState("Need seed fuel plus three Foreman coal stacks")
+                sendState("Need Navigator startup coal and Master Foreman fuel")
                 return false
             end
             state.initialFuelLoaded=true
@@ -3660,7 +3606,7 @@ local function runForeman(cfg)
             if not masterLoadSupplies() then
                 state.phase="WAITING_SUPPLIES"
                 saveState()
-                sendState("Need 5 drives, 4 floppies, 16 miners, 3 Narcissistic Wireless Turtles, and 4 Advanced Wireless Turtles")
+                sendState("Need bootstrap drive, floppy, and four Advanced Wireless Turtles")
                 return false
             end
             state.initialSuppliesLoaded=true
@@ -3681,7 +3627,7 @@ local function runForeman(cfg)
         state.navigatorLaunchReady=state.navigatorLaunchReady or {}
         cfg.navigators=cfg.navigators or {}
 
-        local navigatorOrder={4,3,2,1}
+        local navigatorOrder={1,2,3,4}
 
         for _,n in ipairs(navigatorOrder) do
             if not state.navigatorLaunchReady[n] then
@@ -3707,8 +3653,9 @@ local function runForeman(cfg)
         state.navigatorSetupDone=true
         saveState()
 
-        for n=2,4 do
+        for _,n in ipairs({4,3,2}) do
             if not state.foremenReady[n] then
+                if not masterLoadForemanPackage(n) then return false end
                 local fid=masterCommissionForeman(n)
                 if not fid then
                     state.phase="WAITING_SETUP"
@@ -3723,42 +3670,11 @@ local function runForeman(cfg)
             end
         end
 
-        if not state.bootstrapDiskPulled then
-            if not goTo(1,-2) then
-                state.phase="WAITING_SETUP"
-                saveState()
-                sendState("Cannot reach bootstrap drive")
-                return false
-            end
-            if not ensureGroundLevel() then
-                return false
-            end
-            faceTracked(DIR_N)
-            if not ensureInstallerLevel() then
-                state.phase="WAITING_SETUP"
-                saveState()
-                sendState("Cannot reach bootstrap drive height")
-                return false
-            end
-            local floppySlot = selfTargetSlot("floppy")
-            if not floppySlot then
-                ensureGroundLevel()
-                state.phase="WAITING_SETUP"
-                saveState()
-                sendState("No room for bootstrap floppy")
-                return false
-            end
-            turtle.select(floppySlot)
-            if not turtle.suck(1) then
-                ensureGroundLevel()
-                state.phase="WAITING_SETUP"
-                saveState()
-                sendState("Cannot pull bootstrap floppy")
-                return false
-            end
-            ensureGroundLevel()
-            state.bootstrapDiskPulled=true
-            saveState()
+        state.bootstrapDiskPulled=true
+        saveState()
+
+        if not state.ownInstallerLoaded and not masterLoadForemanPackage(1) then
+            return false
         end
 
         if not state.ownInstallerLoaded then
@@ -3774,7 +3690,7 @@ local function runForeman(cfg)
                 sendState("Foreman-1 miners missing")
                 return false
             end
-            if selfCount("floppy") < 1 then
+            if selfCount("floppy") < 1 and state.firstInstallerRecovered then
                 state.phase="WAITING_SUPPLIES"
                 saveState()
                 sendState("Foreman-1 floppy missing")
@@ -3996,13 +3912,13 @@ local function runForeman(cfg)
             end
         end
 
-        if state.z~=0 then
-            if not goTo(req.row,0) then
+        if state.z~=-1 then
+            if not goTo(req.row,-1) then
                 return false
             end
         end
 
-        if state.x~=req.row or state.z~=0 or state.y~=0 then
+        if state.x~=req.row or state.z~=-1 or state.y~=0 then
             state.phase="NAVIGATION_ERROR"
             saveState()
             sendState("Service route ended at wrong coordinate for Miner-" .. tostring(req.row))
@@ -4093,8 +4009,8 @@ local function runForeman(cfg)
                             end
                         end
 
-                        if state.z~=0 then
-                            if not goTo(req.row,0) then
+                        if state.z~=-1 then
+                            if not goTo(req.row,-1) then
                                 return false
                             end
                         end
@@ -4171,10 +4087,10 @@ local function runForeman(cfg)
         end
 
         if state.phase=="DEPLOYING" then
-            local laneX=cfg.number
+            local laneX=cfg.homeX
             local deploymentValid=
                 state.y==0 and
-                state.x>=cfg.homeX and state.x<=laneX and
+                state.x>=cfg.startX and state.x<=laneX and
                 state.z>=cfg.homeZ and state.z<=cfg.startZ
 
             if not deploymentValid then
@@ -4267,32 +4183,8 @@ local function runForeman(cfg)
                 end
             end
 
-            if not state.minerSetupApproved then
-                state.phase="WAITING_MINER_APPROVAL"
-                saveState()
-                sendState("GPS ready check pending; approve miner setup at Regional Manager")
-
-                while not state.minerSetupApproved do
-                    if flags.recallMode then
-                        pauseForSetupRecall()
-                    end
-
-                    send(cfg.managerId,{
-                        type="miner_setup_gate_request",
-                        session=cfg.session
-                    })
-
-                    local _,reply=waitInbox(function(sender,m)
-                        return sender==cfg.managerId and type(m)=="table" and
-                            m.type=="miner_setup_approved" and m.session==cfg.session
-                    end,1)
-
-                    if reply then
-                        state.minerSetupApproved=true
-                        saveState()
-                    end
-                end
-            end
+            state.minerSetupApproved=true
+            saveState()
 
             state.groupsCommissioned = state.groupsCommissioned or {}
 
@@ -4341,13 +4233,6 @@ local function runForeman(cfg)
 
             returnHome()
         elseif not cfg.master and not state.setupDone then
-            while not flags.commissionStart do
-                if flags.recallMode then
-                    pauseForSetupRecall()
-                else
-                    sleep(0.1)
-                end
-            end
             flags.commissionStart=false
 
             while not state.setupDone do
@@ -4383,12 +4268,18 @@ local function runForeman(cfg)
                 local mode=flags.recallMode
                 flags.recallMode=nil
 
-                if mode=="NORMAL" or mode=="SHUTDOWN" then
+                if mode=="NORMAL" or mode=="SHUTDOWN" or mode=="PACK" then
                     recallForeman(mode)
                 end
             end
 
             if state.phase=="RECALLED_PAUSED" then
+                if state.packReady and now()-(state.lastPackSend or -10)>=2 then
+                    send(cfg.managerId,{
+                        type="pack_ready",role="foreman",number=number,session=cfg.session
+                    })
+                    state.lastPackSend=now()
+                end
                 if flags.resume then
                     flags.resume=false
                     state.recallMode=nil
@@ -4481,7 +4372,7 @@ local function runMaster()
     local id=os.getComputerID()
 
     if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v54.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v55.")
     end
 
     if not cfg then
@@ -4495,10 +4386,10 @@ local function runMaster()
             controller=id,
             rowStart=1,
             rowEnd=4,
-            homeX=0,
-            homeZ=-2,
+            homeX=1,
+            homeZ=-1,
             startX=0,
-            startZ=0,
+            startZ=-1,
             startDir=DIR_N,
             master=true,
             managerId=managerId,
@@ -4525,10 +4416,10 @@ local function runMaster()
         cfg.controller=id
         cfg.rowStart=1
         cfg.rowEnd=4
-        cfg.homeX=0
-        cfg.homeZ=-2
+        cfg.homeX=1
+        cfg.homeZ=-1
         cfg.startX=0
-        cfg.startZ=0
+        cfg.startZ=-1
         cfg.startDir=DIR_N
         cfg.master=true
         cfg.masterForemanId=id
@@ -4564,7 +4455,7 @@ local function runMaster()
     if not state and newMaster then
         saveTableLight("foreman1.tmp",{
             x=0,
-            z=0,
+            z=-1,
             y=0,
             dir=DIR_N,
             phase="MASTER_SETUP",
