@@ -546,7 +546,7 @@ if not cfg or cfg.role~="navigator" then
     error("Navigator role file requires navigator node.cfg")
 end
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then

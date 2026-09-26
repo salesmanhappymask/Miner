@@ -705,8 +705,10 @@ local function runMiner(cfg)
     end
 
     if cfg.row==16 and state.recoveryLocked and
-        state.recoveryReason=="Turtle inspect unavailable for safe pack collection" and
-        state.x==16 and state.y==0 and state.z==0 and state.phase=="PACK_COLLECT" then
+        (state.recoveryReason=="Turtle inspect unavailable for safe pack collection" or
+         string.find(tostring(state.recoveryReason),"^Expected Miner%-")) and
+        state.x>=1 and state.x<=16 and state.y==0 and state.z==0 and
+        state.phase=="PACK_COLLECT" and not state.packStepIntent then
         state.recoveryLocked=false
         state.recoveryReason=nil
         saveTableLight(path,state)
@@ -729,6 +731,7 @@ local function runMiner(cfg)
         if type(fuel)=="number" and type(state.packStepIntent.fuelBefore)=="number" then
             if fuel<state.packStepIntent.fuelBefore then
                 state.x=state.x-1
+                state.seq=state.seq+1
                 state.packStepIntent=nil
             else
                 state.packStepIntent.stage="DUG"
@@ -798,7 +801,8 @@ local function runMiner(cfg)
     do
         local managerState,managerSeq=bootManagerState,bootManagerSeq
         if managerState and snapshotHasExactPose(managerState) and
-            not state.motionIntent and not state.turnIntent then
+            not state.motionIntent and not state.turnIntent and
+            state.phase~="PACK_COLLECT" and state.phase~="PACK_DONE" then
             local incoming=tonumber(managerSeq or managerState.seq or 0) or 0
             if incoming>state.seq or
                 (incoming==state.seq and
@@ -878,6 +882,7 @@ local function runMiner(cfg)
         refuelNow=false,
         serviceComplete=false,
         packCollect=false,
+        packIdentity=nil,
         newForeman=nil
     }
     local lastStatus = 0
@@ -975,6 +980,19 @@ local function runMiner(cfg)
                             state.runtimeFuelKind=message.fuelKind
                             save()
                         end
+                    elseif message.type=="pack_identity_probe" and
+                        sender~=cfg.managerId and sender~=cfg.foremanId and
+                        message.session==cfg.session and message.row==cfg.row and
+                        state.recallMode=="PACK" and state.phase=="RECALLED_PAUSED" and
+                        state.x==cfg.row and state.y==0 and state.z==0 then
+                        send(sender,{
+                            type="pack_identity_ack",nonce=message.nonce,row=cfg.row,
+                            x=state.x,y=state.y,z=state.z,session=cfg.session
+                        })
+                    elseif message.type=="pack_identity_ack" and cfg.row==16 and
+                        message.session==cfg.session and state.phase=="PACK_COLLECT" then
+                        flags.packIdentity={id=sender,nonce=message.nonce,row=message.row,
+                            x=message.x,y=message.y,z=message.z}
                     elseif message.type=="maintenance_clear_label" and
                         message.session==cfg.session then
                         local before=os.getComputerLabel()
@@ -2030,13 +2048,45 @@ local function runMiner(cfg)
             if not state.packStepIntent then
                 local expected=state.packMinerIds and tonumber(state.packMinerIds[state.x-1])
                 local ok,neighbor=pcall(peripheral.call,"front","getID")
-                if not turtle.detect() or not expected or not ok or tonumber(neighbor)~=expected then
+                if not turtle.detect() or not expected or (ok and neighbor and
+                    tonumber(neighbor)~=expected) then
                     state.recoveryLocked=true
                     state.recoveryReason="Expected Miner-" .. tostring(state.x-1) ..
                         " ID " .. tostring(expected) .. " west, found " .. tostring(neighbor)
                     save()
                     sendState(state.recoveryReason)
                     return false
+                end
+                if not ok or not neighbor then
+                    local nonce=tostring(os.getComputerID()) .. ":" ..
+                        tostring(state.x) .. ":" .. tostring(now())
+                    flags.packIdentity=nil
+                    local verified=false
+                    for attempt=1,3 do
+                        send(expected,{type="pack_identity_probe",nonce=nonce,
+                            row=state.x-1,session=cfg.session})
+                        local deadline=now()+2
+                        while now()<deadline do
+                            local reply=flags.packIdentity
+                            if reply and reply.id==expected and reply.nonce==nonce and
+                                tonumber(reply.row)==state.x-1 and
+                                tonumber(reply.x)==state.x-1 and
+                                tonumber(reply.y)==0 and tonumber(reply.z)==0 then
+                                verified=true
+                                break
+                            end
+                            sleep(0.1)
+                        end
+                        if verified then break end
+                    end
+                    if not verified then
+                        state.recoveryLocked=true
+                        state.recoveryReason="Cannot verify Miner-" .. tostring(state.x-1) ..
+                            " identity before packing"
+                        save()
+                        sendState(state.recoveryReason)
+                        return false
+                    end
                 end
                 if not turtle.dig() then
                     state.recoveryLocked=true
@@ -2051,7 +2101,17 @@ local function runMiner(cfg)
             state.packStepIntent.stage="MOVING"
             state.packStepIntent.fuelBefore=turtle.getFuelLevel()
             save()
-            if not turtle.forward() then
+            local moved=false
+            local deadline=now()+10
+            while now()<deadline do
+                if turtle.forward() then
+                    moved=true
+                    break
+                end
+                turtle.attack()
+                sleep(0.25)
+            end
+            if not moved then
                 state.recoveryLocked=true
                 state.recoveryReason="Pack collection blocked at x=" .. tostring(state.x-1)
                 save()
@@ -2059,8 +2119,10 @@ local function runMiner(cfg)
                 return false
             end
             state.x=state.x-1
+            state.seq=state.seq+1
             state.packStepIntent=nil
             save()
+            checkpoint()
         end
         os.setComputerLabel(nil)
         if os.getComputerLabel()~=nil then return false end
@@ -2385,7 +2447,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then

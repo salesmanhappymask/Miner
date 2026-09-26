@@ -47,7 +47,7 @@ local function runRegionalManager()
         error("Regional Manager state unreadable; refusing to create a new session")
     end
 
-    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59) then
+    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60) then
         data.version=VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end
@@ -843,37 +843,41 @@ local function runRegionalManager()
             data.foremen={}
         end
 
+        local removedJobs={}
         for n,job in pairs(data.foremanJobs) do
             if type(job)~="table" or not job.requestId then
-                data.foremanJobs[n]=nil
+                removedJobs[#removedJobs+1]=n
             else
                 local request=data.requests[job.requestId]
                 local foreman=data.foremen[n]
 
                 if type(request)~="table" or request.status=="COMPLETE" then
-                    data.foremanJobs[n]=nil
+                    removedJobs[#removedJobs+1]=n
                 elseif tonumber(request.foremanNumber)~=tonumber(n) then
-                    data.foremanJobs[n]=nil
+                    removedJobs[#removedJobs+1]=n
                     request.status=request.arrived and "PENDING" or "WAITING_ARRIVAL"
                     request.updated=now()
                 elseif type(foreman)~="table" or not foreman.id then
-                    data.foremanJobs[n]=nil
+                    removedJobs[#removedJobs+1]=n
                     request.status=request.arrived and "PENDING" or "WAITING_ARRIVAL"
                     request.updated=now()
                 end
             end
         end
+        for _,n in ipairs(removedJobs) do data.foremanJobs[n]=nil end
 
         local pending={}
+        local invalidRequests={}
         for requestId,request in pairs(data.requests) do
             if type(request)~="table" then
-                data.requests[requestId]=nil
+                invalidRequests[#invalidRequests+1]=requestId
             else
                 if request.arrived and (request.status=="PENDING" or request.status=="ASSIGNING") then
                     pending[#pending+1]={id=requestId,request=request}
                 end
             end
         end
+        for _,requestId in ipairs(invalidRequests) do data.requests[requestId]=nil end
 
         table.sort(pending,function(a,b)
             if a.request.created~=b.request.created then
@@ -1720,9 +1724,15 @@ local function runRegionalManager()
                     beginRecall("SHUTDOWN")
                 elseif command=="6" then
                     if data.commissioningComplete then
-                        beginRecall("DUMP")
-                        data.recall.packAfterDump=true
-                        save()
+                        if data.recall.mode=="DUMP" and not data.recall.active then
+                            beginRecall("PACK")
+                        elseif data.recall.mode~="DUMP" and data.recall.mode~="PACK" then
+                            beginRecall("DUMP")
+                        end
+                        if data.recall.mode=="DUMP" then
+                            data.recall.packAfterDump=true
+                            save()
+                        end
                     end
                 elseif command=="4" then
                     resumeSwarm()
@@ -1806,6 +1816,7 @@ local function runRegionalManager()
             refreshGpsReady()
             updateRecallState()
 
+            local expiredRequests={}
             for requestId,request in pairs(data.requests) do
                 if request.status=="COMPLETE" and not request.minerAcknowledged and
                     now()-(request.lastCompletionSend or 0)>=2 then
@@ -1818,8 +1829,11 @@ local function runRegionalManager()
                 end
                 if request.status=="COMPLETE" and request.minerAcknowledged and
                     now()-(request.completed or now())>300 then
-                    data.requests[requestId]=nil
+                    expiredRequests[#expiredRequests+1]=requestId
                 end
+            end
+            for _,requestId in ipairs(expiredRequests) do
+                data.requests[requestId]=nil
             end
 
             flushManager(false)
