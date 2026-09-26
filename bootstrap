@@ -109,7 +109,9 @@ local function bootstrap()
 
                     saveTable(statePath,state)
                     checkpointPose("foreman",state.seq,state,cfg.session)
-                    selfRefuelTo(FOREMAN_FUEL_TARGET)
+                    if not selfRefuelTo(800) then
+                        error("Foreman startup fuel missing")
+                    end
 
                     local function saveDeploy()
                         saveTable(statePath,state)

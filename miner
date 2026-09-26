@@ -401,11 +401,17 @@ local function runMinerCommissioning(cfg)
                 local count=turtle.getItemCount(1)
 
                 if count>0 and turtle.getFuelLevel()~="unlimited" then
-                    turtle.refuel(count)
+                    while turtle.getItemCount(1)>0 and turtle.refuel(0) and
+                        turtle.getFuelLevel()<MINER_FUEL_TARGET do
+                        if not turtle.refuel(1) then break end
+                    end
                 end
-
+                turtle.select(1)
+                local bucketPresent=message.fuelKind=="lava_bucket" and
+                    turtle.getItemCount(1)>0 and not turtle.refuel(0)
                 ack({
                     type="commission_refueled",
+                    bucketPresent=bucketPresent and true or false,
                     id=os.getComputerID(),
                     row=cfg.row,
                     fuel=turtle.getFuelLevel()
@@ -966,6 +972,8 @@ local function runMiner(cfg)
                             flags.serviceProbe=message.requestId
                         elseif message.type == "refuel_now" and state.request and message.requestId == state.request.id then
                             flags.refuelNow = true
+                            state.runtimeFuelKind=message.fuelKind
+                            save()
                         end
                     elseif message.type=="maintenance_clear_label" and
                         message.session==cfg.session then
@@ -1580,16 +1588,33 @@ local function runMiner(cfg)
         if state.x~=cfg.homeX or state.y~=cfg.homeY or state.z~=cfg.homeZ then
             return false
         end
-        return face(DIR_S)
-    end
-
-    local function refuelSelf()
-        turtle.select(1)
-        while turtle.getItemCount(1) > 1 and turtle.getFuelLevel() ~= "unlimited" and turtle.getFuelLevel() < MINER_FUEL_TARGET do
-            if not turtle.refuel(1) then
-                break
+        if not face(DIR_S) then return false end
+        if state.request and
+            (state.request.kind=="REFUEL" or state.request.kind=="BOTH") then
+            turtle.select(1)
+            while turtle.getItemCount(1)>0 and turtle.refuel(0) do
+                if not turtle.refuel(1) then return false end
+            end
+            if turtle.getItemCount(1)>0 and not turtle.drop(1) then
+                return false
             end
         end
+        return true
+    end
+
+    local function refuelSelf(kind)
+        turtle.select(1)
+        if turtle.getFuelLevel()~="unlimited" then
+            while turtle.getItemCount(1)>0 and turtle.refuel(0) and
+                turtle.getFuelLevel()<MINER_FUEL_TARGET do
+                if not turtle.refuel(1) then break end
+            end
+        end
+        if kind=="lava_bucket" and turtle.getItemCount(1)>0 and
+            not turtle.refuel(0) then
+            if not turtle.drop(1) then return false end
+        end
+        return true
     end
 
     local function service(kind,finalService,resumeExisting)
@@ -1677,9 +1702,10 @@ local function runMiner(cfg)
 
             if flags.refuelNow then
                 flags.refuelNow=false
-                refuelSelf()
+                local bucketReturned=refuelSelf(state.runtimeFuelKind)
                 send(cfg.foremanId,{
                     type="refuel_complete",
+                    bucketReturned=bucketReturned,
                     row=state.row,
                     requestId=state.request.id,
                     fuel=turtle.getFuelLevel()
@@ -2359,7 +2385,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then

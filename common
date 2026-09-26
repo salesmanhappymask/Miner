@@ -1,5 +1,5 @@
-VERSION = 59
-PROTOCOL = "miner_swarm_v59"
+VERSION = 60
+PROTOCOL = "miner_swarm_v60"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -51,6 +51,9 @@ FOREMAN_FUEL_TARGET = 1200
 COAL_FUEL_VALUE = 80
 FOREMAN_FUEL_LOW = 500
 WORKER_SETUP_COAL = 15
+FUEL_PRIORITY = {"lava_bucket","blaze_rod","charcoal","coal"}
+FUEL_VALUE = {lava_bucket=1000,blaze_rod=120,charcoal=80,coal=80}
+WORKER_FUEL_PACKET = 1000
 
 DIR_N = 0
 DIR_E = 1
@@ -259,12 +262,29 @@ end
 
 function matchesItem(item, kind)
     local text = itemText(item)
+    local name=lower(item and (item.display_name or item.displayName or item.name))
+    local damage=tonumber(item and (item.dmg or item.damage or item.itemDamage or
+        item.damageValue or item.metadata or item.meta))
     if kind == "ender_dump" then
         return enderChestFrequency(item)==0
     elseif kind == "ender_fuel" then
         return enderChestFrequency(item)==11
+    elseif kind == "lava_bucket" then
+        return string.find(text,"lava",1,true)~=nil and string.find(text,"bucket",1,true)~=nil
+    elseif kind == "empty_bucket" then
+        return string.find(text,"bucket",1,true)~=nil and
+            string.find(text,"lava",1,true)==nil and
+            string.find(text,"water",1,true)==nil and
+            string.find(text,"milk",1,true)==nil
+    elseif kind == "blaze_rod" then
+        return string.find(text,"blaze",1,true)~=nil and
+            string.find(text,"rod",1,true)~=nil
+    elseif kind == "charcoal" then
+        return string.find(text,"coal",1,true)~=nil and
+            (damage==1 or string.find(name,"charcoal",1,true)~=nil)
     elseif kind == "coal" then
-        return string.find(text, "coal", 1, true) ~= nil
+        return string.find(text,"coal",1,true)~=nil and damage~=1 and
+            string.find(name,"charcoal",1,true)==nil
     elseif kind == "disk_drive" then
         return string.find(text, "disk drive", 1, true) ~= nil or string.find(text, "diskdrive", 1, true) ~= nil
     elseif kind == "floppy" then
@@ -643,12 +663,16 @@ function selfRefuelTo(target)
         return true
     end
     while turtle.getFuelLevel() < target do
-        local slot = selfFindSlot("coal")
+        local slot
+        for _,kind in ipairs(FUEL_PRIORITY) do
+            slot=selfFindSlot(kind)
+            if slot then break end
+        end
         if not slot then
             return false
         end
         turtle.select(slot)
-        if not turtle.refuel(1) then
+        if not turtle.refuel(0) or not turtle.refuel(1) then
             return false
         end
     end
