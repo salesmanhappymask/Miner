@@ -1,5 +1,6 @@
 local path = ({...})[1] or "sniff.log"
-if not http or not http.post then error("HTTP unavailable") end
+local url = "https://paste.c-net.org/"
+if not http or not http.request then error("HTTP unavailable") end
 if not fs.exists(path) or fs.isDir(path) then error("File not found: " .. path) end
 local file = fs.open(path, "r")
 if not file then error("Cannot read: " .. path) end
@@ -7,17 +8,31 @@ local content = file.readAll()
 file.close()
 if not content or content == "" then error("Log is empty") end
 print("Uploading " .. tostring(#content) .. " bytes...")
-local ok, response, reason = pcall(http.post, "https://paste.rs/", content, {
-    ["Content-Type"] = "text/plain"
+local timer = os.startTimer(30)
+local ok, result, reason = pcall(http.request, url, content, {
+    ["Content-Type"] = "text/plain",
+    ["X-FileName"] = fs.getName(path),
+    ["x-uuid"] = ""
 })
-if not ok then error(tostring(response)) end
-if not response then error("Upload failed: " .. tostring(reason or "no response")) end
-local status = response.getResponseCode and response.getResponseCode() or nil
-local link = response.readAll()
-response.close()
-if status and status ~= 201 then error("Upload status " .. tostring(status) .. ": " .. tostring(link)) end
-if not link or not link:match("^https://paste%.rs/[%w%-_]+%s*$") then
-    error("Unexpected response: " .. tostring(link):sub(1, 300))
+if not ok then error("Request error: " .. tostring(result)) end
+if result == false then error("Request refused: " .. tostring(reason)) end
+while true do
+    local event, address, value = os.pullEvent()
+    if event == "http_success" and address == url then
+        local status = value.getResponseCode and value.getResponseCode() or nil
+        local response = value.readAll()
+        value.close()
+        if status and status < 200 or status and status >= 300 then
+            error("HTTP " .. tostring(status) .. ": " .. tostring(response):sub(1, 200))
+        end
+        local link = response and response:match("(https://paste%.c%-net%.org/[%w%-_]+)")
+        if not link then error("Unexpected response: " .. tostring(response):sub(1, 200)) end
+        print("Log URL:")
+        print(link)
+        break
+    elseif event == "http_failure" and address == url then
+        error("Upload failed: " .. tostring(value))
+    elseif event == "timer" and address == timer then
+        error("No response after 30 seconds. The server may block uploads to this site.")
+    end
 end
-print("Log URL:")
-print(link)
