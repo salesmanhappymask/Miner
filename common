@@ -1,5 +1,5 @@
-VERSION = 56
-PROTOCOL = "miner_swarm_v56"
+VERSION = 57
+PROTOCOL = "miner_swarm_v57"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -32,6 +32,12 @@ NAVIGATOR_RECALL = {
     [2]={x=5,y=1,z=-1},
     [3]={x=9,y=1,z=-1},
     [4]={x=13,y=1,z=-1}
+}
+NAVIGATOR_CRUISE = {
+    [1]=12,
+    [2]=14,
+    [3]=16,
+    [4]=18
 }
 REQUEST_REPEAT = 10
 STATUS_INTERVAL = 10
@@ -274,7 +280,7 @@ function inventorySnapshot(inv)
     end
 
     if inv.getAllStacks then
-        local ok,all=pcall(inv.getAllStacks,false)
+        local ok,all=pcall(inv.getAllStacks)
         if ok and type(all)=="table" then
             local items={}
             for slot,item in pairs(all) do
@@ -283,6 +289,11 @@ function inventorySnapshot(inv)
                     if type(item)=="table" and type(item.basic)=="function" then
                         local expanded,basic=pcall(item.basic)
                         if expanded and type(basic)=="table" then item=basic end
+                    end
+                    if type(item)~="table" or
+                        (not item.id and not item.name and not item.display_name) then
+                        local expanded,full=pcall(inv.getStackInSlot,n)
+                        if expanded and type(full)=="table" then item=full end
                     end
                     items[n]=item
                 end
@@ -346,14 +357,14 @@ function takeNamedFromFront(kind, count, targetSlot)
             end
         end
 
-        local frontItem=inventorySnapshot(inv)
-        if not frontItem or not matchesItem(frontItem[1],kind) then
+        local okFirst,first=pcall(inv.getStackInSlot,1)
+        if not okFirst or not matchesItem(first,kind) then
             break
         end
 
         turtle.select(targetSlot)
 
-        local maxSize = tonumber(frontItem[1].max_size or frontItem[1].maxSize or 64)
+        local maxSize = tonumber(first.max_size or first.maxSize or 64)
         local current = turtle.getItemCount(targetSlot)
         local free = maxSize - current
         if free <= 0 then

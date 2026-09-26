@@ -683,6 +683,14 @@ local function runMiner(cfg)
     state.resumeZ=tonumber(state.resumeZ) or (tonumber(state.resumePos) or 0)
     state.resumeDir=tonumber(state.resumeDir) or DIR_N
 
+    if cfg.row==16 and state.recoveryLocked and
+        state.recoveryReason=="Turtle inspect unavailable for safe pack collection" and
+        state.x==16 and state.y==0 and state.z==0 and state.phase=="PACK_COLLECT" then
+        state.recoveryLocked=false
+        state.recoveryReason=nil
+        saveTableLight(path,state)
+    end
+
     local function poseValid()
         if cfg.row==16 and (state.phase=="PACK_COLLECT" or state.phase=="PACK_DONE") then
             return state.originEstablished==true and cfg.orientationCalibrated==true and
@@ -1009,10 +1017,15 @@ local function runMiner(cfg)
                                 })
                             end
                         elseif message.type=="pack_ready_ack" and state.packReady then
-                            os.shutdown()
+                            state.packAcknowledged=true
+                            save()
                         elseif message.type=="pack_collect" and cfg.row==16 and
                             state.recallMode=="PACK" then
-                            flags.packCollect=true
+                            if type(message.minerIds)=="table" then
+                                state.packMinerIds=message.minerIds
+                                save()
+                            end
+                            flags.packCollect=type(state.packMinerIds)=="table"
                         elseif message.type == "hold_position" then
                             state.phase="RECOVERY_LOCK"
                             state.recoveryLocked=true
@@ -1895,8 +1908,14 @@ local function runMiner(cfg)
                 flags.packCollect=false
                 state.phase="PACK_COLLECT"
                 save()
-                return collectPackedMiners()
-            elseif state.packReady and now()-(state.lastPackSend or -10)>=2 then
+                if not collectPackedMiners() then
+                    while true do
+                        sendState(state.recoveryReason or "Pack collection stopped")
+                        sleep(5)
+                    end
+                end
+                return true
+            elseif state.packReady and not state.packAcknowledged and now()-(state.lastPackSend or -10)>=2 then
                 send(cfg.managerId,{
                     type="pack_ready",role="miner",row=cfg.row,session=cfg.session
                 })
@@ -1935,18 +1954,12 @@ local function runMiner(cfg)
         save()
         while state.x>1 do
             if not state.packStepIntent then
-                if not turtle.inspect then
+                local expected=state.packMinerIds and tonumber(state.packMinerIds[state.x-1])
+                local ok,neighbor=pcall(peripheral.call,"front","getID")
+                if not turtle.detect() or not expected or not ok or tonumber(neighbor)~=expected then
                     state.recoveryLocked=true
-                    state.recoveryReason="Turtle inspect unavailable for safe pack collection"
-                    save()
-                    sendState(state.recoveryReason)
-                    return false
-                end
-                local found,block=turtle.inspect()
-                if not found or type(block)~="table" or
-                    not string.find(lower(block.name),"turtle",1,true) then
-                    state.recoveryLocked=true
-                    state.recoveryReason="Expected parked miner immediately west at x=" .. tostring(state.x-1)
+                    state.recoveryReason="Expected Miner-" .. tostring(state.x-1) ..
+                        " ID " .. tostring(expected) .. " west, found " .. tostring(neighbor)
                     save()
                     sendState(state.recoveryReason)
                     return false
@@ -2051,15 +2064,22 @@ local function runMiner(cfg)
         end
 
         if state.phase=="PACK_COLLECT" then
+            while not state.packMinerIds do sleep(0.1) end
             collectPackedMiners()
-            return
+            while true do
+                sendState(state.recoveryReason or "Pack collection stopped")
+                sleep(5)
+            end
         end
 
         if state.phase=="RECALLED_PAUSED" then
             if not waitRecalledPause() then return end
             if state.phase=="PACK_COLLECT" then
                 collectPackedMiners()
-                return
+                while true do
+                    sendState(state.recoveryReason or "Pack collection stopped")
+                    sleep(5)
+                end
             end
         end
 
@@ -2292,7 +2312,10 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version~=VERSION then
+if cfg.version==56 then
+    cfg.version=VERSION
+    saveTable("node.cfg",cfg)
+elseif cfg.version~=VERSION then
     error("Old miner node state detected")
 end
 

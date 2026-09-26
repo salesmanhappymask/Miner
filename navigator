@@ -122,6 +122,7 @@ local function runNavigator(cfg)
 
     local function travelToSite()
         local site=NAVIGATOR_SITES[cfg.number]
+        local cruise=NAVIGATOR_CRUISE[cfg.number]
         if not site then return false end
 
         if not calibrateOrientation() then
@@ -132,15 +133,17 @@ local function runNavigator(cfg)
             return false
         end
 
-        if not vertical(10) then
+        if not vertical(cruise) then
             return false
+        end
+
+        if state.x<site.x then
+            if not step(DIR_E) then return false end
+        elseif state.x>site.x then
+            if not step(DIR_W) then return false end
         end
 
         announceTraveling()
-
-        if not vertical(site.y) then
-            return false
-        end
 
         while state.x<site.x do
             if not step(DIR_E) then return false end
@@ -154,6 +157,8 @@ local function runNavigator(cfg)
         while state.z>site.z do
             if not step(DIR_S) then return false end
         end
+
+        if not vertical(site.y) then return false end
 
         state.deployed=true
         cfg.deployed=true
@@ -239,11 +244,7 @@ local function runNavigator(cfg)
             state.z==targetZ
 
         if not alreadyHome then
-            if state.y<10 then
-                if not vertical(10) then
-                    return false
-                end
-            end
+            if not vertical(NAVIGATOR_CRUISE[cfg.number]) then return false end
 
             while state.x<targetX do
                 if not step(DIR_E) then return false end
@@ -341,21 +342,29 @@ local function runNavigator(cfg)
             return false
         end
 
-        if state.y<10 then
-            if not vertical(10) then return false end
-        end
+        if not vertical(NAVIGATOR_CRUISE[cfg.number]) then return false end
 
+        if cfg.number==2 or cfg.number==3 then
+            while state.z<site.z do
+                if not step(DIR_N) then return false end
+            end
+            while state.z>site.z do
+                if not step(DIR_S) then return false end
+            end
+        end
         while state.x<site.x do
             if not step(DIR_E) then return false end
         end
         while state.x>site.x do
             if not step(DIR_W) then return false end
         end
-        while state.z<site.z do
-            if not step(DIR_N) then return false end
-        end
-        while state.z>site.z do
-            if not step(DIR_S) then return false end
+        if cfg.number~=2 and cfg.number~=3 then
+            while state.z<site.z do
+                if not step(DIR_N) then return false end
+            end
+            while state.z>site.z do
+                if not step(DIR_S) then return false end
+            end
         end
 
         if not vertical(site.y) then
@@ -422,7 +431,8 @@ local function runNavigator(cfg)
                         })
                     end
                 elseif message.type=="pack_ready_ack" and state.packReady then
-                    os.shutdown()
+                    state.packAcknowledged=true
+                    save()
                 elseif message.type=="resume_swarm" then
                     if not resumeNavigator() then
                         status("navigator","NAVIGATION_ERROR",{
@@ -438,7 +448,7 @@ local function runNavigator(cfg)
             end
         elseif event[1]=="timer" and event[2]==timer then
             sendNavigatorStatus()
-            if state.packReady then
+            if state.packReady and not state.packAcknowledged then
                 send(cfg.managerId,{
                     type="pack_ready",role="navigator",number=cfg.number,
                     session=cfg.session
@@ -456,7 +466,10 @@ if not cfg or cfg.role~="navigator" then
     error("Navigator role file requires navigator node.cfg")
 end
 
-if cfg.version~=VERSION then
+if cfg.version==56 then
+    cfg.version=VERSION
+    saveTable("node.cfg",cfg)
+elseif cfg.version~=VERSION then
     error("Old navigator node state detected")
 end
 

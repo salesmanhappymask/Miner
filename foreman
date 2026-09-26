@@ -249,6 +249,7 @@ local function runForeman(cfg)
             miningStarted=state.miningStarted and true or false,
             recovery=state.recoveryReason,
             message=message or "",
+            setupMissing=state.setupBlockReason or false,
             session=cfg.session
         })
         lastStatus = now()
@@ -1596,7 +1597,8 @@ local function runForeman(cfg)
                         end
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type=="pack_ready_ack" and
                         state.packReady then
-                        os.shutdown()
+                        state.packAcknowledged=true
+                        saveState()
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type == "resume_swarm" then
                         if state.phase=="RECALLED_PAUSED" or state.phase=="RECALLING" or state.recallMode or flags.recallMode then
                             flags.resume=true
@@ -1683,6 +1685,34 @@ local function runForeman(cfg)
             return tonumber(id)
         end
         return nil
+    end
+
+    local function waitFrontComputerId(timeout)
+        local deadline=now()+(timeout or 1)
+        repeat
+            local found=frontComputerId()
+            if found then return found end
+            sleep(0.05)
+        until now()>=deadline
+        return nil
+    end
+
+    local function waitFrontDrive(timeout)
+        local deadline=now()+(timeout or 1)
+        repeat
+            if peripheral.getType("front")=="drive" then return true end
+            sleep(0.05)
+        until now()>=deadline
+        return false
+    end
+
+    local function waitFrontDisk(timeout)
+        local deadline=now()+(timeout or 1)
+        repeat
+            if disk.isPresent("front") then return true end
+            sleep(0.05)
+        until now()>=deadline
+        return false
     end
 
     local function verifyServiceMiner(req)
@@ -1804,7 +1834,7 @@ local function runForeman(cfg)
                 ensureGroundLevel()
                 return false
             end
-            sleep(0.2)
+            waitFrontDrive(1)
         end
 
         if state.y~=1 or peripheral.getType("front")~="drive" then
@@ -1831,7 +1861,7 @@ local function runForeman(cfg)
                 ensureGroundLevel()
                 return false
             end
-            sleep(0.3)
+            waitFrontDisk(1)
         end
 
         if not disk.isPresent("front") then
@@ -2294,9 +2324,7 @@ local function runForeman(cfg)
             return false
         end
 
-        sleep(0.2)
-
-        local workerId=frontComputerId()
+        local workerId=waitFrontComputerId(1)
         if not workerId then
             state.phase="PLACEMENT_ERROR"
             saveState()
@@ -2804,7 +2832,7 @@ local function runForeman(cfg)
             if not selfSelectKind("floppy") or not turtle.drop(1) then
                 return false
             end
-            sleep(0.3)
+            waitFrontDisk(1)
         end
 
         if not disk.isPresent("front") then
@@ -2831,9 +2859,7 @@ local function runForeman(cfg)
             return false
         end
 
-        sleep(0.2)
-
-        local navigatorId=frontComputerId()
+        local navigatorId=waitFrontComputerId(1)
         if not navigatorId then
             return false
         end
@@ -3130,6 +3156,7 @@ local function runForeman(cfg)
             end
 
             if not slot then
+                state.setupBlockReason="Place one coal in Foreman-1 inventory for seed fuel"
                 state.phase="WAITING_SEED_FUEL"
                 saveState()
                 sendState("Place one coal or charcoal anywhere in Foreman-1 inventory")
@@ -3152,6 +3179,7 @@ local function runForeman(cfg)
 
     local function masterFuelAndLoadCoal()
         if not goTo(0,-1) then
+            state.setupBlockReason="Cannot reach starting supply chest"
             return false
         end
 
@@ -3180,6 +3208,7 @@ local function runForeman(cfg)
 
     local function masterLoadSupplies()
         if not goTo(0,-1) then
+            state.setupBlockReason="Cannot reach starting supply chest"
             return false
         end
 
@@ -3231,12 +3260,14 @@ local function runForeman(cfg)
         for _,entry in ipairs(needs) do
             local remaining=entry[2]-selfCount(entry[1])
             if remaining>0 and takeNamedIntoSelf(entry[1],remaining)<remaining then
+                state.setupBlockReason="Missing " .. entry[1] .. " for Foreman-" .. tostring(n)
                 state.phase="WAITING_SUPPLIES"
                 saveState()
-                sendState("Missing " .. entry[1] .. " for Foreman-" .. tostring(n))
+                sendState(state.setupBlockReason)
                 return false
             end
         end
+        state.setupBlockReason=nil
         return true
     end
 
@@ -3304,7 +3335,7 @@ local function runForeman(cfg)
                 ensureGroundLevel()
                 return false
             end
-            sleep(0.2)
+            waitFrontDrive(1)
         end
 
         if peripheral.getType("front")~="drive" then
@@ -3325,7 +3356,7 @@ local function runForeman(cfg)
                 ensureGroundLevel()
                 return false
             end
-            sleep(0.3)
+            waitFrontDisk(1)
         end
 
         if not disk.isPresent("front") then
@@ -3391,9 +3422,7 @@ local function runForeman(cfg)
             return nil
         end
 
-        sleep(0.2)
-
-        local newId=frontComputerId()
+        local newId=waitFrontComputerId(1)
         if not newId then
             state.phase="PLACEMENT_ERROR"
             saveState()
@@ -3511,9 +3540,7 @@ local function runForeman(cfg)
             return nil
         end
 
-        sleep(0.2)
-
-        local newId=frontComputerId()
+        local newId=waitFrontComputerId(1)
         if not newId then
             state.phase="PLACEMENT_ERROR"
             saveState()
@@ -3595,7 +3622,6 @@ local function runForeman(cfg)
     end
 
     local function masterSetup()
-        state.setupBlockReason=nil
         state.phase="MASTER_SETUP"
         state.foremenReady = state.foremenReady or {[1]=true}
         cfg.foremen = cfg.foremen or {[1]=id}
@@ -3615,6 +3641,7 @@ local function runForeman(cfg)
                 return false
             end
             state.initialFuelLoaded=true
+            state.setupBlockReason=nil
             saveState()
         end
 
@@ -3626,6 +3653,7 @@ local function runForeman(cfg)
                 return false
             end
             state.initialSuppliesLoaded=true
+            state.setupBlockReason=nil
             saveState()
         end
 
@@ -3728,6 +3756,7 @@ local function runForeman(cfg)
         end
 
         state.phase="WAITING_SETUP"
+        state.setupBlockReason=nil
         saveState()
         sendState("Four foremen online")
         return true
@@ -4292,7 +4321,7 @@ local function runForeman(cfg)
             end
 
             if state.phase=="RECALLED_PAUSED" then
-                if state.packReady and now()-(state.lastPackSend or -10)>=2 then
+                if state.packReady and not state.packAcknowledged and now()-(state.lastPackSend or -10)>=2 then
                     send(cfg.managerId,{
                         type="pack_ready",role="foreman",number=number,session=cfg.session
                     })
@@ -4389,8 +4418,8 @@ local function runMaster()
     local newMaster=false
     local id=os.getComputerID()
 
-    if cfg and cfg.version~=VERSION and cfg.version~=55 then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v56.")
+    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 then
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v57.")
     end
 
     if not cfg then
@@ -4497,7 +4526,10 @@ else
         error("Foreman role file requires foreman node.cfg")
     end
 
-    if cfg.version~=VERSION then
+    if cfg.version==56 then
+        cfg.version=VERSION
+        saveTable("node.cfg",cfg)
+    elseif cfg.version~=VERSION then
         error("Old foreman node state detected")
     end
 

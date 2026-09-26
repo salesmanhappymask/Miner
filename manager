@@ -27,7 +27,10 @@ local function runRegionalManager()
 
     local data=loadTableLight("regional_manager.tmp")
 
-    if data and data.version==55 and
+    if data and data.version==56 then
+        data.version=VERSION
+        saveTableLight("regional_manager.tmp",data)
+    elseif data and data.version==55 and
         not next(data.miners or {}) and not next(data.navigators or {}) and
         not (data.foremen and (data.foremen[2] or data.foremen[3] or data.foremen[4])) then
         data.version=VERSION
@@ -117,7 +120,7 @@ local function runRegionalManager()
 
     local bootNow=now()
     if data.recall.state=="PACK_COLLECT" then
-        data.recall.collectAfter=bootNow+15
+        data.recall.collectAfter=bootNow+2
     end
     for _,request in pairs(data.requests) do
         if type(request)=="table" then
@@ -364,6 +367,11 @@ local function runRegionalManager()
         end
 
         ui.field("ov_gps",3,overviewY+4,w-4,gpsText,gpsColor,C_INSET)
+        local master=data.foremen[1]
+        local supplyWarning=master and master.setupMissing
+        ui.field("ov_supply",3,overviewY+5,w-4,
+            supplyWarning and ("F1 SUPPLIES: " .. tostring(supplyWarning)) or "",
+            supplyWarning and C_WARN or C_MUTED,C_INSET)
 
         local foreY=overviewY+overviewH
         local foreH=7
@@ -485,6 +493,10 @@ local function runRegionalManager()
             print("Begin miner setup? Y/N")
         end
         print("State: " .. tostring(data.recall.state or "NORMAL"))
+        local master=data.foremen[1]
+        if master and master.setupMissing then
+            print("F1 supplies: " .. tostring(master.setupMissing))
+        end
         if not data.paired then
             print("Pairing: waiting for Master Foreman")
         else
@@ -685,8 +697,9 @@ local function runRegionalManager()
                 send(sender,{type="recall_command",mode="PACK",session=data.session})
             elseif data.recall.state=="PACK_CLEAR" and sender~=data.recall.targets.miners[16] then
                 send(sender,{type="pack_clear",session=data.session})
-            elseif data.recall.state=="PACK_COLLECT" and sender==data.recall.targets.miners[16] then
-                send(sender,{type="pack_collect",session=data.session})
+            elseif data.recall.state=="PACK_COLLECT" and sender==data.recall.targets.miners[16] and
+                now()>=(data.recall.collectAfter or 0) then
+                send(sender,{type="pack_collect",minerIds=data.recall.targets.miners,session=data.session})
             end
         elseif data.recall.active then
             if data.recall.mode~="DUMP" or message.role=="miner" then
@@ -1126,7 +1139,7 @@ local function runRegionalManager()
                 end
                 if ready==23 then
                     data.recall.state="PACK_COLLECT"
-                    data.recall.collectAfter=now()+15
+                    data.recall.collectAfter=now()+2
                     save()
                 end
             end
@@ -1692,7 +1705,9 @@ local function runRegionalManager()
                             end
                         end
                     elseif data.recall.state=="PACK_COLLECT" and now()>=(data.recall.collectAfter or 0) then
-                        send(data.recall.targets.miners[16],{type="pack_collect",session=data.session})
+                        send(data.recall.targets.miners[16],{
+                            type="pack_collect",minerIds=data.recall.targets.miners,session=data.session
+                        })
                     end
                 elseif data.recall.mode=="NORMAL" or data.recall.mode=="SHUTDOWN" then
                     sendRecallToNodes(data.recall.mode,false)
