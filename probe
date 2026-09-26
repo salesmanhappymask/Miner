@@ -1,57 +1,81 @@
-local workerIds = {
-  [0] = 671,
-  [1] = 674,
-  [2] = 695,
-  [3] = 696,
-  [4] = 697,
-  [5] = 698,
-  [6] = 699,
-  [7] = 700,
-  [8] = 701,
-  [9] = 702,
-  [10] = 703,
-  [11] = 704,
-  [12] = 705,
-  [13] = 706,
-  [14] = 707,
-  [15] = 708
+local workers = {
+  [0] = 671, [1] = 674, [2] = 695, [3] = 696,
+  [4] = 697, [5] = 698, [6] = 699, [7] = 700,
+  [8] = 701, [9] = 702, [10] = 703, [11] = 704,
+  [12] = 705, [13] = 706, [14] = 707, [15] = 708
 }
 
 local args = {...}
-local worker = tonumber(args[1])
-local chunk = tonumber(args[2])
+local mode = args[1]
+local target = args[2] == "all" and "all" or tonumber(args[2])
+local seconds = tonumber(mode == "watch" and args[2] or args[3]) or 600
 
-if not worker or worker % 1 ~= 0 or not workerIds[worker]
-    or not chunk or chunk % 1 ~= 0 or chunk < 1 or chunk > 7
-    or (args[3] and args[3] ~= "send") or args[4] then
-  print("Usage: quarry_probe <worker 0-15> <chunk 1-7> [send]")
-  return
-end
-
-local recipient = workerIds[worker]
-print("Controller: 673")
-print("Worker: " .. worker .. " (computer " .. recipient .. ")")
-print("Command: next_chunk " .. chunk)
-
-if args[3] ~= "send" then
-  print("Preview only. Add send to transmit one message.")
+if (mode ~= "watch" and mode ~= "stop")
+    or (mode == "stop" and (target ~= "all" and not workers[target]))
+    or seconds < 1 or seconds > 3600 or seconds % 1 ~= 0
+    or (mode == "watch" and args[3]) or (mode == "stop" and args[4]) then
+  print("Usage: quarry_test watch [seconds]")
+  print("       quarry_test stop <lane 0-15|all> [seconds]")
   return
 end
 
 local modem = peripheral.wrap("back")
-if not modem or peripheral.getType("back") ~= "modem" or not modem.isWireless() then
+if peripheral.getType("back") ~= "modem" or not modem or not modem.isWireless() then
   print("A wireless modem is required on the back side.")
   return
 end
 
 math.randomseed(math.floor(os.clock() * 1000000) + math.floor(os.time() * 1000) + os.getComputerID())
-local packet = {
-  nMessageID = math.random(1, 2147483647),
-  nRecipient = recipient,
-  message = {cmd = "next_chunk", chunk = chunk, id = worker},
-  sProtocol = "chunkquarry"
-}
+local openedHere = not modem.isOpen(65533)
+if openedHere then modem.open(65533) end
+local timer = os.startTimer(seconds)
+local seen = {}
+local stopped = {}
+local count = 0
 
-modem.transmit(recipient, 673, packet)
-modem.transmit(65533, 673, packet)
-print("Sent once on the direct and repeat channels.")
+print("Listening for chunkquarry for " .. seconds .. " seconds.")
+if mode == "stop" then
+  print("Sending one stop per target at its next check-in.")
+end
+
+while true do
+  local event, side, channel, reply, packet = os.pullEvent()
+  if event == "timer" and side == timer then break end
+  if event == "modem_message" and side == "back" and channel == 65533
+      and type(packet) == "table" and packet.sProtocol == "chunkquarry"
+      and type(packet.message) == "table" then
+    local msg = packet.message
+    local id = msg.id
+    local command = msg.cmd
+    local key = packet.nMessageID
+    if not key or not seen[key] then
+      if key then seen[key] = true end
+      if type(id) == "number" and workers[id] == reply
+          and (command == "progress" or command == "chunk_done")
+          and packet.nRecipient == 673 then
+        print("Lane " .. id .. " " .. command .. " chunk " .. tostring(msg.chunk))
+        if mode == "stop" and (target == "all" or target == id) and not stopped[id] then
+          local response = {
+            nMessageID = math.random(1, 2147483647),
+            nRecipient = reply,
+            message = {cmd = "stop", id = id},
+            sProtocol = "chunkquarry"
+          }
+          modem.transmit(reply, 673, response)
+          modem.transmit(65533, 673, response)
+          stopped[id] = true
+          count = count + 1
+          print("Sent stop to lane " .. id .. " (computer " .. reply .. ").")
+          if target ~= "all" or count == 16 then break end
+        end
+      end
+    end
+  end
+end
+
+if openedHere then modem.close(65533) end
+if mode == "stop" then
+  print("Stops sent: " .. count .. ". Watch the miners to confirm they returned.")
+else
+  print("Watch complete.")
+end
