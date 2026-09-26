@@ -1,0 +1,150 @@
+local args = {...}
+local filter = args[1]
+if filter == "all" or filter == "" then filter = nil end
+local logPath = args[2] or "sniff.log"
+local repeatChannel = 65533
+local maxLogSize = 131072
+local modemSide = nil
+local modem = nil
+local openedHere = false
+local entries = {}
+local count = 0
+local logError = nil
+
+for _, side in ipairs({"back", "left", "right", "top", "bottom", "front"}) do
+    if peripheral.getType(side) == "modem" then
+        local candidate = peripheral.wrap(side)
+        if candidate and (not candidate.isWireless or candidate.isWireless()) then
+            modemSide = side
+            modem = candidate
+            break
+        end
+    end
+end
+
+if not modem then
+    error("Wireless modem not found. Use a wireless pocket computer.")
+end
+
+if not modem.isOpen(repeatChannel) then
+    modem.open(repeatChannel)
+    openedHere = true
+end
+
+local function oneLine(value)
+    local kind = type(value)
+    if kind == "table" then
+        local ok, result = pcall(textutils.serialize, value)
+        value = ok and result or "<table unavailable>"
+    elseif kind == "string" then
+        value = value
+    else
+        value = tostring(value)
+    end
+    return value:gsub("\r", "\\r"):gsub("\n", "\\n")
+end
+
+local function short(value, width)
+    value = tostring(value or "")
+    if #value <= width then return value end
+    return value:sub(1, math.max(1, width - 1)) .. "~"
+end
+
+local function drawLine(y, value)
+    local width, height = term.getSize()
+    if y > height then return end
+    term.setCursorPos(1, y)
+    term.clearLine()
+    term.write(short(value, width))
+end
+
+local function redraw()
+    local width, height = term.getSize()
+    term.clear()
+    drawLine(1, "REDNET SNIFFER  " .. tostring(count))
+    drawLine(2, "Modem " .. modemSide .. "  Ch " .. repeatChannel)
+    drawLine(3, "Filter " .. (filter or "all"))
+    drawLine(4, "Log " .. logPath)
+    if logError then drawLine(5, "LOG ERROR: " .. logError) else drawLine(5, "Ctrl+T to stop") end
+    local visible = math.max(0, math.floor((height - 5) / 3))
+    local first = math.max(1, #entries - visible + 1)
+    local row = 6
+    for i = first, #entries do
+        local entry = entries[i]
+        drawLine(row, entry.heading)
+        drawLine(row + 1, entry.protocol)
+        drawLine(row + 2, entry.summary)
+        row = row + 3
+    end
+end
+
+local function summaryOf(payload)
+    if type(payload) ~= "table" then return oneLine(payload) end
+    local fields = {}
+    for _, name in ipairs({"type", "role", "row", "number", "requestId", "state", "phase"}) do
+        if payload[name] ~= nil then
+            fields[#fields + 1] = name .. "=" .. oneLine(payload[name])
+        end
+    end
+    if #fields > 0 then return table.concat(fields, " ") end
+    return oneLine(payload)
+end
+
+local function appendLog(entry)
+    if fs.exists(logPath) and fs.getSize(logPath) >= maxLogSize then
+        local older = logPath .. ".old"
+        if fs.exists(older) then fs.delete(older) end
+        fs.move(logPath, older)
+    end
+    local file = fs.open(logPath, "a")
+    if not file then
+        logError = "Cannot open file"
+        return
+    end
+    file.writeLine(entry)
+    file.close()
+    logError = nil
+end
+
+redraw()
+
+while true do
+    local event, side, channel, replyChannel, packet, distance = os.pullEventRaw()
+    if event == "terminate" then break end
+    if event == "modem_message" and side == modemSide and channel == repeatChannel then
+        local wrapped = type(packet) == "table" and packet.nMessageID ~= nil
+        local protocol = wrapped and packet.sProtocol or nil
+        if not filter or protocol == filter then
+            local payload = wrapped and packet.message or packet
+            local sender = wrapped and packet.nSender or replyChannel
+            local recipient = wrapped and packet.nRecipient or "?"
+            local time = "D" .. tostring(os.day()) .. " " .. textutils.formatTime(os.time(), true)
+            local heading = time .. " " .. tostring(sender) .. ">" .. tostring(recipient)
+            local label = protocol or (wrapped and "(no protocol)" or "(raw modem)")
+            local summary = summaryOf(payload)
+            local record = table.concat({
+                "[" .. time .. "]",
+                "side=" .. side,
+                "channel=" .. tostring(channel),
+                "reply=" .. tostring(replyChannel),
+                "sender=" .. tostring(sender),
+                "recipient=" .. tostring(recipient),
+                "distance=" .. tostring(distance),
+                "protocol=" .. tostring(label),
+                "messageId=" .. tostring(wrapped and packet.nMessageID or "?"),
+                "payload=" .. oneLine(payload)
+            }, " | ")
+            count = count + 1
+            entries[#entries + 1] = {heading=heading, protocol=label, summary=summary}
+            if #entries > 12 then table.remove(entries, 1) end
+            appendLog(record)
+            redraw()
+        end
+    end
+end
+
+if openedHere then modem.close(repeatChannel) end
+term.clear()
+term.setCursorPos(1, 1)
+print("Stopped. " .. tostring(count) .. " packets.")
+print("Log: " .. logPath)
