@@ -57,6 +57,60 @@ local function totalItems()
     return total
 end
 
+local function ensureFuel(required)
+    local level = turtle.getFuelLevel()
+    writeLog("Fuel check. Current level: " .. tostring(level) .. ", required: " .. tostring(required))
+
+    if level == "unlimited" then
+        writeLog("Fuel is unlimited")
+        return true
+    end
+
+    if level >= required then
+        writeLog("Existing fuel is sufficient")
+        return true
+    end
+
+    for slot = 1,16 do
+        if turtle.getItemCount(slot) > 0 then
+            turtle.select(slot)
+
+            local canFuel = turtle.refuel(0)
+            writeLog("Fuel test on slot " .. slot .. ": " .. tostring(canFuel))
+
+            if canFuel then
+                while turtle.getItemCount(slot) > 0 and turtle.getFuelLevel() < required do
+                    local before = turtle.getFuelLevel()
+                    local ok = turtle.refuel(1)
+                    local after = turtle.getFuelLevel()
+
+                    writeLog(
+                        "Refuel from slot " .. slot ..
+                        " returned " .. tostring(ok) ..
+                        "; fuel " .. tostring(before) ..
+                        " -> " .. tostring(after)
+                    )
+
+                    if not ok or after <= before then
+                        break
+                    end
+                end
+            end
+        end
+
+        if turtle.getFuelLevel() >= required then
+            break
+        end
+    end
+
+    turtle.select(1)
+
+    level = turtle.getFuelLevel()
+    writeLog("Fuel level after refueling: " .. tostring(level))
+
+    return level == "unlimited" or level >= required
+end
+
 local function sendError(minerId, message)
     writeLog("ERROR: " .. tostring(message))
     if minerId then
@@ -88,6 +142,12 @@ openWireless()
 
 writeLog("Initial Foreman inventory scan")
 countInventory()
+
+if not ensureFuel(10) then
+    writeLog("ERROR: Not enough fuel for transfer test")
+    error("Not enough fuel. Put coal or another valid fuel item into the Foreman and reboot.")
+end
+
 writeLog("Broadcasting HELLO_FOREMAN")
 
 rednet.broadcast({
