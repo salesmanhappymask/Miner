@@ -776,13 +776,78 @@ local function runRegionalManager()
     end
 
     local function sendRecallToNodes(mode,minersOnly)
-        for _,node in pairs(data.nodes) do
-            if not minersOnly or node.role=="miner" then
-                send(node.id,{
+        local sent={}
+
+        local function sendOne(nodeId)
+            nodeId=tonumber(nodeId)
+            if nodeId and nodeId~=managerId and not sent[nodeId] then
+                sent[nodeId]=true
+                send(nodeId,{
                     type="recall_command",
                     mode=mode,
                     session=data.session
                 })
+            end
+        end
+
+        if minersOnly then
+            for _,miner in pairs(data.miners) do
+                if type(miner)=="table" then
+                    sendOne(miner.id)
+                end
+            end
+            for _,node in pairs(data.nodes) do
+                if type(node)=="table" and node.role=="miner" then
+                    sendOne(node.id)
+                end
+            end
+        else
+            broadcast({
+                type="recall_command",
+                mode=mode,
+                session=data.session
+            })
+            for _,node in pairs(data.nodes) do
+                if type(node)=="table" then
+                    sendOne(node.id)
+                end
+            end
+            for _,miner in pairs(data.miners) do
+                if type(miner)=="table" then sendOne(miner.id) end
+            end
+            for _,foreman in pairs(data.foremen) do
+                if type(foreman)=="table" then sendOne(foreman.id) end
+            end
+            for _,navigator in pairs(data.navigators) do
+                if type(navigator)=="table" then sendOne(navigator.id) end
+            end
+        end
+    end
+
+    local function wakeForemenForDump()
+        local sent={}
+        for _,foreman in pairs(data.foremen) do
+            if type(foreman)=="table" then
+                local foremanId=tonumber(foreman.id)
+                if foremanId and not sent[foremanId] then
+                    sent[foremanId]=true
+                    send(foremanId,{
+                        type="resume_swarm",
+                        session=data.session
+                    })
+                end
+            end
+        end
+        for _,node in pairs(data.nodes) do
+            if type(node)=="table" and node.role=="foreman" then
+                local foremanId=tonumber(node.id)
+                if foremanId and not sent[foremanId] then
+                    sent[foremanId]=true
+                    send(foremanId,{
+                        type="resume_swarm",
+                        session=data.session
+                    })
+                end
             end
         end
     end
@@ -808,6 +873,7 @@ local function runRegionalManager()
             data.foremanJobs={}
             sendRecallToNodes(mode,false)
         else
+            wakeForemenForDump()
             sendRecallToNodes("DUMP",true)
         end
 
@@ -1413,6 +1479,7 @@ local function runRegionalManager()
 
             if data.recall.active and now()-lastRecall>=3 then
                 if data.recall.mode=="DUMP" and not data.recall.foremenFinalizing then
+                    wakeForemenForDump()
                     sendRecallToNodes("DUMP",true)
                 elseif data.recall.mode=="NORMAL" or data.recall.mode=="SHUTDOWN" then
                     sendRecallToNodes(data.recall.mode,false)

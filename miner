@@ -240,6 +240,45 @@ local function runMinerCommissioning(cfg)
                         dir=state.dir or cfg.homeDir,
                         session=cfg.session
                     })
+                elseif mode=="DUMP" then
+                    state.phase="RECALLED_PAUSED"
+                    state.requestSeq=(state.requestSeq or 0)+1
+                    state.request={
+                        id=tostring(os.getComputerID()) .. ":commission_dump:" .. tostring(state.requestSeq),
+                        kind="DUMP",
+                        recallDump=true
+                    }
+                    save()
+
+                    send(cfg.managerId,{
+                        type="recall_home",
+                        role="miner",
+                        row=cfg.row,
+                        id=os.getComputerID(),
+                        mode=mode,
+                        labelCleared=false,
+                        x=state.x or cfg.homeX,
+                        y=state.y or cfg.homeY,
+                        z=state.z or cfg.homeZ,
+                        dir=state.dir or cfg.homeDir,
+                        session=cfg.session
+                    })
+
+                    send(cfg.managerId,{
+                        type="service_arrived",
+                        row=cfg.row,
+                        requestId=state.request.id,
+                        service="DUMP",
+                        minerId=os.getComputerID(),
+                        foremanId=cfg.foremanId,
+                        foremanNumber=cfg.foremanNumber,
+                        fuel=turtle.getFuelLevel(),
+                        x=state.x or cfg.homeX,
+                        y=state.y or cfg.homeY,
+                        z=state.z or cfg.homeZ,
+                        dir=state.dir or cfg.homeDir,
+                        session=cfg.session
+                    })
                 end
             elseif message.type=="resume_swarm" and state.phase=="RECALLED_PAUSED" then
                 state.phase="COMMISSIONING"
