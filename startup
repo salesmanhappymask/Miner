@@ -1,6 +1,9 @@
 local REGIONAL_MANAGER = 0
 local MASTER_FOREMAN = 0
 
+_G.REGIONAL_MANAGER=REGIONAL_MANAGER
+_G.MASTER_FOREMAN=MASTER_FOREMAN
+
 local RAW="https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
 
 local function readFile(path)
