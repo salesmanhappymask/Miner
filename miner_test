@@ -1,10 +1,10 @@
-local PROTOCOL = "turtle_transfer_test_v1"
-local LOG = "miner_transfer.log"
+local PROTOCOL = "direct_inventory_transfer_test_v1"
+local LOG = "miner_direct_inventory.log"
 
-local function writeLog(message)
-    local line = string.format("[%.3f] %s", os.clock(), tostring(message))
+local function log(message)
+    local line=string.format("[%.3f] %s",os.clock(),tostring(message))
     print(line)
-    local h = fs.open(LOG, "a")
+    local h=fs.open(LOG,"a")
     if h then
         h.writeLine(line)
         h.close()
@@ -12,145 +12,71 @@ local function writeLog(message)
 end
 
 local function resetLog()
-    if fs.exists(LOG) then
-        fs.delete(LOG)
-    end
-    writeLog("Miner transfer test starting")
-    writeLog("Computer ID: " .. tostring(os.getComputerID()))
-    writeLog("Fuel level: " .. tostring(turtle.getFuelLevel()))
+    if fs.exists(LOG) then fs.delete(LOG) end
+    log("Miner direct-inventory test starting")
+    log("Computer ID: "..tostring(os.getComputerID()))
 end
 
 local function openWireless()
-    for _, side in ipairs({"left","right","top","bottom","front","back"}) do
-        if peripheral.getType(side) == "modem" then
-            local ok, wireless = pcall(peripheral.call, side, "isWireless")
+    for _,side in ipairs({"left","right","top","bottom","front","back"}) do
+        if peripheral.getType(side)=="modem" then
+            local ok,wireless=pcall(peripheral.call,side,"isWireless")
             if ok and wireless then
                 rednet.open(side)
-                writeLog("Opened wireless modem on " .. side)
-                return side
+                log("Opened wireless modem on "..side)
+                return true
             end
         end
     end
-
     error("No wireless modem found")
 end
 
-local function countInventory()
-    local total = 0
-    for slot = 1,16 do
-        local count = turtle.getItemCount(slot)
-        if count > 0 then
-            writeLog("Slot " .. slot .. " contains " .. count .. " item(s)")
-            total = total + count
+local function scan()
+    local total=0
+    for slot=1,16 do
+        local count=turtle.getItemCount(slot)
+        if count>0 then
+            log("Slot "..slot.." contains "..count.." item(s)")
+            total=total+count
         end
     end
-    writeLog("Total items in inventory: " .. total)
+    log("Inventory total: "..total)
     return total
-end
-
-local function findSandSlot()
-    for slot = 1,16 do
-        if turtle.getItemCount(slot) > 0 then
-            turtle.select(slot)
-            writeLog("Testing slot " .. slot .. " as transfer slot")
-            return slot
-        end
-    end
-    return nil
 end
 
 resetLog()
 openWireless()
+log("Initial inventory")
+scan()
+log("Miner will remain stationary. Any item in any slot may be removed.")
 
-writeLog("Initial inventory scan")
-countInventory()
+while true do
+    local sender,message,protocol=rednet.receive(PROTOCOL)
+    log("Message from "..tostring(sender)..": "..textutils.serialize(message))
 
-local sandSlot = findSandSlot()
-if not sandSlot then
-    writeLog("ERROR: No items found. Put a stack of sand into the Miner and reboot.")
-    error("No items available for transfer")
-end
-
-writeLog("Selected slot " .. sandSlot .. " for transfer")
-writeLog("Waiting for Foreman HELLO")
-
-local foremanId = nil
-
-while not foremanId do
-    local sender, message, protocol = rednet.receive(PROTOCOL)
-
-    writeLog("Received message from " .. tostring(sender) .. ": " .. textutils.serialize(message))
-
-    if type(message) == "table" and message.type == "HELLO_FOREMAN" then
-        foremanId = sender
-        rednet.send(foremanId, {
-            type = "HELLO_MINER",
-            minerId = os.getComputerID(),
-            selectedSlot = sandSlot,
-            count = turtle.getItemCount(sandSlot)
-        }, PROTOCOL)
-        writeLog("Sent HELLO_MINER to Foreman " .. tostring(foremanId))
+    if type(message)=="table" and message.type=="HELLO_FOREMAN" then
+        rednet.send(sender,{
+            type="HELLO_MINER",
+            minerId=os.getComputerID()
+        },PROTOCOL)
+        log("Sent HELLO_MINER")
+    elseif type(message)=="table" and message.type=="SCAN_REQUEST" then
+        local total=scan()
+        rednet.send(sender,{
+            type="SCAN_RESULT",
+            total=total
+        },PROTOCOL)
+        log("Sent SCAN_RESULT total="..total)
+    elseif type(message)=="table" and message.type=="TEST_COMPLETE" then
+        log("Foreman reported test complete")
+        log("Final inventory")
+        scan()
+        break
+    elseif type(message)=="table" and message.type=="TEST_ERROR" then
+        log("FOREMAN ERROR: "..tostring(message.error))
+        scan()
+        break
     end
 end
 
-writeLog("Waiting for Foreman to arrive and request transfer")
-
-local finished = false
-
-while not finished do
-    local sender, message, protocol = rednet.receive(PROTOCOL)
-
-    writeLog("Received message from " .. tostring(sender) .. ": " .. textutils.serialize(message))
-
-    if sender == foremanId and type(message) == "table" then
-        if message.type == "REQUEST_TRANSFER" then
-            local before = turtle.getItemCount(sandSlot)
-
-            turtle.select(sandSlot)
-            writeLog("Foreman requested transfer")
-            writeLog("Selected slot " .. sandSlot .. " with " .. before .. " item(s)")
-            writeLog("Miner will remain stationary and will NOT call turtle.drop()")
-
-            rednet.send(foremanId, {
-                type = "TRANSFER_READY",
-                slot = sandSlot,
-                count = before
-            }, PROTOCOL)
-
-            writeLog("Sent TRANSFER_READY")
-
-        elseif message.type == "TRANSFER_RESULT" then
-            local after = turtle.getItemCount(sandSlot)
-
-            writeLog("Foreman reports turtle.suck result: " .. tostring(message.suckResult))
-            writeLog("Foreman reports item count gained: " .. tostring(message.gained))
-            writeLog("Miner selected slot now contains: " .. after)
-
-            countInventory()
-
-            rednet.send(foremanId, {
-                type = "MINER_POST_TRANSFER",
-                remaining = after
-            }, PROTOCOL)
-
-            writeLog("Sent MINER_POST_TRANSFER")
-
-            if after == 0 then
-                writeLog("SUCCESS: Selected stack was completely removed from Miner")
-            else
-                writeLog("NOTICE: " .. after .. " item(s) remain in selected slot")
-            end
-
-        elseif message.type == "TEST_COMPLETE" then
-            writeLog("Foreman reports test complete")
-            writeLog("Final inventory scan")
-            countInventory()
-            finished = true
-        elseif message.type == "TEST_ERROR" then
-            writeLog("FOREMAN ERROR: " .. tostring(message.error))
-            finished = true
-        end
-    end
-end
-
-writeLog("Miner transfer test finished")
+log("Miner direct-inventory test finished")
