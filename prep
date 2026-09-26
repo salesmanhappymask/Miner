@@ -1,8 +1,10 @@
-local function readFile(path)
-    local f=fs.open(path,"r")
-    if not f then return nil end
-    local data=f.readAll()
-    f.close()
+local RAW="https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
+
+local function fetch(name)
+    local response=http.get(RAW .. name)
+    if not response then return nil end
+    local data=response.readAll()
+    response.close()
     return data
 end
 
@@ -14,13 +16,16 @@ local function writeFile(path,data)
     return true
 end
 
-local source=readFile("startup")
-if not source then
-    error("Local startup program not found")
-end
-
 if peripheral.getType("top")~="drive" then
     error("Disk Drive must be directly above turtle")
+end
+
+local startup=fetch("startup")
+local common=fetch("common")
+local bootstrap=fetch("bootstrap")
+
+if not startup or not common or not bootstrap then
+    error("Could not download modular installer files")
 end
 
 local prepared=0
@@ -34,16 +39,21 @@ for slot=1,16 do
 
             if disk.isPresent("top") then
                 local files=fs.list("disk")
+
                 for i=1,#files do
                     fs.delete(fs.combine("disk",files[i]))
                 end
 
-                if not writeFile("disk/startup",source) then
+                if not writeFile("disk/startup",startup) then
                     error("Could not write disk/startup")
                 end
 
-                if readFile("disk/startup")~=source then
-                    error("Disk startup verification failed")
+                if not writeFile("disk/common",common) then
+                    error("Could not write disk/common")
+                end
+
+                if not writeFile("disk/bootstrap",bootstrap) then
+                    error("Could not write disk/bootstrap")
                 end
 
                 disk.setLabel("top","miner")
@@ -55,4 +65,4 @@ for slot=1,16 do
     end
 end
 
-print("Prepared " .. tostring(prepared) .. " miner disks.")
+print("Prepared " .. tostring(prepared) .. " modular miner disks.")

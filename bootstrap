@@ -1,0 +1,401 @@
+local function bootstrap()
+    if not openNetwork() then
+        error("Wireless modem not found")
+    end
+
+    local myID=os.getComputerID()
+    local configured=nil
+
+    while not configured do
+        local sender,message=rednet.receive(PROTOCOL,2)
+
+        if sender and type(message)=="table" and message.type=="configure" and message.target==myID then
+            configured=message
+            configured.controller=sender
+        end
+    end
+
+    local placementSupported,detectedPlacementMode,detectedStartDir=detectPlacement()
+
+    local source=readFile("/disk/startup") or readFile("disk/startup")
+    local commonSource=readFile("/disk/common") or readFile("disk/common")
+
+    if not source or not commonSource then
+        error("Installer disk is missing startup/common")
+    end
+
+    if not writeFile("startup.new",source) then
+        error("Cannot write startup.new")
+    end
+
+    if not writeFile("common.new",commonSource) then
+        fs.delete("startup.new")
+        error("Cannot write common.new")
+    end
+
+    if readFile("startup.new")~=source or readFile("common.new")~=commonSource then
+        fs.delete("startup.new")
+        fs.delete("common.new")
+        error("Installed modular files failed verification")
+    end
+
+    if fs.exists("startup") then fs.delete("startup") end
+    if fs.exists("common") then fs.delete("common") end
+
+    fs.move("startup.new","startup")
+    fs.move("common.new","common")
+
+    if readFile("startup")~=source or readFile("common")~=commonSource then
+        error("Final modular install verification failed")
+    end
+
+    if configured.role == "foreman" then
+        local cfg = {
+            version = VERSION,
+            role = "foreman",
+            number = configured.number,
+            controller = configured.controller,
+            rowStart = configured.rowStart,
+            rowEnd = configured.rowEnd,
+            homeX = 0,
+            homeZ = -(configured.number + 1),
+            startX = 1,
+            startZ = -1,
+            placementMode = detectedPlacementMode,
+            placementSupported = placementSupported,
+            startDir = detectedStartDir,
+            master = false,
+            managerId = configured.managerId,
+            masterForemanId = configured.masterForemanId,
+            session = configured.session
+        }
+        saveTable("node.cfg", cfg)
+        setRegionalManager(cfg.managerId)
+        if not registerNodeWithManager(cfg) then
+            error("Regional Manager registration failed")
+        end
+        os.setComputerLabel("Foreman-" .. tostring(cfg.number))
+        for i=1,3 do
+            send(configured.controller, {
+                type = "install_ok",
+                id = myID,
+                role = "foreman",
+                number = cfg.number,
+                placementSupported = cfg.placementSupported,
+                placementMode = cfg.placementMode,
+                detectedStartDir = cfg.startDir
+            })
+            sleep(0.1)
+        end
+
+        local deployed = false
+        while not deployed do
+            local sender, message = rednet.receive(PROTOCOL, 5)
+            if sender == configured.controller and type(message) == "table" then
+                if message.type == "deploy_foreman" and message.target == myID then
+                    local statePath="foreman" .. tostring(cfg.number) .. ".tmp"
+                    local state={
+                        x=cfg.startX,
+                        z=cfg.startZ,
+                        y=0,
+                        dir=cfg.startDir,
+                        phase="DEPLOYING",
+                        number=cfg.number,
+                        setupDone=false,
+                        orientationCalibrated=false,
+                        session=cfg.session,
+                        seq=0
+                    }
+
+                    saveTable(statePath,state)
+                    checkpointPose("foreman",state.seq,state,cfg.session)
+                    selfRefuelTo(FOREMAN_FUEL_TARGET)
+
+                    local function saveDeploy()
+                        saveTable(statePath,state)
+                    end
+
+                    local function checkpointDeploy()
+                        local snapshot=textutils.unserialize(textutils.serialize(state))
+                        snapshot.motionIntent=nil
+                        snapshot.turnIntent=nil
+                        checkpointPose("foreman",state.seq,snapshot,cfg.session)
+                    end
+
+                    local function deployTurn(right)
+                        local from=state.dir
+                        local to=right and ((from+1)%4) or ((from+3)%4)
+                        local intent={seq=state.seq+1,from=from,to=to}
+                        state.turnIntent=intent
+                        saveDeploy()
+
+                        local ok
+                        if right then ok=turtle.turnRight() else ok=turtle.turnLeft() end
+                        if not ok then
+                            state.turnIntent=nil
+                            saveDeploy()
+                            return false
+                        end
+
+                        state.dir=to
+                        state.seq=intent.seq
+                        checkpointDeploy()
+                        state.turnIntent=nil
+                        saveDeploy()
+                        return true
+                    end
+
+                    local function deployFace(target)
+                        while state.dir~=target do
+                            local diff=(target-state.dir)%4
+                            if diff==3 then
+                                if not deployTurn(false) then return false end
+                            else
+                                if not deployTurn(true) then return false end
+                            end
+                        end
+                        return true
+                    end
+
+                    local function deployForward(directionName)
+                        local attempts=0
+                        while true do
+                            local tx=state.x
+                            local tz=state.z
+                            if state.dir==DIR_N then tz=tz+1
+                            elseif state.dir==DIR_E then tx=tx+1
+                            elseif state.dir==DIR_S then tz=tz-1
+                            else tx=tx-1 end
+
+                            local intent={
+                                seq=state.seq+1,
+                                fuelBefore=turtle.getFuelLevel(),
+                                from={x=state.x,z=state.z,y=0,dir=state.dir},
+                                to={x=tx,z=tz,y=0,dir=state.dir}
+                            }
+                            state.motionIntent=intent
+                            saveDeploy()
+
+                            if turtle.forward() then
+                                state.x=tx
+                                state.z=tz
+                                state.seq=intent.seq
+                                checkpointDeploy()
+                                state.motionIntent=nil
+                                saveDeploy()
+                                return true
+                            end
+
+                            state.motionIntent=nil
+                            saveDeploy()
+                            attempts=attempts+1
+                            if attempts==1 or attempts%10==0 then
+                                send(configured.controller,{
+                                    type="foreman_deploy_blocked",
+                                    id=myID,
+                                    number=cfg.number,
+                                    direction=directionName,
+                                    attempts=attempts
+                                })
+                            end
+                            sleep(0.5)
+                        end
+                    end
+
+                    if not state.orientationCalibrated then
+                        if cfg.placementMode=="SUPPORTED" then
+                            state.dir=DIR_N
+                        elseif cfg.placementMode=="AIR" then
+                            state.dir=DIR_S
+
+                            if not deployTurn(true) then
+                                error("Cannot perform air-placement orientation correction")
+                            end
+                            if not deployTurn(true) then
+                                error("Cannot perform air-placement orientation correction")
+                            end
+
+                            if state.dir~=DIR_N then
+                                state.phase="RECOVERY_LOCK"
+                                saveDeploy()
+                                error("Air-placement orientation correction did not end north")
+                            end
+                        else
+                            state.phase="RECOVERY_LOCK"
+                            saveDeploy()
+                            error("Unknown detected Foreman placement mode")
+                        end
+
+                        state.orientationCalibrated=true
+                        checkpointDeploy()
+                        saveDeploy()
+                    end
+
+                    local laneX=cfg.number
+
+                    if not deployFace(DIR_E) then
+                        error("Cannot face east for Foreman deployment")
+                    end
+                    while state.x<laneX do
+                        if not deployForward("east") then
+                            error("Cannot move east on Foreman deployment lane")
+                        end
+                    end
+
+                    if not deployFace(DIR_S) then
+                        error("Cannot face south for Foreman deployment")
+                    end
+                    while state.z>cfg.homeZ do
+                        if not deployForward("south") then
+                            error("Cannot move south to Foreman home row")
+                        end
+                    end
+
+                    if not deployFace(DIR_W) then
+                        error("Cannot face west for Foreman deployment")
+                    end
+                    while state.x>cfg.homeX do
+                        if not deployForward("west") then
+                            error("Cannot move west into Foreman home")
+                        end
+                    end
+
+                    if not deployFace(DIR_N) then
+                        error("Cannot face north at Foreman home")
+                    end
+
+                    if state.x~=cfg.homeX or state.z~=cfg.homeZ or state.y~=0 or state.dir~=DIR_N then
+                        state.phase="RECOVERY_LOCK"
+                        saveDeploy()
+                        error("Foreman deployment ended at incorrect home coordinate")
+                    end
+
+                    state.phase="WAITING_SETUP"
+                    state.setupDone=false
+                    checkpointDeploy()
+                    saveDeploy()
+
+                    for i=1,3 do
+                        send(configured.controller,{
+                            type="foreman_deployed",
+                            id=myID,
+                            number=cfg.number
+                        })
+                        sleep(0.1)
+                    end
+                    deployed=true
+                end
+            end
+        end
+        os.reboot()
+    elseif configured.role == "navigator" then
+        local site=NAVIGATOR_SITES[tonumber(configured.number)]
+
+        if not site then
+            error("Invalid Navigator number")
+        end
+
+        local cfg={
+            version=VERSION,
+            role="navigator",
+            number=tonumber(configured.number),
+            controller=configured.controller,
+            x=site.x,
+            y=site.y,
+            z=site.z,
+            startX=1,
+            startY=0,
+            startZ=-1,
+            placementSupported=placementSupported,
+            placementMode=detectedPlacementMode,
+            startDir=detectedStartDir,
+            deployed=false,
+            managerId=configured.managerId,
+            masterForemanId=configured.masterForemanId,
+            session=configured.session
+        }
+
+        saveTable("node.cfg",cfg)
+        setRegionalManager(cfg.managerId)
+        os.setComputerLabel("Navigator-" .. tostring(cfg.number))
+
+        for i=1,3 do
+            send(configured.controller,{
+                type="install_ok",
+                id=myID,
+                role="navigator",
+                number=cfg.number
+            })
+            sleep(0.1)
+        end
+
+        sleep(0.5)
+        os.reboot()
+
+    elseif configured.role == "miner" then
+        local cfg={
+            version=VERSION,
+            role="miner",
+            row=configured.row,
+            homeX=configured.row,
+            homeY=0,
+            homeZ=0,
+            homeDir=DIR_N,
+            shaftMinZ=0,
+            shaftMaxZ=15,
+            foremanId=configured.foremanId,
+            foremanNumber=configured.foremanNumber,
+            tempDeployment=configured.tempDeployment and true or false,
+            placementMode=detectedPlacementMode,
+            placementSupported=placementSupported,
+            managerId=configured.managerId,
+            masterForemanId=configured.masterForemanId,
+            session=configured.session,
+            commissioned=false
+        }
+
+        saveTable("node.cfg",cfg)
+        os.setComputerLabel(string.format("Miner-%02d",cfg.row))
+
+        saveTableLight("miner.tmp",{
+            row=cfg.row,
+            depth=0,
+            pos=0,
+            dir=cfg.placementSupported and DIR_N or DIR_S,
+            phase="COMMISSIONING",
+            request=nil,
+            requestSeq=0,
+            resumeDepth=0,
+            resumePos=0,
+            resumeDir=DIR_N,
+            complete=false,
+            installerHeld=false,
+            installerFuelSlot=nil,
+            orientationTurns=0,
+            orientationTurnIntent=nil,
+            orientationCalibrated=false,
+            originEstablished=false,
+            seq=0
+        })
+
+        for i=1,3 do
+            send(configured.controller,{
+                type="install_ok",
+                id=myID,
+                role="miner",
+                row=cfg.row,
+                placementSupported=cfg.placementSupported,
+                placementMode=cfg.placementMode,
+                detectedStartDir=cfg.placementSupported and DIR_N or DIR_S
+            })
+            sleep(0.1)
+        end
+
+        os.reboot()
+    else
+        error("Unknown configured role")
+    end
+end
+
+
+bootstrap()

@@ -1,0 +1,789 @@
+VERSION = 50
+PROTOCOL = "miner_swarm_v50"
+WORKER_COUNT = 16
+FOREMAN_COUNT = 4
+NAVIGATOR_COUNT = 4
+NAVIGATOR_SITES = {
+    [1]={x=1,y=10,z=0},
+    [2]={x=16,y=10,z=0},
+    [3]={x=1,y=10,z=15},
+    [4]={x=16,y=14,z=15}
+}
+REQUEST_REPEAT = 10
+STATUS_INTERVAL = 10
+PEER_INTERVAL = 2
+MOVE_RESERVE_TIME = 0.2
+MOVE_RETRY_LIMIT = 30
+MINER_FUEL_TARGET = 1200
+MINER_REFUEL_COAL = 16
+MINER_SERVICE_RESERVE = 128
+FOREMAN_FUEL_TARGET = 1200
+COAL_FUEL_VALUE = 80
+FOREMAN_FUEL_LOW = 500
+WORKER_SETUP_COAL = 15
+
+DIR_N = 0
+DIR_E = 1
+DIR_S = 2
+DIR_W = 3
+
+SIDES = {"left","right","top","bottom","front","back"}
+
+regionalManagerID = nil
+
+function setRegionalManager(id)
+    regionalManagerID=tonumber(id)
+end
+
+function getRegionalManager()
+    return regionalManagerID
+end
+
+function detectPlacement()
+    if not turtle then
+        return true,"SUPPORTED",DIR_N
+    end
+
+    local supported=turtle.detectDown() and true or false
+    return supported,supported and "SUPPORTED" or "AIR",supported and DIR_N or DIR_S
+end
+
+function now()
+    return os.clock()
+end
+
+function readFile(path)
+    local f = fs.open(path, "r")
+    if not f then
+        return nil
+    end
+    local data = f.readAll()
+    f.close()
+    return data
+end
+
+function writeFile(path, data)
+    local f = fs.open(path, "w")
+    if not f then
+        return false
+    end
+    f.write(data)
+    f.close()
+    return true
+end
+
+function decodeTable(path)
+    if not fs.exists(path) then
+        return nil
+    end
+    local raw=readFile(path)
+    if not raw then
+        return nil
+    end
+    local ok,value=pcall(textutils.unserialize,raw)
+    if not ok or type(value)~="table" then
+        return nil
+    end
+    return value
+end
+
+function saveTable(path,value)
+    local temp=path .. ".new"
+    local backup=path .. ".bak"
+
+    if not writeFile(temp,textutils.serialize(value)) then
+        return false
+    end
+
+    if fs.exists(backup) then
+        fs.delete(backup)
+    end
+
+    if fs.exists(path) then
+        fs.move(path,backup)
+    end
+
+    local ok=pcall(fs.move,temp,path)
+    if not ok then
+        if not fs.exists(path) and fs.exists(backup) then
+            pcall(fs.move,backup,path)
+        end
+        return false
+    end
+
+    return true
+end
+
+function loadTable(path)
+    local value=decodeTable(path)
+    if value then
+        return value
+    end
+    return decodeTable(path .. ".bak")
+end
+
+function saveTableLight(path,value)
+    local temp=path .. ".new"
+
+    if not writeFile(temp,textutils.serialize(value)) then
+        return false
+    end
+
+    if fs.exists(path) then
+        fs.delete(path)
+    end
+
+    local ok=pcall(fs.move,temp,path)
+    if not ok then
+        return false
+    end
+
+    local backup=path .. ".bak"
+    if fs.exists(backup) then
+        pcall(fs.delete,backup)
+    end
+
+    return true
+end
+
+function loadTableLight(path)
+    local value=decodeTable(path)
+    if value then
+        return value
+    end
+
+    value=decodeTable(path .. ".new")
+    if value then
+        return value
+    end
+
+    return decodeTable(path .. ".bak")
+end
+
+function openNetwork()
+    local opened = false
+    for i = 1, #SIDES do
+        local side = SIDES[i]
+        if peripheral.getType(side) == "modem" then
+            rednet.open(side)
+            opened = true
+        end
+    end
+    return opened
+end
+
+function send(id, packet)
+    if id and id ~= os.getComputerID() then
+        rednet.send(id, packet, PROTOCOL)
+    end
+end
+
+function broadcast(packet)
+    rednet.broadcast(packet, PROTOCOL)
+end
+
+function lower(value)
+    return string.lower(tostring(value or ""))
+end
+
+function itemText(item)
+    if type(item) ~= "table" then
+        return ""
+    end
+    return lower(item.name) .. " " .. lower(item.rawName)
+end
+
+function matchesItem(item, kind)
+    local text = itemText(item)
+    if kind == "coal" then
+        return string.find(text, "coal", 1, true) ~= nil
+    elseif kind == "disk_drive" then
+        return string.find(text, "disk drive", 1, true) ~= nil or string.find(text, "diskdrive", 1, true) ~= nil
+    elseif kind == "floppy" then
+        return string.find(text, "floppy", 1, true) ~= nil or (string.find(text, "disk", 1, true) ~= nil and string.find(text, "drive", 1, true) == nil)
+    elseif kind == "wireless_mining_turtle" then
+        return string.find(text, "turtle", 1, true) ~= nil and string.find(text, "wireless", 1, true) ~= nil and string.find(text, "mining", 1, true) ~= nil
+    elseif kind == "narcissistic_wireless_turtle" then
+        return string.find(text, "narcissistic wireless turtle", 1, true) ~= nil
+    elseif kind == "advanced_wireless_turtle" then
+        return string.find(text, "advanced wireless turtle", 1, true) ~= nil
+    elseif kind == "computer" then
+        return string.find(text, "computer", 1, true) ~= nil and
+            string.find(text, "turtle", 1, true) == nil and
+            string.find(text, "pocket", 1, true) == nil
+    elseif kind == "wireless_modem" then
+        return string.find(text, "wireless modem", 1, true) ~= nil or
+            (string.find(text, "modem", 1, true) ~= nil and string.find(text, "wireless", 1, true) ~= nil)
+    end
+    return false
+end
+
+function wrapInventory(side)
+    local p = peripheral.wrap(side)
+    if not p or not p.getInventorySize or not p.getStackInSlot then
+        return nil
+    end
+    return p
+end
+
+function inventorySnapshot(inv)
+    if not inv then
+        return nil
+    end
+
+    if inv.getAllStacks then
+        local ok,all=pcall(inv.getAllStacks)
+        if ok and type(all)=="table" then
+            local items={}
+            for slot,item in pairs(all) do
+                local n=tonumber(slot)
+                if n and item then
+                    items[n]=item
+                end
+            end
+            return items
+        end
+    end
+
+    local size=inv.getInventorySize()
+    local items={}
+
+    for slot=1,size do
+        local ok,item=pcall(inv.getStackInSlot,slot)
+        if ok and item then
+            items[slot]=item
+        end
+    end
+
+    return items
+end
+
+function scanInventory(side)
+    local inv=wrapInventory(side)
+
+    if not inv then
+        return nil,"No OpenPeripheral inventory on " .. side
+    end
+
+    return inventorySnapshot(inv),inv
+end
+
+function findInventorySlot(side, kind)
+    local items, inv = scanInventory(side)
+    if not items then
+        return nil, inv
+    end
+    for slot, item in pairs(items) do
+        if matchesItem(item, kind) then
+            return slot, inv, item
+        end
+    end
+    return nil, inv
+end
+
+function takeNamedFromFront(kind, count, targetSlot)
+    local movedTotal = 0
+
+    while movedTotal < count do
+        local sourceSlot, inv = findInventorySlot("front", kind)
+        if not sourceSlot then
+            break
+        end
+
+        if sourceSlot ~= 1 then
+            if not inv.swapStacks then
+                break
+            end
+            local ok = pcall(inv.swapStacks, sourceSlot, 1)
+            if not ok then
+                break
+            end
+        end
+
+        turtle.select(targetSlot)
+
+        local maxSize = 64
+        local current = turtle.getItemCount(targetSlot)
+        local free = maxSize - current
+        if free <= 0 then
+            break
+        end
+
+        local request = math.min(count - movedTotal, free, 64)
+        local before = current
+
+        if request <= 0 then
+            break
+        end
+
+        turtle.suck(request)
+
+        local moved = turtle.getItemCount(targetSlot) - before
+        if moved <= 0 then
+            break
+        end
+
+        movedTotal = movedTotal + moved
+    end
+
+    return movedTotal
+end
+
+function getSelfInventory()
+    local sides = {"left","right"}
+    for i=1,#sides do
+        local side = sides[i]
+        if peripheral.getType(side) ~= "modem" then
+            local inv = wrapInventory(side)
+            if inv then
+                return inv, side
+            end
+        end
+    end
+    return nil, nil
+end
+
+function selfItem(slot)
+    local inv = getSelfInventory()
+    if not inv then
+        return nil
+    end
+    local ok, item = pcall(inv.getStackInSlot, slot)
+    if ok then
+        return item
+    end
+    return nil
+end
+
+function selfFindSlot(kind)
+    local inv=getSelfInventory()
+    if not inv then
+        return nil
+    end
+
+    local items=inventorySnapshot(inv) or {}
+
+    for slot,item in pairs(items) do
+        if item and matchesItem(item,kind) then
+            return slot,item
+        end
+    end
+
+    return nil
+end
+
+function selfFindSlotExcluding(kind,excluded)
+    local inv=getSelfInventory()
+    if not inv then
+        return nil
+    end
+
+    local items=inventorySnapshot(inv) or {}
+
+    for slot,item in pairs(items) do
+        if slot~=excluded and item and matchesItem(item,kind) then
+            return slot,item
+        end
+    end
+
+    return nil
+end
+
+function selfCountExcluding(kind,excluded)
+    local inv=getSelfInventory()
+    if not inv then
+        return 0
+    end
+
+    local total=0
+    local items=inventorySnapshot(inv) or {}
+
+    for slot,item in pairs(items) do
+        if slot~=excluded and item and matchesItem(item,kind) then
+            total=total+tonumber(item.qty or item.size or 1)
+        end
+    end
+
+    return total
+end
+
+function selfCount(kind)
+    local inv=getSelfInventory()
+    if not inv then
+        return 0
+    end
+
+    local total=0
+    local items=inventorySnapshot(inv) or {}
+
+    for _,item in pairs(items) do
+        if item and matchesItem(item,kind) then
+            total=total+tonumber(item.qty or item.size or 1)
+        end
+    end
+
+    return total
+end
+
+function selfTargetSlot(kind)
+    local inv=getSelfInventory()
+    if not inv then
+        return nil
+    end
+
+    local items=inventorySnapshot(inv) or {}
+    local size=inv.getInventorySize()
+    local empty=nil
+
+    for slot=1,size do
+        local item=items[slot]
+
+        if item then
+            if matchesItem(item,kind) then
+                local qty=tonumber(item.qty or item.size or 1)
+                local maxSize=tonumber(item.maxSize or 64)
+
+                if qty<maxSize then
+                    return slot
+                end
+            end
+        elseif not empty then
+            empty=slot
+        end
+    end
+
+    return empty
+end
+
+function selfTargetSlotExcluding(kind,excluded)
+    local inv=getSelfInventory()
+    if not inv then
+        return nil
+    end
+
+    local items=inventorySnapshot(inv) or {}
+    local size=inv.getInventorySize()
+    local empty=nil
+
+    for slot=1,size do
+        if slot~=excluded then
+            local item=items[slot]
+
+            if item then
+                if matchesItem(item,kind) then
+                    local qty=tonumber(item.qty or item.size or 1)
+                    local maxSize=tonumber(item.maxSize or 64)
+
+                    if qty<maxSize then
+                        return slot
+                    end
+                end
+            elseif not empty then
+                empty=slot
+            end
+        end
+    end
+
+    return empty
+end
+
+function selfEmptySlot()
+    local inv=getSelfInventory()
+    if not inv then
+        return nil
+    end
+
+    local items=inventorySnapshot(inv) or {}
+    local size=inv.getInventorySize()
+
+    for slot=1,size do
+        if not items[slot] then
+            return slot
+        end
+    end
+
+    return nil
+end
+
+function takeNamedIntoSelf(kind, count)
+    local moved = 0
+    while moved < count do
+        local slot = selfTargetSlot(kind)
+        if not slot then
+            break
+        end
+        local before = turtle.getItemCount(slot)
+        local got = takeNamedFromFront(kind, count - moved, slot)
+        if got <= 0 then
+            break
+        end
+        moved = moved + got
+        if turtle.getItemCount(slot) == before then
+            break
+        end
+    end
+    return moved
+end
+
+function selfSelectKind(kind)
+    local slot = selfFindSlot(kind)
+    if not slot then
+        return nil
+    end
+    turtle.select(slot)
+    return slot
+end
+
+function selfDropKind(kind,count)
+    local remaining=count
+
+    while remaining>0 do
+        local slot=selfFindSlot(kind)
+        if not slot then
+            return false
+        end
+
+        turtle.select(slot)
+        local amount=math.min(remaining,turtle.getItemCount(slot))
+
+        if amount<=0 or not turtle.drop(amount) then
+            return false
+        end
+
+        remaining=remaining-amount
+    end
+
+    return true
+end
+
+function selfRefuelTo(target)
+    if turtle.getFuelLevel() == "unlimited" then
+        return true
+    end
+    while turtle.getFuelLevel() < target do
+        local slot = selfFindSlot("coal")
+        if not slot then
+            return false
+        end
+        turtle.select(slot)
+        if not turtle.refuel(1) then
+            return false
+        end
+    end
+    return true
+end
+
+function status(role, state, extra)
+    local managerId=getRegionalManager()
+    if not managerId then
+        return
+    end
+
+    local p = {
+        type = "status",
+        role = role,
+        state = state,
+        id = os.getComputerID(),
+        label = os.getComputerLabel() or "",
+        version = VERSION
+    }
+    if extra then
+        for k, v in pairs(extra) do
+            p[k] = v
+        end
+    end
+    send(managerId, p)
+end
+
+function checkpointPose(role,seq,snapshot,session)
+    local managerId=getRegionalManager()
+    if not managerId then
+        return
+    end
+
+    send(managerId,{
+        type="pose_checkpoint",
+        role=role,
+        id=os.getComputerID(),
+        version=VERSION,
+        session=session,
+        seq=seq or 0,
+        snapshot=snapshot
+    })
+end
+
+function requestPoseBackup(role,timeout,session)
+    local managerId=getRegionalManager()
+    if not managerId or os.getComputerID()==managerId then
+        return nil
+    end
+
+    local id=os.getComputerID()
+    local deadline=now()+(timeout or 5)
+    local lastSend=-10
+
+    while now()<deadline do
+        if now()-lastSend>=1 then
+            send(managerId,{
+                type="recovery_request",
+                role=role,
+                id=id,
+                version=VERSION,
+                session=session
+            })
+            lastSend=now()
+        end
+
+        local sender,message=rednet.receive(PROTOCOL,0.2)
+        if sender==managerId and type(message)=="table" and
+            message.type=="recovery_state" and message.id==id and
+            message.role==role and message.version==VERSION and message.session==session then
+            return message.snapshot,message.seq
+        end
+    end
+
+    return nil
+end
+
+function clearAndPrint(lines)
+    term.clear()
+    term.setCursorPos(1,1)
+    for i = 1, #lines do
+        print(lines[i])
+    end
+end
+
+
+function pairMasterWithRegionalManager()
+    if not openNetwork() then
+        error("Wireless modem not found")
+    end
+
+    local myId=os.getComputerID()
+    local lastBroadcast=0
+
+    while true do
+        if now()-lastBroadcast>=2 then
+            broadcast({
+                type="master_pair_seek",
+                version=VERSION,
+                masterForemanId=myId
+            })
+            lastBroadcast=now()
+        end
+
+        local sender,message=rednet.receive(PROTOCOL,0.5)
+
+        if sender and type(message)=="table" and
+            message.type=="manager_pair_offer" and message.version==VERSION then
+            send(sender,{
+                type="master_pair_accept",
+                version=VERSION,
+                masterForemanId=myId,
+                managerId=sender,
+                nonce=message.nonce
+            })
+
+            local deadline=now()+5
+            while now()<deadline do
+                local s,m=rednet.receive(PROTOCOL,0.5)
+                if s==sender and type(m)=="table" and
+                    m.type=="manager_pair_confirm" and
+                    m.version==VERSION and m.masterForemanId==myId and
+                    m.nonce==message.nonce and m.session then
+                    send(sender,{
+                        type="master_pair_complete",
+                        version=VERSION,
+                        masterForemanId=myId,
+                        managerId=sender,
+                        session=m.session,
+                        nonce=m.nonce
+                    })
+                    setRegionalManager(sender)
+                    return sender,m.session
+                end
+            end
+        end
+    end
+end
+
+function registerNodeWithManager(cfg)
+    local managerId=tonumber(cfg and cfg.managerId)
+    if not managerId then
+        return false
+    end
+
+    setRegionalManager(managerId)
+
+    local packet={
+        type="node_register",
+        version=VERSION,
+        session=cfg.session,
+        id=os.getComputerID(),
+        role=cfg.role,
+        managerId=managerId,
+        masterForemanId=cfg.masterForemanId,
+        number=cfg.number,
+        row=cfg.row,
+        rowStart=cfg.rowStart,
+        rowEnd=cfg.rowEnd,
+        foremanId=cfg.foremanId,
+        foremanNumber=cfg.foremanNumber,
+        x=cfg.x,
+        y=cfg.y,
+        z=cfg.z
+    }
+
+    local deadline=now()+15
+    local lastSend=-10
+
+    while now()<deadline do
+        if now()-lastSend>=1 then
+            send(managerId,packet)
+            lastSend=now()
+        end
+
+        local sender,message=rednet.receive(PROTOCOL,0.5)
+
+        if sender==managerId and type(message)=="table" and
+            message.type=="node_registered" and message.version==VERSION and
+            message.session==cfg.session and message.id==os.getComputerID() then
+            if tonumber(message.managerId)~=managerId or
+                tonumber(message.masterForemanId)~=tonumber(cfg.masterForemanId) then
+                return false
+            end
+
+            if cfg.role=="miner" then
+                if tonumber(message.row)~=tonumber(cfg.row) or
+                    tonumber(message.foremanId)~=tonumber(cfg.foremanId) then
+                    return false
+                end
+            elseif cfg.role=="foreman" then
+                if tonumber(message.number)~=tonumber(cfg.number) then
+                    return false
+                end
+            elseif cfg.role=="navigator" then
+                if tonumber(message.number)~=tonumber(cfg.number) then
+                    return false
+                end
+            end
+
+            return true
+        end
+    end
+
+    return false
+end
+
+function ensureManagerRegistration(cfg)
+    while not registerNodeWithManager(cfg) do
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.white)
+        term.clear()
+        term.setCursorPos(1,1)
+        print("Waiting for Regional Manager...")
+        sleep(2)
+    end
+    return true
+end
+

@@ -1,0 +1,393 @@
+local function runNavigator(cfg)
+    setRegionalManager(cfg.managerId)
+
+    if not openNetwork() then
+        error("Navigator wireless modem not found")
+    end
+
+    local statePath="navigator" .. tostring(cfg.number) .. ".tmp"
+    local state=loadTableLight(statePath) or {
+        x=tonumber(cfg.startX) or 1,
+        y=tonumber(cfg.startY) or 0,
+        z=tonumber(cfg.startZ) or -1,
+        dir=tonumber(cfg.startDir) or DIR_S,
+        orientationCalibrated=false,
+        deployed=cfg.deployed and true or false
+    }
+
+    local function save()
+        saveTableLight(statePath,state)
+    end
+
+    local function turnRight()
+        if not turtle.turnRight() then return false end
+        state.dir=(state.dir+1)%4
+        save()
+        return true
+    end
+
+    local function face(target)
+        target=target%4
+        while state.dir~=target do
+            if not turnRight() then return false end
+        end
+        return true
+    end
+
+    local function step(dir)
+        if not face(dir) then return false end
+        if not turtle.forward() then return false end
+
+        if dir==DIR_N then
+            state.z=state.z+1
+        elseif dir==DIR_E then
+            state.x=state.x+1
+        elseif dir==DIR_S then
+            state.z=state.z-1
+        else
+            state.x=state.x-1
+        end
+
+        save()
+        return true
+    end
+
+    local function vertical(targetY)
+        while state.y<targetY do
+            if not turtle.up() then return false end
+            state.y=state.y+1
+            save()
+        end
+
+        while state.y>targetY do
+            if not turtle.down() then return false end
+            state.y=state.y-1
+            save()
+        end
+
+        return true
+    end
+
+    local function refuelStartupCoal()
+        if turtle.getFuelLevel()=="unlimited" then
+            return true
+        end
+
+        for slot=1,16 do
+            if turtle.getItemCount(slot)>0 then
+                turtle.select(slot)
+                if turtle.refuel(0) then
+                    turtle.refuel()
+                end
+            end
+        end
+
+        turtle.select(1)
+        return turtle.getFuelLevel()=="unlimited" or turtle.getFuelLevel()>0
+    end
+
+    local function calibrateOrientation()
+        if state.orientationCalibrated then
+            return true
+        end
+
+        state.dir=tonumber(cfg.startDir) or state.dir or DIR_S
+
+        if cfg.placementSupported then
+            state.dir=DIR_N
+        else
+            state.dir=DIR_S
+            if not turnRight() then return false end
+            if not turnRight() then return false end
+        end
+
+        state.orientationCalibrated=true
+        save()
+        return state.dir==DIR_N
+    end
+
+    local function announceTraveling()
+        for i=1,3 do
+            send(cfg.controller,{
+                type="navigator_traveling",
+                id=os.getComputerID(),
+                number=cfg.number,
+                x=state.x,
+                y=state.y,
+                z=state.z
+            })
+            sleep(0.1)
+        end
+    end
+
+    local function travelToSite()
+        local site=NAVIGATOR_SITES[cfg.number]
+        if not site then return false end
+
+        if not calibrateOrientation() then
+            return false
+        end
+
+        if not step(DIR_N) then
+            return false
+        end
+
+        if not vertical(1) then
+            return false
+        end
+
+        if cfg.number==4 then
+            if not step(DIR_E) then return false end
+        elseif cfg.number==3 then
+            if not step(DIR_N) then return false end
+        elseif cfg.number==2 then
+            if not step(DIR_W) then return false end
+        end
+
+        announceTraveling()
+
+        if not vertical(site.y) then
+            return false
+        end
+
+        while state.x<site.x do
+            if not step(DIR_E) then return false end
+        end
+        while state.x>site.x do
+            if not step(DIR_W) then return false end
+        end
+        while state.z<site.z do
+            if not step(DIR_N) then return false end
+        end
+        while state.z>site.z do
+            if not step(DIR_S) then return false end
+        end
+
+        state.deployed=true
+        cfg.deployed=true
+        save()
+        saveTable("node.cfg",cfg)
+        return true
+    end
+
+    if not state.deployed then
+        local deployRequested=false
+
+        while not deployRequested do
+            local sender,message=rednet.receive(PROTOCOL,2)
+            if sender==cfg.controller and type(message)=="table" and
+                message.type=="deploy_navigator" and
+                tonumber(message.number)==tonumber(cfg.number) then
+                deployRequested=true
+            end
+        end
+
+        if not refuelStartupCoal() then
+            error("Navigator startup fuel missing")
+        end
+
+        if not travelToSite() then
+            error("Navigator travel blocked")
+        end
+    end
+
+    cfg.x=state.x
+    cfg.y=state.y
+    cfg.z=state.z
+    saveTable("node.cfg",cfg)
+
+    if not ensureManagerRegistration(cfg) then
+        error("Navigator Regional Manager registration failed")
+    end
+
+    local modemSide=nil
+    for _,side in ipairs(SIDES) do
+        if peripheral.getType(side)=="modem" then
+            local ok,wireless=pcall(peripheral.call,side,"isWireless")
+            if ok and wireless then
+                modemSide=side
+                break
+            end
+        end
+    end
+
+    if not modemSide then
+        error("Navigator requires a Wireless Modem")
+    end
+
+    local modem=peripheral.wrap(modemSide)
+    modem.open(gps.CHANNEL_GPS)
+
+    local function clearNavigatorLabel()
+        for i=1,5 do
+            os.setComputerLabel(nil)
+
+            if os.getComputerLabel()==nil then
+                return true
+            end
+
+            sleep(0.1)
+        end
+
+        return os.getComputerLabel()==nil
+    end
+
+    local function recallNavigator(mode)
+        mode=mode or "NORMAL"
+
+        local targetX=0
+        local targetY=1
+        local targetZ=-(tonumber(cfg.number)+1)
+
+        local alreadyHome=
+            state.x==targetX and
+            state.y==targetY and
+            state.z==targetZ
+
+        if not alreadyHome then
+            if state.y<10 then
+                if not vertical(10) then
+                    return false
+                end
+            end
+
+            while state.x<targetX do
+                if not step(DIR_E) then return false end
+            end
+
+            while state.x>targetX do
+                if not step(DIR_W) then return false end
+            end
+
+            while state.z<targetZ do
+                if not step(DIR_N) then return false end
+            end
+
+            while state.z>targetZ do
+                if not step(DIR_S) then return false end
+            end
+
+            if not vertical(targetY) then
+                return false
+            end
+        end
+
+        if not face(DIR_N) then
+            return false
+        end
+
+        state.recalled=true
+        state.recallMode=mode
+        save()
+
+        send(cfg.managerId,{
+            type="recall_home",
+            role="navigator",
+            number=cfg.number,
+            id=os.getComputerID(),
+            mode=mode,
+            x=state.x,
+            y=state.y,
+            z=state.z,
+            dir=state.dir,
+            session=cfg.session
+        })
+
+        if mode=="SHUTDOWN" then
+            if not clearNavigatorLabel() then
+                status("navigator","RECOVERY_LOCK",{
+                    number=cfg.number,
+                    x=state.x,
+                    y=state.y,
+                    z=state.z,
+                    message="Recall home reached but Navigator label could not be cleared"
+                })
+                return false
+            end
+
+            send(cfg.managerId,{
+                type="recall_shutdown_ready",
+                role="navigator",
+                number=cfg.number,
+                id=os.getComputerID(),
+                x=state.x,
+                y=state.y,
+                z=state.z,
+                dir=state.dir,
+                session=cfg.session
+            })
+
+            os.shutdown()
+        end
+
+        return true
+    end
+
+    local function sendNavigatorStatus()
+        status("navigator","GPS_HOST",{
+            number=cfg.number,
+            x=state.x,
+            y=state.y,
+            z=state.z,
+            gpsHost=true,
+            modemSide=modemSide,
+            message="GPS host active"
+        })
+    end
+
+    sendNavigatorStatus()
+
+    local timer=os.startTimer(5)
+
+    while true do
+        local event={os.pullEvent()}
+
+        if event[1]=="modem_message" then
+            local side=event[2]
+            local channel=event[3]
+            local replyChannel=event[4]
+            local message=event[5]
+
+            if side==modemSide and channel==gps.CHANNEL_GPS and message=="PING" then
+                modem.transmit(replyChannel,gps.CHANNEL_GPS,{state.x,state.y,state.z})
+            end
+        elseif event[1]=="rednet_message" then
+            local sender=event[2]
+            local message=event[3]
+            local protocol=event[4]
+
+            if sender==cfg.managerId and protocol==PROTOCOL and type(message)=="table" then
+                if message.type=="status_query" then
+                    sendNavigatorStatus()
+                elseif message.type=="recall_command" then
+                    if not recallNavigator(message.mode or "NORMAL") then
+                        status("navigator","RECALL_BLOCKED",{
+                            number=cfg.number,
+                            x=state.x,
+                            y=state.y,
+                            z=state.z,
+                            message="Navigator recall route blocked"
+                        })
+                    end
+                end
+            end
+        elseif event[1]=="timer" and event[2]==timer then
+            sendNavigatorStatus()
+            timer=os.startTimer(5)
+        end
+    end
+end
+
+
+local cfg=loadTable("node.cfg")
+
+if not cfg or cfg.role~="navigator" then
+    error("Navigator role file requires navigator node.cfg")
+end
+
+if cfg.version~=VERSION then
+    error("Old navigator node state detected")
+end
+
+setRegionalManager(cfg.managerId)
+runNavigator(cfg)

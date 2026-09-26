@@ -25,55 +25,81 @@ local function fetch(name)
     return data
 end
 
+local function loadCfg()
+    local raw=readFile("node.cfg")
+    if not raw then return nil end
+    local ok,value=pcall(textutils.unserialize,raw)
+    if not ok or type(value)~="table" then return nil end
+    return value
+end
+
 local currentStartup=readFile("startup") or ""
 local regional=currentStartup:match("local%s+REGIONAL_MANAGER%s*=%s*(%d+)") or "0"
 local master=currentStartup:match("local%s+MASTER_FOREMAN%s*=%s*(%d+)") or "0"
 
 local remoteVersion=fetch("version")
 if not remoteVersion then
-    if fs.exists("startup") then
-        print("Update server unavailable. Using installed startup.")
-        return
-    end
-    error("No installed startup and update server unavailable")
+    error("Update server unavailable")
 end
 
 remoteVersion=remoteVersion:gsub("%s+$","")
 local localVersion=(readFile("version") or ""):gsub("%s+$","")
 local force=(args[1]~="check")
 
-if not force and localVersion==remoteVersion and fs.exists("startup") then
+local cfg=loadCfg()
+local role
+
+if regional=="1" then
+    role="manager"
+elseif master=="1" then
+    role="foreman"
+elseif cfg and cfg.role then
+    role=cfg.role
+else
+    role="bootstrap"
+end
+
+if not force and localVersion==remoteVersion and fs.exists("startup") and
+    fs.exists("common") and fs.exists(role) then
     print("Already current: " .. remoteVersion)
     return
 end
 
-local startup=fetch("startup")
-local prep=fetch("prep")
+local files={"startup","common",role,"prep"}
+local staged={}
 
-if not startup or not prep then
-    error("Update download incomplete")
+for _,name in ipairs(files) do
+    local data=fetch(name)
+    if not data then
+        error("Update download incomplete: " .. tostring(name))
+    end
+
+    if name=="startup" then
+        data=data:gsub("local%s+REGIONAL_MANAGER%s*=%s*%d+","local REGIONAL_MANAGER = " .. regional,1)
+        data=data:gsub("local%s+MASTER_FOREMAN%s*=%s*%d+","local MASTER_FOREMAN = " .. master,1)
+    end
+
+    if not writeFile(name .. ".new",data) then
+        error("Cannot write " .. name .. ".new")
+    end
+
+    staged[#staged+1]=name
 end
 
-startup=startup:gsub("local%s+REGIONAL_MANAGER%s*=%s*%d+","local REGIONAL_MANAGER = " .. regional,1)
-startup=startup:gsub("local%s+MASTER_FOREMAN%s*=%s*%d+","local MASTER_FOREMAN = " .. master,1)
-
-if not writeFile("startup.new",startup) then
-    error("Cannot write startup.new")
+for _,name in ipairs(staged) do
+    if fs.exists(name) then fs.delete(name) end
+    fs.move(name .. ".new",name)
 end
 
-if not writeFile("prep.new",prep) then
-    fs.delete("startup.new")
-    error("Cannot write prep.new")
+for _,name in ipairs({"bootstrap","miner","foreman","navigator","manager"}) do
+    if name~=role and fs.exists(name) then
+        fs.delete(name)
+    end
 end
-
-if fs.exists("startup") then fs.delete("startup") end
-if fs.exists("prep") then fs.delete("prep") end
-
-fs.move("startup.new","startup")
-fs.move("prep.new","prep")
 
 if not writeFile("version",remoteVersion) then
     error("Cannot write version")
 end
 
 print("Updated to version " .. remoteVersion)
+print("Installed role: " .. role)
