@@ -41,34 +41,36 @@ local function runForeman(cfg)
     state.dir=tonumber(state.dir) or DIR_N
 
     local function foremanPoseValid()
-        return state.x>=0 and state.x<=18 and state.z>=-2 and state.z<=15 and
+        return type(state.x)=="number" and type(state.z)=="number" and
+            state.x>=0 and state.x<=18 and state.z>=-2 and state.z<=15 and
             state.y>=0 and state.y<=1 and state.dir>=DIR_N and state.dir<=DIR_W
     end
 
+    local bootManagerState,bootManagerSeq=requestPoseBackup("foreman",5,cfg.session)
     do
-        local managerState,managerSeq=requestPoseBackup("foreman",5,cfg.session)
-        local managerPoseValid=managerState and
-            type(managerState.x)=="number" and type(managerState.y)=="number" and
-            type(managerState.z)=="number" and type(managerState.dir)=="number"
-
-        if not foremanPoseValid() and managerPoseValid then
-            state=managerState
-            state.motionIntent=nil
-            state.verticalIntent=nil
-            state.turnIntent=nil
-            state.session=cfg.session
-            state.seq=tonumber(managerSeq or managerState.seq or state.seq) or 0
-            saveTableLight(statePath,state)
-        elseif foremanPoseValid() and not state.motionIntent and
-            not state.verticalIntent and not state.turnIntent then
-            checkpointPose("foreman",state.seq,state,cfg.session)
+        local managerState,managerSeq=bootManagerState,bootManagerSeq
+        if managerState and foremanPoseValid() and
+            not state.motionIntent and not state.verticalIntent and not state.turnIntent then
+            local incoming=tonumber(managerSeq or managerState.seq or 0) or 0
+            if incoming>state.seq or
+                (incoming==state.seq and
+                    (managerState.x~=state.x or managerState.y~=state.y or
+                     managerState.z~=state.z or managerState.dir~=state.dir)) then
+                state.recoveryLocked=true
+                state.recoveryReason="Manager and local foreman positions disagree after reboot"
+                state.phase="RECOVERY_LOCK"
+                saveTableLight(statePath,state)
+            end
         end
     end
 
     if state.motionIntent or state.verticalIntent or state.turnIntent then
-        local monitorState,monitorSeq=requestPoseBackup("foreman",5,cfg.session)
+        local monitorState,monitorSeq=bootManagerState,bootManagerSeq
         local intent=state.motionIntent or state.verticalIntent or state.turnIntent
         local intentSeq=tonumber(intent.seq) or (state.seq+1)
+        if not monitorState or tonumber(monitorSeq or monitorState.seq or 0)<intentSeq then
+            monitorState,monitorSeq=requestPoseBackup("foreman",5,cfg.session)
+        end
 
         if monitorState and tonumber(monitorSeq or monitorState.seq or 0)>=intentSeq then
             state=monitorState
@@ -163,7 +165,9 @@ local function runForeman(cfg)
     local lastPeer = 0
 
     local function saveState()
-        saveTableLight(statePath,state)
+        if not saveTableLight(statePath,state) then
+            error("Foreman state write failed; movement halted")
+        end
     end
 
     local function foremanSnapshot()
@@ -395,7 +399,7 @@ local function runForeman(cfg)
                 grantDock()
             end
         else
-            broadcast({
+            send(cfg.controller,{
                 type="dock_request",
                 foremanId=id,
                 number=number
@@ -404,7 +408,7 @@ local function runForeman(cfg)
         local lastRequest = now()
         while not flags.dockGranted do
             if number ~= 1 and now() - lastRequest >= 2 then
-                broadcast({
+                send(cfg.controller,{
                     type="dock_request",
                     foremanId=id,
                     number=number
@@ -436,7 +440,7 @@ local function runForeman(cfg)
         for pid,p in pairs(peers) do
             if pid~=id and p.x==tx and p.z==tz and
                 tonumber(p.y or 0)==tonumber(ty) and
-                now()-(p.lastSeen or 0)<8 then
+                now()-(p.lastSeen or 0)<12 then
                 return pid,p
             end
         end
@@ -3765,30 +3769,28 @@ local function runForeman(cfg)
 
     local function applyManagerForemanPose()
         local snapshot,seq=requestPoseBackup("foreman",5,cfg.session)
-
+        if state.recoveryLocked or not foremanPoseValid() then return false end
         if snapshot and type(snapshot.x)=="number" and type(snapshot.y)=="number" and
             type(snapshot.z)=="number" and type(snapshot.dir)=="number" then
             local incoming=tonumber(seq or snapshot.seq or 0) or 0
-
-            state.x=snapshot.x
-            state.y=snapshot.y
-            state.z=snapshot.z
-            state.dir=snapshot.dir
-            state.seq=incoming
-            state.motionIntent=nil
-            state.verticalIntent=nil
-            state.turnIntent=nil
-            state.recoveryLocked=false
-            state.recoveryReason=nil
-            saveState()
+            if incoming>state.seq or
+                (incoming==state.seq and
+                    (state.x~=snapshot.x or state.y~=snapshot.y or
+                     state.z~=snapshot.z or state.dir~=snapshot.dir)) then
+                state.recoveryLocked=true
+                state.recoveryReason="Cannot verify foreman position against Regional Manager for recall"
+                state.phase="RECOVERY_LOCK"
+                saveState()
+                return false
+            end
+            if state.seq>incoming then checkpointForeman() end
         end
+        return true
     end
 
     local function recallForeman(mode)
         mode=mode or "NORMAL"
-        applyManagerForemanPose()
-
-        if state.recoveryLocked then
+        if not applyManagerForemanPose() then
             sendState("Recall refused: " .. tostring(state.recoveryReason or "pose uncertain"))
             return false
         end
@@ -4118,7 +4120,6 @@ local function runForeman(cfg)
         if state.recoveryLocked then
             state.phase="RECOVERY_LOCK"
             saveState()
-            checkpointForeman()
             while true do
                 sendState("Movement locked: " .. tostring(state.recoveryReason or "pose uncertain"))
                 sleep(5)
@@ -4143,7 +4144,6 @@ local function runForeman(cfg)
                 state.recoveryLocked=true
                 state.recoveryReason="Interrupted Foreman deployment pose is outside its deployment corridor"
                 saveState()
-                checkpointForeman()
                 while true do
                     sendState(state.recoveryReason)
                     sleep(5)
@@ -4186,7 +4186,6 @@ local function runForeman(cfg)
                 state.recoveryLocked=true
                 state.recoveryReason=state.recoveryReason or "Could not resume interrupted Foreman deployment"
                 saveState()
-                checkpointForeman()
                 while true do
                     sendState(state.recoveryReason)
                     sleep(5)
@@ -4303,12 +4302,14 @@ local function runForeman(cfg)
         while true do
             if flags.startMining then
                 flags.startMining=false
-                state.miningStarted=true
-                if state.phase~="RECALLED_PAUSED" then
-                    state.phase="IDLE"
+                if not state.miningStarted then
+                    state.miningStarted=true
+                    if state.phase~="RECALLED_PAUSED" then
+                        state.phase="IDLE"
+                    end
+                    saveState()
+                    sendState("Regional Manager released mining")
                 end
-                saveState()
-                sendState("Regional Manager released mining")
             end
 
             if flags.recallMode then
@@ -4418,8 +4419,8 @@ local function runMaster()
     local newMaster=false
     local id=os.getComputerID()
 
-    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v57.")
+    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 then
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v59.")
     end
 
     if not cfg then
@@ -4526,7 +4527,7 @@ else
         error("Foreman role file requires foreman node.cfg")
     end
 
-    if cfg.version==56 then
+    if cfg.version==56 or cfg.version==57 or cfg.version==58 then
         cfg.version=VERSION
         saveTable("node.cfg",cfg)
     elseif cfg.version~=VERSION then

@@ -1,5 +1,5 @@
-VERSION = 57
-PROTOCOL = "miner_swarm_v57"
+VERSION = 59
+PROTOCOL = "miner_swarm_v59"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -41,7 +41,7 @@ NAVIGATOR_CRUISE = {
 }
 REQUEST_REPEAT = 10
 STATUS_INTERVAL = 10
-PEER_INTERVAL = 2
+PEER_INTERVAL = 4
 MOVE_RESERVE_TIME = 0.2
 MOVE_RETRY_LIMIT = 30
 MINER_FUEL_TARGET = 1200
@@ -133,8 +133,8 @@ function saveTable(path,value)
         fs.move(path,backup)
     end
 
-    local ok=pcall(fs.move,temp,path)
-    if not ok then
+    local ok,moved=pcall(fs.move,temp,path)
+    if not ok or moved==false then
         if not fs.exists(path) and fs.exists(backup) then
             pcall(fs.move,backup,path)
         end
@@ -149,45 +149,65 @@ function loadTable(path)
     if value then
         return value
     end
-    return decodeTable(path .. ".bak")
+    return decodeTable(path .. ".new") or decodeTable(path .. ".bak")
 end
 
 function saveTableLight(path,value)
     local temp=path .. ".new"
+    local backup=path .. ".bak"
+    local generation=(tonumber(value.__saveGeneration) or 0)+1
+    local previous=value.__saveGeneration
+    value.__saveGeneration=generation
 
     if not writeFile(temp,textutils.serialize(value)) then
+        value.__saveGeneration=previous
+        return false
+    end
+
+    if not decodeTable(temp) then
+        value.__saveGeneration=previous
         return false
     end
 
     if fs.exists(path) then
-        fs.delete(path)
+        if fs.exists(backup) then
+            local cleared=pcall(fs.delete,backup)
+            if not cleared then
+                value.__saveGeneration=previous
+                return false
+            end
+        end
+        local rotated=pcall(fs.move,path,backup)
+        if not rotated then
+            value.__saveGeneration=previous
+            return false
+        end
     end
 
-    local ok=pcall(fs.move,temp,path)
-    if not ok then
+    local ok,moved=pcall(fs.move,temp,path)
+    if not ok or moved==false then
+        value.__saveGeneration=previous
         return false
-    end
-
-    local backup=path .. ".bak"
-    if fs.exists(backup) then
-        pcall(fs.delete,backup)
     end
 
     return true
 end
 
 function loadTableLight(path)
-    local value=decodeTable(path)
-    if value then
-        return value
+    local files={path,path .. ".new",path .. ".bak"}
+    local chosen=nil
+    local generation=-1
+    for i=1,#files do
+        local value=decodeTable(files[i])
+        if value then
+            local count=tonumber(value.__saveGeneration) or 0
+            if count>generation then
+                chosen=value
+                generation=count
+            end
+        end
     end
-
-    value=decodeTable(path .. ".new")
-    if value then
-        return value
-    end
-
-    return decodeTable(path .. ".bak")
+    return chosen
 end
 
 function openNetwork()
@@ -685,7 +705,7 @@ function requestPoseBackup(role,timeout,session)
     local lastSend=-10
 
     while now()<deadline do
-        if now()-lastSend>=1 then
+        if now()-lastSend>=2 then
             send(managerId,{
                 type="recovery_request",
                 role=role,
@@ -748,7 +768,7 @@ function pairMasterWithRegionalManager()
             lastLookup=now()
         end
 
-        if now()-lastSeek>=1 then
+        if now()-lastSeek>=2 then
             local packet={
                 type="master_pair_seek",
                 version=VERSION,
@@ -758,9 +778,9 @@ function pairMasterWithRegionalManager()
                 send(lookupId,packet)
                 showPairing("Manager found: " .. tostring(lookupId) .. " / requesting pair")
             else
+                broadcast(packet)
                 showPairing("Searching... broadcasting pair request")
             end
-            broadcast(packet)
             lastSeek=now()
         end
 

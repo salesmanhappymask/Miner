@@ -19,6 +19,21 @@ local function runRegionalManager()
 
     local managerId=os.getComputerID()
     setRegionalManager(managerId)
+    local rawSend=send
+    local rawBroadcast=broadcast
+    local radioWindowStart=now()
+    local radioRxWindow=0
+    local radioTxWindow=0
+    local radioRxRate=0
+    local radioTxRate=0
+    local function send(id,packet)
+        if id and id~=managerId then radioTxWindow=radioTxWindow+1 end
+        rawSend(id,packet)
+    end
+    local function broadcast(packet)
+        radioTxWindow=radioTxWindow+1
+        rawBroadcast(packet)
+    end
     pcall(rednet.unhost,PROTOCOL)
     pcall(rednet.host,PROTOCOL,"regional_manager")
 
@@ -26,18 +41,33 @@ local function runRegionalManager()
     mon.setTextScale(0.5)
 
     local data=loadTableLight("regional_manager.tmp")
+    if not data and
+        (fs.exists("regional_manager.tmp") or fs.exists("regional_manager.tmp.new") or
+         fs.exists("regional_manager.tmp.bak")) then
+        error("Regional Manager state unreadable; refusing to create a new session")
+    end
 
-    if data and data.version==56 then
+    if data and (data.version==56 or data.version==57 or data.version==58) then
         data.version=VERSION
-        saveTableLight("regional_manager.tmp",data)
+        for _,entry in pairs(data.authority or {}) do
+            if type(entry)=="table" then entry.version=VERSION end
+        end
+        if not saveTableLight("regional_manager.tmp",data) then
+            error("Regional Manager migration write failed")
+        end
     elseif data and data.version==55 and
         not next(data.miners or {}) and not next(data.navigators or {}) and
         not (data.foremen and (data.foremen[2] or data.foremen[3] or data.foremen[4])) then
         data.version=VERSION
-        saveTableLight("regional_manager.tmp",data)
+        if not saveTableLight("regional_manager.tmp",data) then
+            error("Regional Manager migration write failed")
+        end
     end
 
-    if not data or data.version~=VERSION then
+    if data and data.version~=VERSION then
+        error("Unsupported Regional Manager state version; refusing to reset the swarm")
+    end
+    if not data then
         data={
             version=VERSION,
             managerId=managerId,
@@ -70,7 +100,9 @@ local function runRegionalManager()
                 targets={miners={},foremen={},navigators={}}
             }
         }
-        saveTableLight("regional_manager.tmp",data)
+        if not saveTableLight("regional_manager.tmp",data) then
+            error("Regional Manager initial state write failed")
+        end
     end
 
     data.managerId=managerId
@@ -159,8 +191,10 @@ local function runRegionalManager()
     end
 
     local function flushManager(force)
-        if managerDirty and (force or now()-lastManagerFlush>=2) then
-            saveTableLight("regional_manager.tmp",data)
+        if managerDirty and (force or now()-lastManagerFlush>=5) then
+            if not saveTableLight("regional_manager.tmp",data) then
+                error("Regional Manager state write failed; dispatch halted")
+            end
             managerDirty=false
             lastManagerFlush=now()
         end
@@ -346,7 +380,10 @@ local function runRegionalManager()
 
         ui.field("ov_pair",3,overviewY+1,w-4,pairText,data.paired and C_TEXT or C_WARN,C_INSET)
         ui.field("ov_state",3,overviewY+2,w-4,"State: " .. stateText,C_SUBTXT,C_INSET)
-        ui.field("ov_jobs",3,overviewY+3,w-4,string.format("Jobs P:%d A:%d B:%d  Nodes:%d/24",pending,activeJobs,blocked,countTable(data.nodes)),blocked>0 and C_WARN or C_MUTED,C_INSET)
+        ui.field("ov_jobs",3,overviewY+3,w-4,
+            string.format("Jobs P:%d A:%d B:%d Nodes:%d/24 Manager RX/TX %.1f/%.1f/s",
+                pending,activeJobs,blocked,countTable(data.nodes),radioRxRate,radioTxRate),
+            blocked>0 and C_WARN or C_MUTED,C_INSET)
 
         local gpsCount=refreshGpsReady()
         local gpsText
@@ -493,6 +530,7 @@ local function runRegionalManager()
             print("Begin miner setup? Y/N")
         end
         print("State: " .. tostring(data.recall.state or "NORMAL"))
+        print(string.format("Manager RX/TX: %.1f/%.1f per second",radioRxRate,radioTxRate))
         local master=data.foremen[1]
         if master and master.setupMissing then
             print("F1 supplies: " .. tostring(master.setupMissing))
@@ -908,12 +946,12 @@ local function runRegionalManager()
     end
 
     local function sendControl(packet,role,doBroadcast)
-        if doBroadcast then
-            broadcast(packet)
-        end
+        local count=0
         forEachKnownNode(role,function(id)
             send(id,packet)
+            count=count+1
         end)
+        if doBroadcast and count==0 then broadcast(packet) end
     end
 
     local function sendRecallToNodes(mode,minersOnly)
@@ -922,7 +960,29 @@ local function runRegionalManager()
             mode=mode,
             session=data.session
         }
-        sendControl(packet,minersOnly and "miner" or nil,not minersOnly)
+        local count=0
+        forEachKnownNode(minersOnly and "miner" or nil,function(id,role,entry)
+            local index=tonumber(role=="miner" and entry.row or entry.number)
+            local home=role=="miner" and data.recall.homeMiners or
+                (role=="foreman" and data.recall.homeForemen or data.recall.homeNavigators)
+            local acknowledged
+            if mode=="SHUTDOWN" then
+                acknowledged=data.recall.shutdown[id]
+            elseif mode=="DUMP" and role=="miner" then
+                acknowledged=index and data.recall.emptied[index]
+            else
+                acknowledged=index and home[index]
+            end
+            if not acknowledged then
+                send(id,packet)
+                count=count+1
+            end
+        end)
+        if count==0 and not next(data.recall.targets.miners or {}) and
+            not next(data.recall.targets.foremen or {}) and
+            not next(data.recall.targets.navigators or {}) then
+            broadcast(packet)
+        end
     end
 
     local function wakeForemenForDump()
@@ -939,8 +999,14 @@ local function runRegionalManager()
             mode="NORMAL",
             session=data.session
         }
-        sendControl(packet,"foreman",false)
-        sendControl(packet,"navigator",false)
+        forEachKnownNode("foreman",function(id,role,entry)
+            local n=tonumber(entry.number)
+            if not n or not data.recall.homeForemen[n] then send(id,packet) end
+        end)
+        forEachKnownNode("navigator",function(id,role,entry)
+            local n=tonumber(entry.number)
+            if not n or not data.recall.homeNavigators[n] then send(id,packet) end
+        end)
     end
 
     local function beginRecall(mode)
@@ -1052,7 +1118,7 @@ local function runRegionalManager()
             type="resume_swarm",
             session=data.session
         },nil,true)
-        resumeUntil=now()+10
+        resumeUntil=now()+15
         lastResumeSend=now()
 
         save()
@@ -1222,16 +1288,21 @@ local function runRegionalManager()
             recallState=data.recall.state
         })
 
-        sendControl({
-            type="status_query",
-            session=data.session
-        },nil,false)
-
         if data.recall.state=="NORMAL" and data.swarmStarted then
-            sendControl({
-                type="start_mining",
-                session=data.session
-            },nil,false)
+            forEachKnownNode(nil,function(id,role,entry)
+                local node
+                if role=="foreman" then
+                    node=data.foremen[tonumber(entry.number)]
+                    if node and not node.miningStarted and online(node,30) then
+                        send(id,{type="start_mining",session=data.session})
+                    end
+                elseif role=="miner" then
+                    node=data.miners[tonumber(entry.row)]
+                    if node and node.state=="WAITING" and online(node,30) then
+                        send(id,{type="start_mining",session=data.session})
+                    end
+                end
+            end)
         end
     end
 
@@ -1244,6 +1315,7 @@ local function runRegionalManager()
     drawTerminal()
     drawMonitor()
     announceManagerOnline()
+    lastQuery=now()
     releaseSwarm()
 
     local timer=os.startTimer(1)
@@ -1257,6 +1329,7 @@ local function runRegionalManager()
             local protocol=event[4]
 
             if protocol==PROTOCOL and type(message)=="table" then
+                radioRxWindow=radioRxWindow+1
                 if message.type=="master_pair_seek" and message.version==VERSION then
                     pairStatus="Pair request from Master " .. tostring(sender)
                     if canReplaceMaster(sender) then
@@ -1603,7 +1676,6 @@ local function runRegionalManager()
                 end
 
                 updateRecallState()
-                drawMonitor()
             end
 
         elseif event[1]=="char" then
@@ -1665,12 +1737,20 @@ local function runRegionalManager()
             end
 
         elseif event[1]=="timer" and event[2]==timer then
+            local elapsed=now()-radioWindowStart
+            if elapsed>=10 then
+                radioRxRate=radioRxWindow/elapsed
+                radioTxRate=radioTxWindow/elapsed
+                radioRxWindow=0
+                radioTxWindow=0
+                radioWindowStart=now()
+            end
             if not data.paired and now()-lastPair>=2 then
                 sendPairOffer(nil)
                 lastPair=now()
             end
 
-            if now()-lastQuery>=10 then
+            if now()-lastQuery>=60 then
                 announceManagerOnline()
                 releaseSwarm()
                 lastQuery=now()
@@ -1715,7 +1795,7 @@ local function runRegionalManager()
                 lastRecall=now()
             end
 
-            if now()<resumeUntil and now()-lastResumeSend>=2 then
+            if now()<resumeUntil and now()-lastResumeSend>=5 then
                 sendControl({
                     type="resume_swarm",
                     session=data.session

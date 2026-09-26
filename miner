@@ -57,10 +57,12 @@ local function runMinerCommissioning(cfg)
         end
     end
 
-    saveTableLight("miner.tmp",state)
+    if not saveTableLight("miner.tmp",state) then error("Miner commissioning state write failed") end
 
     local function save()
-        saveTableLight("miner.tmp",state)
+        if not saveTableLight("miner.tmp",state) then
+            error("Miner commissioning state write failed; movement halted")
+        end
     end
 
     local function ack(packet)
@@ -669,6 +671,11 @@ local function runMiner(cfg)
     cfg.shaftMinZ=tonumber(cfg.shaftMinZ) or 0
     cfg.shaftMaxZ=tonumber(cfg.shaftMaxZ) or 15
 
+    local savedSession=state.session
+    local savedDepth=tonumber(state.depth)
+    local savedPos=tonumber(state.pos)
+    local savedY=tonumber(state.y)
+    local savedZ=tonumber(state.z)
     state.row=cfg.row
     state.session=cfg.session
     state.seq=tonumber(state.seq) or 0
@@ -682,6 +689,14 @@ local function runMiner(cfg)
     state.resumeY=tonumber(state.resumeY) or -(tonumber(state.resumeDepth) or 0)
     state.resumeZ=tonumber(state.resumeZ) or (tonumber(state.resumePos) or 0)
     state.resumeDir=tonumber(state.resumeDir) or DIR_N
+    if (savedSession and savedSession~=cfg.session) or
+        (savedDepth and savedY and savedDepth~=-savedY) or
+        (savedPos and savedZ and savedPos~=savedZ) then
+        state.recoveryLocked=true
+        state.recoveryReason="Miner saved coordinates disagree with their redundant fields"
+        state.phase="RECOVERY_LOCK"
+        saveTableLight(path,state)
+    end
 
     if cfg.row==16 and state.recoveryLocked and
         state.recoveryReason=="Turtle inspect unavailable for safe pack collection" and
@@ -773,23 +788,31 @@ local function runMiner(cfg)
         return true
     end
 
+    local bootManagerState,bootManagerSeq=requestPoseBackup("miner",5,cfg.session)
     do
-        local managerState=requestPoseBackup("miner",5,cfg.session)
-
-        if not poseValid() and managerState and snapshotHasExactPose(managerState) then
-            applySnapshot(managerState)
-            state.motionIntent=nil
-            state.turnIntent=nil
-            saveTableLight(path,state)
-        elseif poseValid() and not state.motionIntent and not state.turnIntent then
-            checkpointPose("miner",state.seq,minerSnapshot(),cfg.session)
+        local managerState,managerSeq=bootManagerState,bootManagerSeq
+        if managerState and snapshotHasExactPose(managerState) and
+            not state.motionIntent and not state.turnIntent then
+            local incoming=tonumber(managerSeq or managerState.seq or 0) or 0
+            if incoming>state.seq or
+                (incoming==state.seq and
+                    (managerState.x~=state.x or managerState.y~=state.y or
+                     managerState.z~=state.z or managerState.dir~=state.dir)) then
+                state.recoveryLocked=true
+                state.recoveryReason="Manager and local miner positions disagree after reboot"
+                state.phase="RECOVERY_LOCK"
+                saveTableLight(path,state)
+            end
         end
     end
 
     if state.motionIntent or state.turnIntent then
-        local monitorState,monitorSeq=requestPoseBackup("miner",5,cfg.session)
+        local monitorState,monitorSeq=bootManagerState,bootManagerSeq
         local intent=state.motionIntent or state.turnIntent
         local intentSeq=tonumber(intent.seq) or (state.seq+1)
+        if not monitorState or tonumber(monitorSeq or monitorState.seq or 0)<intentSeq then
+            monitorState,monitorSeq=requestPoseBackup("miner",5,cfg.session)
+        end
 
         if monitorState and snapshotHasExactPose(monitorState) and
             tonumber(monitorSeq or monitorState.seq or 0)>=intentSeq then
@@ -834,7 +857,7 @@ local function runMiner(cfg)
         end
     end
 
-    if not poseValid() then
+    if not poseValid() and not state.recoveryLocked then
         state.recoveryLocked=true
         state.recoveryReason="Saved miner pose is outside its legal shaft"
         state.phase="RECOVERY_LOCK"
@@ -858,7 +881,10 @@ local function runMiner(cfg)
     local function save()
         state.depth=-state.y
         state.pos=state.z
-        saveTableLight(path,state)
+        if not saveTableLight(path,state) then
+            error("Miner state write failed; movement halted")
+        end
+        return true
     end
 
     local function freeInventorySlots()
@@ -1048,7 +1074,49 @@ local function runMiner(cfg)
         end
     end
 
+    local gpsVerifiedThisBoot=false
+    local gpsRecallAttempted=false
+    local gpsFirstAttempt=true
+    local lastGpsWait=0
+
+    local function verifySurfaceGps()
+        if gpsVerifiedThisBoot or state.y~=cfg.homeY then return true end
+        if state.recallMode and gpsRecallAttempted then return true end
+        if gpsFirstAttempt then
+            gpsFirstAttempt=false
+            sleep((cfg.row-1)*0.15)
+        end
+        while not state.recoveryLocked do
+            local ok,gx,gy,gz=pcall(gps.locate,state.recallMode and 0.5 or 2,false)
+            if ok and type(gx)=="number" and type(gy)=="number" and type(gz)=="number" then
+                if math.abs(gx-state.x)>0.25 or math.abs(gy-state.y)>0.25 or
+                    math.abs(gz-state.z)>0.25 then
+                    state.recoveryLocked=true
+                    state.recoveryReason="GPS position differs from saved miner pose after reboot"
+                    state.phase="RECOVERY_LOCK"
+                    save()
+                    sendState(state.recoveryReason .. " GPS " .. tostring(gx) .. "," ..
+                        tostring(gy) .. "," .. tostring(gz))
+                    return false
+                end
+                gpsVerifiedThisBoot=true
+                return true
+            end
+            if state.recallMode then
+                gpsRecallAttempted=true
+                return true
+            end
+            if now()-lastGpsWait>=5 then
+                sendState("Waiting for four GPS hosts to verify position after reboot")
+                lastGpsWait=now()
+            end
+            sleep(1+(cfg.row%4)*0.2)
+        end
+        return false
+    end
+
     local function beginTranslation(kind,toX,toY,toZ)
+        if state.y==cfg.homeY and not verifySurfaceGps() then return nil end
         if toX~=cfg.row or toY>0 or toZ<0 or toZ>15 then
             state.recoveryLocked=true
             state.recoveryReason="Movement would leave assigned miner shaft"
@@ -1066,7 +1134,14 @@ local function runMiner(cfg)
             to={x=toX,y=toY,z=toZ,dir=state.dir}
         }
         state.motionIntent=intent
-        save()
+        if not save() then
+            state.motionIntent=nil
+            state.recoveryLocked=true
+            state.recoveryReason="Could not persist miner movement intent"
+            state.phase="RECOVERY_LOCK"
+            sendState(state.recoveryReason)
+            return nil
+        end
         return intent
     end
 
@@ -1148,7 +1223,14 @@ local function runMiner(cfg)
             to=to
         }
         state.turnIntent=intent
-        save()
+        if not save() then
+            state.turnIntent=nil
+            state.recoveryLocked=true
+            state.recoveryReason="Could not persist miner turn intent"
+            state.phase="RECOVERY_LOCK"
+            sendState(state.recoveryReason)
+            return false
+        end
 
         local ok
         if right then
@@ -1423,6 +1505,8 @@ local function runMiner(cfg)
             return false
         end
 
+        if not verifySurfaceGps() then return false end
+
         if not face(DIR_S) then
             return false
         end
@@ -1653,60 +1737,23 @@ local function runMiner(cfg)
 
     local function applyManagerRecoveryPose()
         local snapshot,seq=requestPoseBackup("miner",5,cfg.session)
-
-        if not snapshot or snapshot.row~=cfg.row or
-            type(snapshot.x)~="number" or type(snapshot.y)~="number" or
-            type(snapshot.z)~="number" or type(snapshot.dir)~="number" then
-            return true
+        if not snapshot or not snapshotHasExactPose(snapshot) then
+            return poseValid() and not state.recoveryLocked
         end
 
         local incoming=tonumber(seq or snapshot.seq or 0) or 0
-        local localSeq=tonumber(state.seq) or 0
-        local localValid=poseValid()
-        local managerValid=
-            snapshot.originEstablished==true and
-            snapshot.x==cfg.homeX and snapshot.y<=cfg.homeY and
-            snapshot.z>=cfg.shaftMinZ and snapshot.z<=cfg.shaftMaxZ and
-            snapshot.dir>=DIR_N and snapshot.dir<=DIR_W
-
-        if not managerValid then
-            return localValid
-        end
-
-        if localValid and localSeq==incoming then
-            if state.x~=snapshot.x or state.y~=snapshot.y or
-                state.z~=snapshot.z or state.dir~=snapshot.dir then
-                state.recoveryLocked=true
-                state.recoveryReason="Local and Regional Manager poses disagree at the same sequence"
-                state.phase="RECOVERY_LOCK"
-                save()
-                return false
-            end
-            return true
-        end
-
-        if localValid and localSeq>incoming then
-            checkpoint()
-            return true
-        end
-
-        if incoming>localSeq or not localValid then
-            state.x=snapshot.x
-            state.y=snapshot.y
-            state.z=snapshot.z
-            state.dir=snapshot.dir
-            state.depth=-state.y
-            state.pos=state.z
-            state.seq=incoming
-            state.motionIntent=nil
-            state.turnIntent=nil
-            state.recoveryLocked=false
-            state.recoveryReason=nil
+        if not poseValid() or state.recoveryLocked or incoming>state.seq or
+            (incoming==state.seq and
+                (state.x~=snapshot.x or state.y~=snapshot.y or
+                 state.z~=snapshot.z or state.dir~=snapshot.dir)) then
+            state.recoveryLocked=true
+            state.recoveryReason="Cannot verify miner position against Regional Manager for recall"
+            state.phase="RECOVERY_LOCK"
             save()
-            return true
+            return false
         end
-
-        return localValid
+        if state.seq>incoming then checkpoint() end
+        return true
     end
 
     local function recall(mode)
@@ -1886,6 +1933,7 @@ local function runMiner(cfg)
         state.resumeDepth=-resume.y
         state.resumePos=resume.z
         state.phase="RETURNING_MINE"
+        state.recallMode=nil
         save()
 
         if not returnToMine() then
@@ -2045,7 +2093,6 @@ local function runMiner(cfg)
         if state.recoveryLocked then
             state.phase="RECOVERY_LOCK"
             save()
-            checkpoint()
             while true do
                 sendState("Movement locked: " .. tostring(state.recoveryReason or "pose uncertain"))
                 sleep(5)
@@ -2312,7 +2359,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then

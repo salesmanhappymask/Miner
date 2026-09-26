@@ -6,22 +6,72 @@ local function runNavigator(cfg)
     end
 
     local statePath="navigator" .. tostring(cfg.number) .. ".tmp"
-    local state=loadTableLight(statePath) or {
-        x=tonumber(cfg.startX) or 1,
-        y=tonumber(cfg.startY) or 0,
-        z=tonumber(cfg.startZ) or -1,
-        dir=tonumber(cfg.startDir) or DIR_S,
-        orientationCalibrated=false,
-        deployed=cfg.deployed and true or false
-    }
+    local state=loadTableLight(statePath)
+    if not state then
+        state={
+            x=tonumber(cfg.startX) or 1,
+            y=tonumber(cfg.startY) or 0,
+            z=tonumber(cfg.startZ) or -1,
+            dir=tonumber(cfg.startDir) or DIR_S,
+            orientationCalibrated=false,
+            deployed=false
+        }
+        if cfg.deployed or cfg.deploymentStarted then
+            state.recoveryLocked=true
+            state.recoveryReason="Navigator position file missing after deployment"
+        end
+        if not saveTableLight(statePath,state) then error("Navigator state write failed") end
+    end
 
     local function save()
-        saveTableLight(statePath,state)
+        if not saveTableLight(statePath,state) then
+            error("Navigator state write failed; movement halted")
+        end
+    end
+
+    if state.motionIntent then
+        local intent=state.motionIntent
+        local before=intent.fuelBefore
+        local current=turtle.getFuelLevel()
+        if type(before)=="number" and type(current)=="number" and
+            type(intent.from)=="table" and type(intent.to)=="table" then
+            local pose=current<before and intent.to or intent.from
+            state.x=pose.x
+            state.y=pose.y
+            state.z=pose.z
+            state.motionIntent=nil
+            save()
+        else
+            state.recoveryLocked=true
+            state.recoveryReason="Navigator interrupted move has an uncertain position"
+            save()
+        end
+    end
+    if state.turnIntent then
+        state.recoveryLocked=true
+        state.recoveryReason="Navigator interrupted turn has an uncertain direction"
+        save()
+    end
+    if type(state.x)~="number" or type(state.y)~="number" or
+        type(state.z)~="number" or type(state.dir)~="number" or
+        state.x< -2 or state.x>19 or state.z< -2 or state.z>16 or
+        state.y<0 or state.y>18 or state.dir<0 or state.dir>3 then
+        state.recoveryLocked=true
+        state.recoveryReason="Navigator saved pose is outside its operating area"
+        save()
     end
 
     local function turnRight()
-        if not turtle.turnRight() then return false end
-        state.dir=(state.dir+1)%4
+        if state.recoveryLocked then return false end
+        state.turnIntent={from=state.dir,to=(state.dir+1)%4}
+        save()
+        if not turtle.turnRight() then
+            state.turnIntent=nil
+            save()
+            return false
+        end
+        state.dir=state.turnIntent.to
+        state.turnIntent=nil
         save()
         return true
     end
@@ -34,37 +84,51 @@ local function runNavigator(cfg)
         return true
     end
 
-    local function step(dir)
-        if not face(dir) then return false end
-        if not turtle.forward() then return false end
-
-        if dir==DIR_N then
-            state.z=state.z+1
-        elseif dir==DIR_E then
-            state.x=state.x+1
-        elseif dir==DIR_S then
-            state.z=state.z-1
-        else
-            state.x=state.x-1
+    local function moveTracked(kind,tx,ty,tz)
+        if state.recoveryLocked or tx< -2 or tx>19 or tz< -2 or tz>16 or
+            ty<0 or ty>18 then return false end
+        local intent={
+            kind=kind,
+            fuelBefore=turtle.getFuelLevel(),
+            from={x=state.x,y=state.y,z=state.z},
+            to={x=tx,y=ty,z=tz}
+        }
+        state.motionIntent=intent
+        save()
+        local moved
+        if kind=="forward" then moved=turtle.forward()
+        elseif kind=="up" then moved=turtle.up()
+        else moved=turtle.down() end
+        if not moved then
+            state.motionIntent=nil
+            save()
+            return false
         end
-
+        state.x=tx
+        state.y=ty
+        state.z=tz
+        state.motionIntent=nil
         save()
         return true
     end
 
+    local function step(dir)
+        if not face(dir) then return false end
+        local x,z=state.x,state.z
+        if dir==DIR_N then z=z+1
+        elseif dir==DIR_E then x=x+1
+        elseif dir==DIR_S then z=z-1
+        else x=x-1 end
+        return moveTracked("forward",x,state.y,z)
+    end
+
     local function vertical(targetY)
         while state.y<targetY do
-            if not turtle.up() then return false end
-            state.y=state.y+1
-            save()
+            if not moveTracked("up",state.x,state.y+1,state.z) then return false end
         end
-
         while state.y>targetY do
-            if not turtle.down() then return false end
-            state.y=state.y-1
-            save()
+            if not moveTracked("down",state.x,state.y-1,state.z) then return false end
         end
-
         return true
     end
 
@@ -129,8 +193,8 @@ local function runNavigator(cfg)
             return false
         end
 
-        if not step(DIR_N) then
-            return false
+        if state.x==cfg.startX and state.y==cfg.startY and state.z==cfg.startZ then
+            if not step(DIR_N) then return false end
         end
 
         if not vertical(cruise) then
@@ -161,14 +225,24 @@ local function runNavigator(cfg)
         if not vertical(site.y) then return false end
 
         state.deployed=true
+        state.deploying=false
         cfg.deployed=true
         save()
         saveTable("node.cfg",cfg)
         return true
     end
 
+    if state.recoveryLocked then
+        status("navigator","RECOVERY_LOCK",{
+            number=cfg.number,
+            x=state.x,y=state.y,z=state.z,
+            message=state.recoveryReason,session=cfg.session
+        })
+        error(state.recoveryReason)
+    end
+
     if not state.deployed then
-        local deployRequested=false
+        local deployRequested=state.deploying and true or false
 
         while not deployRequested do
             local sender,message=rednet.receive(PROTOCOL,2)
@@ -183,6 +257,11 @@ local function runNavigator(cfg)
             error("Navigator startup fuel missing")
         end
 
+        state.deploying=true
+        cfg.deploymentStarted=true
+        save()
+        if not saveTable("node.cfg",cfg) then error("Navigator deployment marker write failed") end
+
         if not travelToSite() then
             error("Navigator travel blocked")
         end
@@ -191,6 +270,7 @@ local function runNavigator(cfg)
     cfg.x=state.x
     cfg.y=state.y
     cfg.z=state.z
+    cfg.deployed=state.deployed and true or false
     saveTable("node.cfg",cfg)
 
     if not ensureManagerRegistration(cfg) then
@@ -466,7 +546,7 @@ if not cfg or cfg.role~="navigator" then
     error("Navigator role file requires navigator node.cfg")
 end
 
-if cfg.version==56 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then
