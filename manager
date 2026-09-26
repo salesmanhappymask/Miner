@@ -27,6 +27,13 @@ local function runRegionalManager()
 
     local data=loadTableLight("regional_manager.tmp")
 
+    if data and data.version==55 and
+        not next(data.miners or {}) and not next(data.navigators or {}) and
+        not (data.foremen and (data.foremen[2] or data.foremen[3] or data.foremen[4])) then
+        data.version=VERSION
+        saveTableLight("regional_manager.tmp",data)
+    end
+
     if not data or data.version~=VERSION then
         data={
             version=VERSION,

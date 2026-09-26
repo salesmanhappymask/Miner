@@ -3157,13 +3157,20 @@ local function runForeman(cfg)
 
         faceTracked(DIR_N)
 
+        if not wrapInventory("front") then
+            state.setupBlockReason="Supply chest is not readable directly north of Master Foreman"
+            return false
+        end
+
         if not refuelAtFrontTo(FOREMAN_FUEL_TARGET) then
+            state.setupBlockReason="Supply chest needs more coal for Master Foreman fuel"
             return false
         end
 
         local needed = 20 - selfCount("coal")
         if needed > 0 then
             if takeNamedIntoSelf("coal",needed) < needed then
+                state.setupBlockReason="Supply chest needs 20 coal for the four GPS turtles"
                 return false
             end
         end
@@ -3178,18 +3185,26 @@ local function runForeman(cfg)
 
         faceTracked(DIR_N)
 
+        if not wrapInventory("front") then
+            state.setupBlockReason="Supply chest is not readable directly north of Master Foreman"
+            return false
+        end
+
         local needDrives = 1 - selfCount("disk_drive")
         if needDrives > 0 and takeNamedIntoSelf("disk_drive",needDrives) < needDrives then
+            state.setupBlockReason="Cannot pull a Disk Drive from the supply chest"
             return false
         end
 
         local needNavigators = 4 - selfCount("advanced_wireless_turtle")
         if needNavigators > 0 and takeNamedIntoSelf("advanced_wireless_turtle",needNavigators) < needNavigators then
+            state.setupBlockReason="Cannot pull four Advanced Wireless Turtles from the supply chest"
             return false
         end
 
         local needFloppies = 1 - selfCount("floppy")
         if needFloppies > 0 and takeNamedIntoSelf("floppy",needFloppies) < needFloppies then
+            state.setupBlockReason="Cannot pull a floppy from the supply chest"
             return false
         end
 
@@ -3580,6 +3595,7 @@ local function runForeman(cfg)
     end
 
     local function masterSetup()
+        state.setupBlockReason=nil
         state.phase="MASTER_SETUP"
         state.foremenReady = state.foremenReady or {[1]=true}
         cfg.foremen = cfg.foremen or {[1]=id}
@@ -3595,7 +3611,7 @@ local function runForeman(cfg)
             if not masterFuelAndLoadCoal() then
                 state.phase="WAITING_SUPPLIES"
                 saveState()
-                sendState("Need Navigator startup coal and Master Foreman fuel")
+                sendState(state.setupBlockReason or "Need Navigator startup coal and Master Foreman fuel")
                 return false
             end
             state.initialFuelLoaded=true
@@ -3606,7 +3622,7 @@ local function runForeman(cfg)
             if not masterLoadSupplies() then
                 state.phase="WAITING_SUPPLIES"
                 saveState()
-                sendState("Need bootstrap drive, floppy, and four Advanced Wireless Turtles")
+                sendState(state.setupBlockReason or "Need bootstrap drive, floppy, and four Advanced Wireless Turtles")
                 return false
             end
             state.initialSuppliesLoaded=true
@@ -4175,9 +4191,11 @@ local function runForeman(cfg)
                     if flags.recallMode then
                         pauseForSetupRecall()
                     else
-                        state.phase="WAITING_SETUP"
+                        if state.phase~="WAITING_SUPPLIES" and state.phase~="WAITING_SEED_FUEL" then
+                            state.phase="WAITING_SETUP"
+                        end
                         saveState()
-                        sendState("Master setup paused, retrying")
+                        sendState(state.setupBlockReason or "Master setup paused, retrying")
                         sleep(2)
                     end
                 end
@@ -4371,8 +4389,8 @@ local function runMaster()
     local newMaster=false
     local id=os.getComputerID()
 
-    if cfg and cfg.version~=VERSION then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v55.")
+    if cfg and cfg.version~=VERSION and cfg.version~=55 then
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v56.")
     end
 
     if not cfg then

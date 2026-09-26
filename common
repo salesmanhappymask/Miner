@@ -1,5 +1,5 @@
-VERSION = 55
-PROTOCOL = "miner_swarm_v55"
+VERSION = 56
+PROTOCOL = "miner_swarm_v56"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -214,7 +214,9 @@ function itemText(item)
     if type(item) ~= "table" then
         return ""
     end
-    return lower(item.name) .. " " .. lower(item.rawName)
+    return lower(item.id) .. " " .. lower(item.name) .. " " ..
+        lower(item.raw_name) .. " " .. lower(item.rawName) .. " " ..
+        lower(item.display_name) .. " " .. lower(item.displayName)
 end
 
 function enderChestFrequency(item)
@@ -223,7 +225,8 @@ function enderChestFrequency(item)
     if not string.find(text,"ender",1,true) or not string.find(text,"chest",1,true) then
         return nil
     end
-    local damage=tonumber(item.damage or item.itemDamage or item.damageValue or item.metadata or item.meta)
+    local damage=tonumber(item.dmg or item.damage or item.itemDamage or
+        item.damageValue or item.metadata or item.meta)
     if not damage or damage<0 or math.floor(damage/4096)~=0 then return nil end
     return damage%4096
 end
@@ -271,12 +274,16 @@ function inventorySnapshot(inv)
     end
 
     if inv.getAllStacks then
-        local ok,all=pcall(inv.getAllStacks)
+        local ok,all=pcall(inv.getAllStacks,false)
         if ok and type(all)=="table" then
             local items={}
             for slot,item in pairs(all) do
                 local n=tonumber(slot)
                 if n and item then
+                    if type(item)=="table" and type(item.basic)=="function" then
+                        local expanded,basic=pcall(item.basic)
+                        if expanded and type(basic)=="table" then item=basic end
+                    end
                     items[n]=item
                 end
             end
@@ -339,9 +346,14 @@ function takeNamedFromFront(kind, count, targetSlot)
             end
         end
 
+        local frontItem=inventorySnapshot(inv)
+        if not frontItem or not matchesItem(frontItem[1],kind) then
+            break
+        end
+
         turtle.select(targetSlot)
 
-        local maxSize = 64
+        local maxSize = tonumber(frontItem[1].max_size or frontItem[1].maxSize or 64)
         local current = turtle.getItemCount(targetSlot)
         local free = maxSize - current
         if free <= 0 then
@@ -480,7 +492,7 @@ function selfTargetSlot(kind)
         if item then
             if matchesItem(item,kind) then
                 local qty=tonumber(item.qty or item.size or 1)
-                local maxSize=tonumber(item.maxSize or 64)
+                local maxSize=tonumber(item.max_size or item.maxSize or 64)
 
                 if qty<maxSize then
                     return slot
@@ -511,7 +523,7 @@ function selfTargetSlotExcluding(kind,excluded)
             if item then
                 if matchesItem(item,kind) then
                     local qty=tonumber(item.qty or item.size or 1)
-                    local maxSize=tonumber(item.maxSize or 64)
+                    local maxSize=tonumber(item.max_size or item.maxSize or 64)
 
                     if qty<maxSize then
                         return slot
