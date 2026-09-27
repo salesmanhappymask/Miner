@@ -46,7 +46,7 @@ local function runRegionalManager()
         error("Regional Manager state unreadable; refusing to create a new session")
     end
 
-    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65) then
+    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66) then
         data.version=VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end
@@ -1488,7 +1488,7 @@ local function runRegionalManager()
             for n=1,4 do fn("foreman",n,data.foremen[n]) end
         elseif stage=="COLLECT_M" then
             for n=1,4 do
-                local row=(n-1)*4+1
+                local row=(n-1)*4+2
                 fn("miner",row,data.miners[row])
             end
         elseif stage=="MOVE_G" then
@@ -1607,7 +1607,8 @@ local function runRegionalManager()
             if node and node.id and
                 (stage=="RELEASE" or not advance.acks[chunkKey(role,index)]) then
                 send(node.id,{type=stage=="RELEASE" and "chunk_release" or
-                    "chunk_command",stage=stage,chunkIndex=advance.target,
+                    stage=="MOVE_G" and "chunk_move" or "chunk_command",
+                    stage=stage,chunkIndex=advance.target,
                     session=data.session})
             end
         end)
@@ -2194,6 +2195,7 @@ local function runRegionalManager()
             end
 
             flushManager(false)
+            drawTerminal()
             drawMonitor()
             timer=os.startTimer(1)
         end

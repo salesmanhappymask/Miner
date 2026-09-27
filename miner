@@ -1345,8 +1345,8 @@ local function runMiner(cfg)
     end
 
     local function runChestCollection(target)
-        local start=math.floor((cfg.row-1)/4)*4+1
-        if cfg.row~=start or state.recallMode or state.recoveryLocked then return false end
+        local collector=math.floor((cfg.row-1)/4)*4+2
+        if cfg.row~=collector or state.recallMode or state.recoveryLocked then return false end
         if not state.advanceStage and (freeInventorySlots()<2 or
             (turtle.getFuelLevel()~="unlimited" and turtle.getFuelLevel()<24)) then
             sendState("Need two free slots and 24 fuel for chest collection")
@@ -1358,11 +1358,11 @@ local function runMiner(cfg)
         if state.chestProgress<1 and state.x==cfg.row and state.z==-1 then
             state.chestProgress=1
         end
-        if state.chestProgress==2 and state.x==cfg.row+1 and state.z==-1 then
+        if state.chestProgress==2 and state.x==cfg.row-1 and state.z==-1 then
             state.chestProgress=3
         end
-        if state.chestProgress==5 and state.x==cfg.row and state.z==-1 then
-            state.chestProgress=6
+        if state.chestProgress==4 and state.x==cfg.row and state.z==-1 then
+            state.chestProgress=5
         end
         if state.chestProgress==6 and state.x==cfg.row and state.z==0 then
             state.chestProgress=7
@@ -1407,18 +1407,22 @@ local function runMiner(cfg)
             state.chestProgress=1;save()
         end
         if state.chestProgress<2 then
-            if not face(DIR_S) or not digChest("dump") then return false end
+            if not face(DIR_S) or not digChest("fuel") then return false end
             state.chestProgress=2;save()
         end
         if state.chestProgress<3 then
-            if not face(DIR_E) or not attemptForward() then return false end
+            if not face(DIR_W) or not attemptForward() then return false end
             state.chestProgress=3;save()
         end
         if state.chestProgress<4 then
-            if not face(DIR_S) or not digChest("fuel") then return false end
+            if not face(DIR_S) or not digChest("dump") then return false end
             state.chestProgress=4;save()
         end
         if state.chestProgress<5 then
+            if not face(DIR_E) or not attemptForward() then return false end
+            state.chestProgress=5;save()
+        end
+        if state.chestProgress<6 then
             if not face(DIR_E) then return false end
             local slots={state.dumpSlot,state.fuelSlot}
             for _,slot in ipairs(slots) do
@@ -1427,10 +1431,6 @@ local function runMiner(cfg)
                     if not turtle.drop(1) then return false end
                 end
             end
-            state.chestProgress=5;save()
-        end
-        if state.chestProgress<6 then
-            if not face(DIR_W) or not attemptForward() then return false end
             state.chestProgress=6;save()
         end
         if state.chestProgress<7 then
@@ -2632,7 +2632,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then
