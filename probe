@@ -21,7 +21,7 @@ while os.clock()<deadline do
     message={cmd="stop"},
     sProtocol="chunkquarry"
   }
-  modem.transmit(65533,673,packet)
+  modem.transmit(65535,673,packet)
   sent=sent+1
   sleep(1.1)
 end
