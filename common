@@ -1,5 +1,5 @@
-VERSION = 75
-PROTOCOL = "miner_swarm_v75"
+VERSION = 76
+PROTOCOL = "miner_swarm_v76"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -291,6 +291,16 @@ function matchesItem(item, kind)
         return string.find(text, "disk drive", 1, true) ~= nil or string.find(text, "diskdrive", 1, true) ~= nil
     elseif kind == "floppy" then
         return string.find(text, "floppy", 1, true) ~= nil or (string.find(text, "disk", 1, true) ~= nil and string.find(text, "drive", 1, true) == nil)
+    elseif kind == "advanced_wireless_mining_turtle" then
+        return string.find(text, "turtle", 1, true) ~= nil and
+            string.find(text, "advanced", 1, true) ~= nil and
+            string.find(text, "wireless", 1, true) ~= nil and
+            string.find(text, "mining", 1, true) ~= nil
+    elseif kind == "advanced_wireless_narcissistic_turtle" then
+        return string.find(text, "turtle", 1, true) ~= nil and
+            string.find(text, "advanced", 1, true) ~= nil and
+            string.find(text, "wireless", 1, true) ~= nil and
+            string.find(text, "narcissistic", 1, true) ~= nil
     elseif kind == "wireless_mining_turtle" then
         return string.find(text, "turtle", 1, true) ~= nil and string.find(text, "wireless", 1, true) ~= nil and string.find(text, "mining", 1, true) ~= nil
     elseif kind == "narcissistic_wireless_turtle" then
