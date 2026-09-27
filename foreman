@@ -332,6 +332,7 @@ local function runForeman(cfg)
         if active and active.requestId == requestId then
             active.arrived = active.arrived or message.type == "service_arrived"
             if active.service~=message.service and message.service then active.service="BOTH" end
+            active.fuel=message.fuel or active.fuel
             active.lastSeen = now()
             saveQueue()
             return
@@ -340,6 +341,7 @@ local function runForeman(cfg)
             if queue[i].requestId == requestId then
                 queue[i].arrived = queue[i].arrived or message.type == "service_arrived"
                 if queue[i].service~=message.service and message.service then queue[i].service="BOTH" end
+                queue[i].fuel=message.fuel or queue[i].fuel
                 queue[i].lastSeen = now()
                 saveQueue()
                 return
@@ -349,6 +351,7 @@ local function runForeman(cfg)
             requestId=requestId,
             row=message.row,
             service=message.service,
+            fuel=message.fuel,
             minerId=message.minerId,
             arrived=message.type == "service_arrived",
             lastSeen=now()
@@ -1085,7 +1088,7 @@ local function runForeman(cfg)
     end
 
     local function useOwnFuel()
-        if turtle.getFuelLevel()=="unlimited" or turtle.getFuelLevel()>FOREMAN_FUEL_LOW then
+        if turtle.getFuelLevel()=="unlimited" or turtle.getFuelLevel()>=FOREMAN_FUEL_TARGET then
             return true
         end
         return selfRefuelTo(FOREMAN_FUEL_TARGET)
@@ -1331,17 +1334,29 @@ local function runForeman(cfg)
         return true
     end
 
-    local function loadOwnFuel()
+    local function loadOwnFuel(force)
         if turtle.getFuelLevel() == "unlimited" then
             return true
         end
 
-        if turtle.getFuelLevel() > FOREMAN_FUEL_LOW then
-            return true
+        if not state.fuelPending and turtle.getFuelLevel()>FOREMAN_FUEL_LOW and
+            (not force or turtle.getFuelLevel()>=FOREMAN_FUEL_TARGET) then
+            if selfCount("empty_bucket")==0 then return true end
+            if not atFuel() or not returnBucketsAtFuel() then return false end
+            return exitDockHome()
         end
 
+        state.fuelPending=state.fuelPending or turtle.getFuelLevel()<=FOREMAN_FUEL_LOW or
+            (force and turtle.getFuelLevel()<FOREMAN_FUEL_TARGET)
+        saveState()
+
         if useOwnFuel() then
-            return true
+            if selfCount("empty_bucket")>0 then
+                if not atFuel() or not returnBucketsAtFuel() then return false end
+            end
+            state.fuelPending=nil
+            saveState()
+            return exitDockHome()
         end
 
         if not atFuel() then
@@ -1351,15 +1366,14 @@ local function runForeman(cfg)
         local ok = refuelAtFrontTo(FOREMAN_FUEL_TARGET)
 
         if not ok then
-            if turtle.getFuelLevel()>FOREMAN_FUEL_LOW then
-                exitDockHome()
-            end
             state.phase="WAITING_FUEL"
             saveState()
             sendState("Unable to reach foreman fuel target")
             return false
         end
 
+        state.fuelPending=nil
+        saveState()
         return exitDockHome()
     end
 
@@ -1370,10 +1384,7 @@ local function runForeman(cfg)
             local item=selfItem(slot)
             local reserved=number==1 and state.bootstrapDrivePending and state.bootstrapDriveSlot==slot
 
-            local fuelItem=false
-            for _,kind in ipairs(FUEL_PRIORITY) do
-                if matchesItem(item,kind) then fuelItem=true end
-            end
+            local fuelItem=matchesItem(item,"lava_bucket")
             if item and not reserved and not matchesItem(item,"empty_bucket") and not fuelItem then
                 turtle.select(slot)
 
@@ -1412,20 +1423,17 @@ local function runForeman(cfg)
             saveState()
         end
 
-        if selfCount("empty_bucket")>0 or selfCount("lava_bucket")>0 or
-            selfCount("blaze_rod")>0 or selfCount("charcoal")>0 or selfCount("coal")>0 then
+        if selfCount("empty_bucket")>0 or selfCount("lava_bucket")>0 then
             if not atFuel() or not returnBucketsAtFuel() then
                 state.phase="WAITING_FUEL"
                 saveState()
                 sendState("Fuel chest must accept empty buckets")
                 return false
             end
-            for _,kind in ipairs(FUEL_PRIORITY) do
-                while selfCount(kind)>0 do
-                    local slot=selfFindSlot(kind)
-                    turtle.select(slot)
-                    if not turtle.drop() then return false end
-                end
+            while selfCount("lava_bucket")>0 do
+                local slot=selfFindSlot("lava_bucket")
+                turtle.select(slot)
+                if not turtle.drop() then return false end
             end
         end
         return exitDockHome()
@@ -1433,7 +1441,7 @@ local function runForeman(cfg)
 
 
 
-    local function prepareRuntimeService(service)
+    local function prepareRuntimeService(service,req)
         state.phase="PREPARING_SERVICE"
         saveState()
 
@@ -1448,7 +1456,8 @@ local function runForeman(cfg)
                     sendState("Fuel chest cannot accept empty buckets")
                     return false
                 end
-                kind,units=loadFuelPacket(WORKER_FUEL_PACKET)
+                local needed=math.max(1,MINER_FUEL_TARGET-(tonumber(req and req.fuel) or 0))
+                kind,units=loadFuelPacket(needed)
                 if not kind then
                     state.phase="WAITING_FUEL"
                     saveState()
@@ -2434,7 +2443,8 @@ local function runForeman(cfg)
 
         while not fueled do
             if now()-lastFuel>=1 then
-                send(workerId,{type="commission_refuel",fuelKind=setupKind})
+                send(workerId,{type="commission_refuel",fuelKind=setupKind,
+                    fuelUnits=setupUnits})
                 lastFuel=now()
             end
 
@@ -2444,15 +2454,25 @@ local function runForeman(cfg)
 
             if reply then
                 fueled=reply
-                if setupKind=="lava_bucket" and not reply.bucketPresent and not
-                    (state.commissionBucketsRecovered and state.commissionBucketsRecovered[row]) then
+                if reply.fuel~="unlimited" and
+                    (tonumber(reply.fuel) or 0)<MINER_FUEL_TARGET then
+                    state.phase="WAITING_FUEL"
+                    saveState()
+                    sendState("Miner-" .. tostring(row) .. " needs full startup fuel")
+                    return false
+                end
+                local recovered=state.commissionBucketsRecovered and
+                    state.commissionBucketsRecovered[row] or 0
+                if recovered==true then recovered=1 end
+                local expected=setupKind=="lava_bucket" and setupUnits or 0
+                if expected>recovered and
+                    (tonumber(reply.bucketCount) or (reply.bucketPresent and 1 or 0))<expected-recovered then
                     state.phase="WAITING_BUCKET_RETURN"
                     saveState()
                     sendState("Miner-" .. tostring(row) .. " has not returned its empty bucket")
                     return false
                 end
-                if reply.bucketPresent and not
-                    (state.commissionBucketsRecovered and state.commissionBucketsRecovered[row]) then
+                while recovered<expected do
                     local before=selfCount("empty_bucket")
                     if not turtle.suck(1) or selfCount("empty_bucket")<=before then
                         state.phase="WAITING_BUCKET_RETURN"
@@ -2460,8 +2480,9 @@ local function runForeman(cfg)
                         sendState("Cannot retrieve empty bucket from Miner-" .. tostring(row))
                         return false
                     end
+                    recovered=recovered+1
                     state.commissionBucketsRecovered=state.commissionBucketsRecovered or {}
-                    state.commissionBucketsRecovered[row]=true
+                    state.commissionBucketsRecovered[row]=recovered
                     saveState()
                 end
             elseif now()-warning>=10 then
@@ -2564,9 +2585,14 @@ local function runForeman(cfg)
     end
 
     local function returnUnusedFuel()
-        useOwnFuel()
+        if turtle.getFuelLevel()~="unlimited" and
+            turtle.getFuelLevel()<=FOREMAN_FUEL_LOW and not useOwnFuel() then
+            state.fuelPending=true
+            saveState()
+            return false
+        end
         if not atFuel() then return false end
-        for _,kind in ipairs(FUEL_PRIORITY) do
+        for _,kind in ipairs({"lava_bucket"}) do
             while selfCount(kind)>0 do
                 local slot=selfFindSlot(kind)
                 if not slot then return false end
@@ -2585,19 +2611,36 @@ local function runForeman(cfg)
             sendState("Cannot return empty buckets; dock token retained")
             return false
         end
+        if selfCount("blaze_rod")>0 or selfCount("charcoal")>0 or selfCount("coal")>0 then
+            if not atSupply() then return false end
+            for _,kind in ipairs({"blaze_rod","charcoal","coal"}) do
+                while selfCount(kind)>0 do
+                    local slot=selfFindSlot(kind)
+                    if not slot then return false end
+                    turtle.select(slot)
+                    if not turtle.drop() then
+                        state.phase="DOCK_BLOCKED"
+                        saveState()
+                        sendState("Dump ender chest cannot accept unused solid fuel")
+                        return false
+                    end
+                end
+            end
+        end
         return exitDockHome()
     end
 
     local function returnSetupResources()
         local reserved=state.bootstrapDrivePending and state.bootstrapDriveSlot or nil
 
-        useOwnFuel()
+        if turtle.getFuelLevel()~="unlimited" and
+            turtle.getFuelLevel()<=FOREMAN_FUEL_LOW then useOwnFuel() end
 
         if not atFuel() then
             return false
         end
 
-        for _,kind in ipairs(FUEL_PRIORITY) do
+        for _,kind in ipairs({"lava_bucket"}) do
             while selfCount(kind)>0 do
                 local slot=selfFindSlot(kind)
                 if not slot then return false end
@@ -2619,6 +2662,20 @@ local function runForeman(cfg)
 
         if not atSupply() then
             return false
+        end
+
+        for _,kind in ipairs({"blaze_rod","charcoal","coal"}) do
+            while selfCount(kind)>0 do
+                local slot=selfFindSlot(kind)
+                if not slot then return false end
+                turtle.select(slot)
+                if not turtle.drop() then
+                    state.phase="DOCK_BLOCKED"
+                    saveState()
+                    sendState("Dump ender chest cannot accept unused solid fuel")
+                    return false
+                end
+            end
         end
 
         while selfCountExcluding("disk_drive",reserved)>0 do
@@ -2688,7 +2745,7 @@ local function runForeman(cfg)
         end
 
         if not returnBucketsAtFuel() then return false end
-        local kind,units=loadFuelPacket(WORKER_FUEL_PACKET,1)
+        local kind,units=loadFuelPacket(MINER_FUEL_TARGET,1)
         if not kind then
             state.phase="WAITING_FUEL"
             saveState()
@@ -4021,13 +4078,13 @@ local function runForeman(cfg)
             end
         end
 
-        if not loadOwnFuel() then
+        if not loadOwnFuel(true) then
             return false
         end
 
         if not (state.fuelTransferId==req.requestId and
             (req.service=="REFUEL" or req.service=="BOTH")) and
-            not prepareRuntimeService(req.service) then
+            not prepareRuntimeService(req.service,req) then
             return false
         end
 
@@ -4100,6 +4157,20 @@ local function runForeman(cfg)
                 state.phase="SERVICE_TIMEOUT"
                 saveState()
                 sendState("Miner-" .. tostring(req.row) .. " did not return fuel confirmation or bucket")
+                return false
+            end
+            if reply.refueled==false or
+                (reply.fuel~="unlimited" and
+                 (tonumber(reply.fuel) or 0)<MINER_FUEL_TARGET) then
+                req.fuel=reply.fuel
+                state.fuelTransferId=nil
+                state.fuelTransferredUnits=nil
+                state.runtimeFuelKind=nil
+                state.runtimeFuelUnits=nil
+                state.phase="WAITING_FUEL"
+                saveQueue()
+                saveState()
+                sendState("Miner-" .. tostring(req.row) .. " needs more fuel to reach target")
                 return false
             end
             state.fuelTransferId=nil
@@ -4530,11 +4601,16 @@ local function runForeman(cfg)
                     sleep(0.2)
                 end
             elseif not state.advanceStage and not active and #queue==0 and
-                turtle.getFuelLevel()~="unlimited" and
-                turtle.getFuelLevel()<=FOREMAN_FUEL_LOW and
                 now()>=nextIdleFuelAttempt then
-                local fueled=loadOwnFuel()
-                nextIdleFuelAttempt=now()+(fueled and 10 or 30)
+                local low=turtle.getFuelLevel()~="unlimited" and
+                    (turtle.getFuelLevel()<=FOREMAN_FUEL_LOW or state.fuelPending)
+                local excess=selfCount("empty_bucket")>0 or
+                    selfCount("lava_bucket")>0 or selfCount("blaze_rod")>0 or
+                    selfCount("charcoal")>0 or selfCount("coal")>0
+                if low or excess then
+                    local fueled=low and loadOwnFuel() or returnUnusedFuel()
+                    nextIdleFuelAttempt=now()+(fueled and 10 or 30)
+                end
             end
 
             if state.phase~="RECALLED_PAUSED" and not state.advanceStage and not active and #queue>0 then
@@ -4620,8 +4696,8 @@ local function runMaster()
     local newMaster=false
     local id=os.getComputerID()
 
-    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 and cfg.version~=64 and cfg.version~=65 and cfg.version~=66 and cfg.version~=67 and cfg.version~=68 then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v69.")
+    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 and cfg.version~=64 and cfg.version~=65 and cfg.version~=66 and cfg.version~=67 and cfg.version~=68 and cfg.version~=69 and cfg.version~=70 then
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v71.")
     end
 
     if not cfg then
@@ -4728,7 +4804,7 @@ else
         error("Foreman role file requires foreman node.cfg")
     end
 
-    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 then
+    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 then
         cfg.version=VERSION
         saveTable("node.cfg",cfg)
     elseif cfg.version~=VERSION then

@@ -46,7 +46,7 @@ local function runRegionalManager()
         error("Regional Manager state unreadable; refusing to create a new session")
     end
 
-    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68) then
+    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70) then
         data.version=VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end
@@ -868,6 +868,7 @@ local function runRegionalManager()
                 foremanNumber=expectedForemanForRow(row),
                 foremanId=message.foremanId,
                 service=message.service,
+                fuel=message.fuel,
                 status=data.recall.mode and data.recall.mode~="DUMP" and
                     "SUSPENDED" or (message.type=="service_arrived" and "PENDING" or "WAITING_ARRIVAL"),
                 arrived=message.type=="service_arrived",
@@ -878,6 +879,7 @@ local function runRegionalManager()
             data.requests[requestId]=existing
         else
             existing.service=mergeServiceKind(existing.service,message.service)
+            existing.fuel=message.fuel or existing.fuel
             local job=data.foremanJobs[existing.foremanNumber]
             if job and job.requestId==requestId then
                 job.service=existing.service
@@ -984,6 +986,7 @@ local function runRegionalManager()
                         requestId=requestId,
                         row=request.row,
                         service=request.service,
+                        fuel=request.fuel,
                         minerId=request.minerId,
                         assigned=now()
                     }
@@ -1004,6 +1007,7 @@ local function runRegionalManager()
                         requestId=job.requestId,
                         row=job.row,
                         service=job.service,
+                        fuel=request.fuel or job.fuel,
                         minerId=job.minerId,
                         foremanNumber=n,
                         session=data.session
@@ -1500,6 +1504,9 @@ local function runRegionalManager()
             end
             if m.state~="COMPLETE" then
                 return blocked("Miner-"..row.." "..tostring(m.state))
+            end
+            if m.fuel~="unlimited" and (tonumber(m.fuel) or 0)<MINER_FUEL_TARGET then
+                return blocked("Miner-"..row.." awaiting refuel")
             end
             if tonumber(m.chunkIndex or 0)~=data.chunkIndex or
                 tonumber(m.x)~=row or tonumber(m.y)~=0 or tonumber(m.z)~=0 then

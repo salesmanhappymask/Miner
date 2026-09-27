@@ -397,21 +397,32 @@ local function runMinerCommissioning(cfg)
                     })
                 end
             elseif message.type=="commission_refuel" then
-                turtle.select(1)
-                local count=turtle.getItemCount(1)
-
-                if count>0 and turtle.getFuelLevel()~="unlimited" then
-                    while turtle.getItemCount(1)>0 and turtle.refuel(0) and
-                        turtle.getFuelLevel()<MINER_FUEL_TARGET do
+                for slot=1,16 do
+                    turtle.select(slot)
+                    while turtle.getFuelLevel()~="unlimited" and
+                        turtle.getFuelLevel()<MINER_FUEL_TARGET and
+                        turtle.getItemCount(slot)>0 and turtle.refuel(0) do
                         if not turtle.refuel(1) then break end
                     end
                 end
+                local bucketCount=0
+                if message.fuelKind=="lava_bucket" then
+                    for slot=1,16 do
+                        turtle.select(slot)
+                        if turtle.getItemCount(slot)>0 and not turtle.refuel(0) then
+                            local detail=turtle.getItemDetail and turtle.getItemDetail(slot)
+                            if matchesItem(detail,"empty_bucket") or
+                                (not detail and slot<=tonumber(message.fuelUnits or 1)) then
+                                bucketCount=bucketCount+turtle.getItemCount(slot)
+                            end
+                        end
+                    end
+                end
                 turtle.select(1)
-                local bucketPresent=message.fuelKind=="lava_bucket" and
-                    turtle.getItemCount(1)>0 and not turtle.refuel(0)
                 ack({
                     type="commission_refueled",
-                    bucketPresent=bucketPresent and true or false,
+                    bucketPresent=bucketCount>0,
+                    bucketCount=bucketCount,
                     id=os.getComputerID(),
                     row=cfg.row,
                     fuel=turtle.getFuelLevel()
@@ -1686,7 +1697,7 @@ local function runMiner(cfg)
         local fuel = turtle.getFuelLevel()
         local refuel = false
         if fuel ~= "unlimited" then
-            refuel = fuel <= distanceHome() + MINER_SERVICE_RESERVE
+            refuel = fuel <= math.max(distanceHome() + MINER_SERVICE_RESERVE,MINER_FUEL_LOW)
         end
         if dump and refuel then
             return "BOTH"
@@ -1808,32 +1819,46 @@ local function runMiner(cfg)
             return false
         end
         if not face(DIR_S) then return false end
-        if state.request and
-            (state.request.kind=="REFUEL" or state.request.kind=="BOTH") then
-            turtle.select(1)
-            while turtle.getItemCount(1)>0 and turtle.refuel(0) do
-                if not turtle.refuel(1) then return false end
-            end
-            if turtle.getItemCount(1)>0 and not turtle.drop(1) then
-                return false
-            end
-        end
         return true
     end
 
     local function refuelSelf(kind)
-        turtle.select(1)
+        local selected=turtle.getSelectedSlot()
+        local burned={}
         if turtle.getFuelLevel()~="unlimited" then
-            while turtle.getItemCount(1)>0 and turtle.refuel(0) and
-                turtle.getFuelLevel()<MINER_FUEL_TARGET do
-                if not turtle.refuel(1) then break end
+            for _,priority in ipairs(FUEL_PRIORITY) do
+                for slot=1,16 do
+                    local detail=turtle.getItemDetail and turtle.getItemDetail(slot)
+                    if matchesItem(detail,priority) or
+                        (not detail and kind==priority and turtle.getItemCount(slot)>0) then
+                        turtle.select(slot)
+                        while turtle.getFuelLevel()<MINER_FUEL_TARGET and
+                            turtle.getItemCount(slot)>0 and turtle.refuel(0) do
+                            if not turtle.refuel(1) then break end
+                            burned[slot]=true
+                        end
+                    end
+                end
             end
         end
-        if kind=="lava_bucket" and turtle.getItemCount(1)>0 and
-            not turtle.refuel(0) then
-            if not turtle.drop(1) then return false end
+        local returned=true
+        for slot=1,16 do
+            if turtle.getItemCount(slot)>0 then
+                turtle.select(slot)
+                local detail=turtle.getItemDetail and turtle.getItemDetail(slot)
+                local empty=matchesItem(detail,"empty_bucket") or
+                    (kind=="lava_bucket" and burned[slot] and not turtle.refuel(0))
+                local unusedLava=matchesItem(detail,"lava_bucket") or
+                    (kind=="lava_bucket" and turtle.refuel(0) and
+                     not detail and not burned[slot])
+                if empty or unusedLava then
+                    if not turtle.drop() then returned=false end
+                end
+            end
         end
-        return true
+        turtle.select(selected)
+        return turtle.getFuelLevel()=="unlimited" or
+            turtle.getFuelLevel()>=MINER_FUEL_TARGET,returned
     end
 
     local function service(kind,finalService,resumeExisting)
@@ -1921,9 +1946,10 @@ local function runMiner(cfg)
 
             if flags.refuelNow then
                 flags.refuelNow=false
-                local bucketReturned=refuelSelf(state.runtimeFuelKind)
+                local refueled,bucketReturned=refuelSelf(state.runtimeFuelKind)
                 send(cfg.foremanId,{
                     type="refuel_complete",
+                    refueled=refueled,
                     bucketReturned=bucketReturned,
                     row=state.row,
                     requestId=state.request.id,
@@ -2446,7 +2472,8 @@ local function runMiner(cfg)
             end
         end
 
-        if state.complete and not state.advanceStage then
+        if state.complete and not state.advanceStage and not state.request and
+            state.phase~="RECALLED_PAUSED" then
             state.phase="COMPLETE"
             save()
         end
@@ -2463,6 +2490,14 @@ local function runMiner(cfg)
 
         if state.phase=="COMPLETE" or state.advanceStage then
             while true do
+                if not flags.recallMode and not state.advanceStage and
+                    turtle.getFuelLevel()~="unlimited" and
+                    turtle.getFuelLevel()<MINER_FUEL_TARGET then
+                    if not service("REFUEL",true) then return end
+                    state.complete=true
+                    state.phase="COMPLETE"
+                    save()
+                end
                 if flags.recallMode and
                     (not state.advanceStage or state.advanceStage=="CHEST" or
                      state.advanceStage=="WAIT_CHEST") then
@@ -2477,9 +2512,11 @@ local function runMiner(cfg)
             end
         end
 
+        local resumedFinalService=false
         if state.phase=="WAITING_SERVICE" or state.phase=="RETURNING_SERVICE" then
             local kind=state.request and state.request.kind or "DUMP"
             local ok=service(kind,state.request and state.request.finalService,true)
+            resumedFinalService=ok and state.phase=="COMPLETE"
             if not ok and flags.recallMode then
                 if not handleRecallRequest() then return end
             end
@@ -2507,6 +2544,8 @@ local function runMiner(cfg)
             save()
         end
 
+        if resumedFinalService then return end
+
         if state.phase=="MINING" and state.y==0 and not state.complete then
             if not descendMine() then
                 state.complete=true
@@ -2518,11 +2557,13 @@ local function runMiner(cfg)
         local function finishMining()
             sendState("Bedrock reached")
 
-            local serviceOk=service("DUMP",true)
+            local finalKind=turtle.getFuelLevel()~="unlimited" and
+                turtle.getFuelLevel()<=MINER_FUEL_LOW and "BOTH" or "DUMP"
+            local serviceOk=service(finalKind,true)
             if not serviceOk and flags.recallMode then
                 if not handleRecallRequest() then return false end
                 if state.phase=="WAITING_SERVICE" or state.phase=="RETURNING_SERVICE" then
-                    serviceOk=service("DUMP",true,true)
+                    serviceOk=service(finalKind,true,true)
                 end
             end
 
@@ -2545,6 +2586,14 @@ local function runMiner(cfg)
             })
 
             while true do
+                if not flags.recallMode and not state.advanceStage and
+                    turtle.getFuelLevel()~="unlimited" and
+                    turtle.getFuelLevel()<MINER_FUEL_TARGET then
+                    if not service("REFUEL",true) then return false end
+                    state.complete=true
+                    state.phase="COMPLETE"
+                    save()
+                end
                 if flags.recallMode and
                     (not state.advanceStage or state.advanceStage=="CHEST" or
                      state.advanceStage=="WAIT_CHEST") then
@@ -2673,7 +2722,14 @@ local function runMiner(cfg)
         end
     end
 
-    parallel.waitForAny(networkLoop, workLoop)
+    local function runWorkLoop()
+        while true do
+            workLoop()
+            sendState("Miner work loop restarting from saved state")
+            sleep(2)
+        end
+    end
+    parallel.waitForAny(networkLoop, runWorkLoop)
 end
 
 
@@ -2684,7 +2740,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then
