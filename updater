@@ -1,0 +1,111 @@
+local args={...}
+local RAW="https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
+
+local function readFile(path)
+    local f=fs.open(path,"r")
+    if not f then return nil end
+    local data=f.readAll()
+    f.close()
+    return data
+end
+
+local function writeFile(path,data)
+    local f=fs.open(path,"w")
+    if not f then return false end
+    f.write(data)
+    f.close()
+    return true
+end
+
+local function fetch(name)
+    local response=http.get(RAW .. name)
+    if not response then return nil end
+    local data=response.readAll()
+    response.close()
+    return data
+end
+
+local function loadCfg()
+    for _,path in ipairs({"node.cfg","node.cfg.new","node.cfg.bak"}) do
+        local raw=readFile(path)
+        if raw then
+            local ok,value=pcall(textutils.unserialize,raw)
+            if ok and type(value)=="table" then return value end
+        end
+    end
+    if fs.exists("node.cfg") or fs.exists("node.cfg.new") or fs.exists("node.cfg.bak") then
+        error("node.cfg unreadable; updater refused to guess node role")
+    end
+    return nil
+end
+
+local currentStartup=readFile("startup") or ""
+local regional=currentStartup:match("local%s+REGIONAL_MANAGER%s*=%s*(%d+)") or "0"
+local master=currentStartup:match("local%s+MASTER_FOREMAN%s*=%s*(%d+)") or "0"
+
+local remoteVersion=fetch("version")
+if not remoteVersion then
+    error("Update server unavailable")
+end
+
+remoteVersion=remoteVersion:gsub("%s+$","")
+local localVersion=(readFile("version") or ""):gsub("%s+$","")
+local force=(args[1]~="check")
+
+local cfg=loadCfg()
+local role
+
+if regional=="1" then
+    role="manager"
+elseif master=="1" then
+    role="foreman"
+elseif cfg and cfg.role then
+    role=cfg.role
+else
+    role="bootstrap"
+end
+
+if not force and localVersion==remoteVersion and fs.exists("startup") and
+    fs.exists("common") and fs.exists(role) then
+    print("Already current: " .. remoteVersion)
+    return
+end
+
+local files={"startup","common",role,"prep"}
+local staged={}
+
+for _,name in ipairs(files) do
+    local data=fetch(name)
+    if not data then
+        error("Update download incomplete: " .. tostring(name))
+    end
+
+    if name=="startup" then
+        data=data:gsub("local%s+REGIONAL_MANAGER%s*=%s*%d+","local REGIONAL_MANAGER = " .. regional,1)
+        data=data:gsub("local%s+MASTER_FOREMAN%s*=%s*%d+","local MASTER_FOREMAN = " .. master,1)
+    end
+
+    if not writeFile(name .. ".new",data) then
+        error("Cannot write " .. name .. ".new")
+    end
+
+    staged[#staged+1]=name
+end
+
+for _,name in ipairs(staged) do
+    if fs.exists(name) then fs.delete(name) end
+    fs.move(name .. ".new",name)
+end
+
+for _,name in ipairs({"bootstrap","miner","foreman","navigator","manager"}) do
+    if name~=role and fs.exists(name) then
+        fs.delete(name)
+    end
+end
+
+if not writeFile("version",remoteVersion) then
+    error("Cannot write version")
+end
+
+print("Updated to version " .. remoteVersion)
+print("Installed role: " .. role)

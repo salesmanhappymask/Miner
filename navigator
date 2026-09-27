@@ -1,0 +1,589 @@
+local function runNavigator(cfg)
+    setRegionalManager(cfg.managerId)
+
+    if not openNetwork() then
+        error("Navigator wireless modem not found")
+    end
+
+    local statePath="navigator" .. tostring(cfg.number) .. ".tmp"
+    local state=loadTableLight(statePath)
+    if not state then
+        state={
+            x=tonumber(cfg.startX) or 1,
+            y=tonumber(cfg.startY) or 0,
+            z=tonumber(cfg.startZ) or -1,
+            dir=tonumber(cfg.startDir) or DIR_S,
+            orientationCalibrated=false,
+            deployed=false
+        }
+        if cfg.deployed or cfg.deploymentStarted then
+            state.recoveryLocked=true
+            state.recoveryReason="Navigator position file missing after deployment"
+        end
+        if not saveTableLight(statePath,state) then error("Navigator state write failed") end
+    end
+
+    local function save()
+        if not saveTableLight(statePath,state) then
+            error("Navigator state write failed; movement halted")
+        end
+    end
+
+    state.chunkIndex=tonumber(state.chunkIndex) or 0
+    resolveChunkMove(state,function()
+        if not saveTableLight(statePath,state) then error("Navigator move recovery write failed") end
+    end)
+
+    if state.motionIntent then
+        local intent=state.motionIntent
+        local before=intent.fuelBefore
+        local current=turtle.getFuelLevel()
+        if type(before)=="number" and type(current)=="number" and
+            type(intent.from)=="table" and type(intent.to)=="table" then
+            local pose=current<before and intent.to or intent.from
+            state.x=pose.x
+            state.y=pose.y
+            state.z=pose.z
+            state.motionIntent=nil
+            save()
+        else
+            state.recoveryLocked=true
+            state.recoveryReason="Navigator interrupted move has an uncertain position"
+            save()
+        end
+    end
+    if state.turnIntent then
+        state.recoveryLocked=true
+        state.recoveryReason="Navigator interrupted turn has an uncertain direction"
+        save()
+    end
+    if type(state.x)~="number" or type(state.y)~="number" or
+        type(state.z)~="number" or type(state.dir)~="number" or
+        state.x< -2 or state.x>19 or state.z< -2 or state.z>(state.chunkTravel and 31 or 16) or
+        state.y<0 or state.y>18 or state.dir<0 or state.dir>3 then
+        state.recoveryLocked=true
+        state.recoveryReason="Navigator saved pose is outside its operating area"
+        save()
+    end
+
+    local function turnRight()
+        if state.recoveryLocked then return false end
+        state.turnIntent={from=state.dir,to=(state.dir+1)%4}
+        save()
+        if not turtle.turnRight() then
+            state.turnIntent=nil
+            save()
+            return false
+        end
+        state.dir=state.turnIntent.to
+        state.turnIntent=nil
+        save()
+        return true
+    end
+
+    local function face(target)
+        target=target%4
+        while state.dir~=target do
+            if not turnRight() then return false end
+        end
+        return true
+    end
+
+    local function moveTracked(kind,tx,ty,tz)
+        if state.recoveryLocked or tx< -2 or tx>19 or tz< -2 or tz>16 or
+            ty<0 or ty>18 then return false end
+        local intent={
+            kind=kind,
+            fuelBefore=turtle.getFuelLevel(),
+            from={x=state.x,y=state.y,z=state.z},
+            to={x=tx,y=ty,z=tz}
+        }
+        state.motionIntent=intent
+        save()
+        local moved
+        if kind=="forward" then moved=turtle.forward()
+        elseif kind=="up" then moved=turtle.up()
+        else moved=turtle.down() end
+        if not moved then
+            state.motionIntent=nil
+            save()
+            return false
+        end
+        state.x=tx
+        state.y=ty
+        state.z=tz
+        state.motionIntent=nil
+        save()
+        return true
+    end
+
+    local function step(dir)
+        if not face(dir) then return false end
+        local x,z=state.x,state.z
+        if dir==DIR_N then z=z+1
+        elseif dir==DIR_E then x=x+1
+        elseif dir==DIR_S then z=z-1
+        else x=x-1 end
+        return moveTracked("forward",x,state.y,z)
+    end
+
+    local function vertical(targetY)
+        while state.y<targetY do
+            if not moveTracked("up",state.x,state.y+1,state.z) then return false end
+        end
+        while state.y>targetY do
+            if not moveTracked("down",state.x,state.y-1,state.z) then return false end
+        end
+        return true
+    end
+
+    local function refuelStartupFuel()
+        if turtle.getFuelLevel()=="unlimited" then return true end
+        for slot=1,16 do
+            turtle.select(slot)
+            while turtle.getItemCount(slot)>0 and turtle.getFuelLevel()<800 and
+                turtle.refuel(0) do
+                if not turtle.refuel(1) then return false end
+            end
+            if turtle.getItemCount(slot)>0 and not turtle.refuel(0) then
+                if not face(DIR_S) then return false end
+                if not turtle.drop() then return false end
+                if not face(DIR_N) then return false end
+            end
+        end
+        turtle.select(1)
+        return turtle.getFuelLevel()>=800
+    end
+
+    local function calibrateOrientation()
+        if state.orientationCalibrated then
+            return true
+        end
+
+        state.dir=tonumber(cfg.startDir) or state.dir or DIR_S
+
+        if cfg.placementSupported then
+            state.dir=DIR_N
+        else
+            state.dir=DIR_S
+            if not turnRight() then return false end
+            if not turnRight() then return false end
+        end
+
+        state.orientationCalibrated=true
+        save()
+        return state.dir==DIR_N
+    end
+
+    local function announceTraveling()
+        for i=1,3 do
+            send(cfg.controller,{
+                type="navigator_traveling",
+                id=os.getComputerID(),
+                number=cfg.number,
+                x=state.x,
+                y=state.y,
+                z=state.z
+            })
+            sleep(0.1)
+        end
+    end
+
+    local function travelToSite()
+        local site=NAVIGATOR_SITES[cfg.number]
+        local cruise=NAVIGATOR_CRUISE[cfg.number]
+        if not site then return false end
+
+        if not calibrateOrientation() then
+            return false
+        end
+
+        if state.x==cfg.startX and state.y==cfg.startY and state.z==cfg.startZ then
+            if not step(DIR_N) then return false end
+        end
+
+        if not vertical(cruise) then
+            return false
+        end
+
+        if state.x<site.x then
+            if not step(DIR_E) then return false end
+        elseif state.x>site.x then
+            if not step(DIR_W) then return false end
+        end
+
+        announceTraveling()
+
+        while state.x<site.x do
+            if not step(DIR_E) then return false end
+        end
+        while state.x>site.x do
+            if not step(DIR_W) then return false end
+        end
+        while state.z<site.z do
+            if not step(DIR_N) then return false end
+        end
+        while state.z>site.z do
+            if not step(DIR_S) then return false end
+        end
+
+        if not vertical(site.y) then return false end
+
+        state.deployed=true
+        state.deploying=false
+        cfg.deployed=true
+        save()
+        saveTable("node.cfg",cfg)
+        return true
+    end
+
+    if state.recoveryLocked then
+        status("navigator","RECOVERY_LOCK",{
+            number=cfg.number,
+            x=state.x,y=state.y,z=state.z,
+            message=state.recoveryReason,session=cfg.session
+        })
+        error(state.recoveryReason)
+    end
+
+    if not state.deployed then
+        local deployRequested=state.deploying and true or false
+
+        while not deployRequested do
+            local sender,message=rednet.receive(PROTOCOL,2)
+            if sender==cfg.controller and type(message)=="table" and
+                message.type=="deploy_navigator" and
+                tonumber(message.number)==tonumber(cfg.number) then
+                deployRequested=true
+            end
+        end
+
+        if not calibrateOrientation() or not refuelStartupFuel() then
+            error("Navigator startup fuel or bucket return blocked")
+        end
+
+        state.deploying=true
+        cfg.deploymentStarted=true
+        save()
+        if not saveTable("node.cfg",cfg) then error("Navigator deployment marker write failed") end
+
+        if not travelToSite() then
+            error("Navigator travel blocked")
+        end
+    end
+
+    cfg.x=state.x
+    cfg.y=state.y
+    cfg.z=state.z
+    cfg.deployed=state.deployed and true or false
+    saveTable("node.cfg",cfg)
+
+    if not ensureManagerRegistration(cfg) then
+        error("Navigator Regional Manager registration failed")
+    end
+
+    local modemSide=nil
+    for _,side in ipairs(SIDES) do
+        if peripheral.getType(side)=="modem" then
+            local ok,wireless=pcall(peripheral.call,side,"isWireless")
+            if ok and wireless then
+                modemSide=side
+                break
+            end
+        end
+    end
+
+    if not modemSide then
+        error("Navigator requires a Wireless Modem")
+    end
+
+    local modem=peripheral.wrap(modemSide)
+    modem.open(gps.CHANNEL_GPS)
+
+    local function clearNavigatorLabel()
+        for i=1,5 do
+            os.setComputerLabel(nil)
+
+            if os.getComputerLabel()==nil then
+                return true
+            end
+
+            sleep(0.1)
+        end
+
+        return os.getComputerLabel()==nil
+    end
+
+    local function recallNavigator(mode)
+        mode=mode or "NORMAL"
+
+        local target=NAVIGATOR_RECALL[tonumber(cfg.number)]
+        if not target then return false end
+        local targetX=target.x
+        local targetY=target.y
+        local targetZ=target.z
+
+        local alreadyHome=
+            state.x==targetX and
+            state.y==targetY and
+            state.z==targetZ
+
+        if not alreadyHome then
+            if not vertical(NAVIGATOR_CRUISE[cfg.number]) then return false end
+
+            while state.x<targetX do
+                if not step(DIR_E) then return false end
+            end
+
+            while state.x>targetX do
+                if not step(DIR_W) then return false end
+            end
+
+            while state.z<targetZ do
+                if not step(DIR_N) then return false end
+            end
+
+            while state.z>targetZ do
+                if not step(DIR_S) then return false end
+            end
+
+            if not vertical(targetY) then
+                return false
+            end
+        end
+
+        if not face(DIR_N) then
+            return false
+        end
+
+        state.recalled=true
+        state.recallMode=mode
+        save()
+
+        send(cfg.managerId,{
+            type="recall_home",
+            role="navigator",
+            number=cfg.number,
+            id=os.getComputerID(),
+            mode=mode,
+            x=state.x,
+            y=state.y,
+            z=state.z,
+            dir=state.dir,
+            session=cfg.session
+        })
+
+        if mode=="SHUTDOWN" then
+            if not clearNavigatorLabel() then
+                status("navigator","RECOVERY_LOCK",{
+                    number=cfg.number,
+                    x=state.x,
+                    y=state.y,
+                    z=state.z,
+                    message="Recall home reached but Navigator label could not be cleared",
+                    session=cfg.session
+                })
+                return false
+            end
+
+            send(cfg.managerId,{
+                type="recall_shutdown_ready",
+                role="navigator",
+                number=cfg.number,
+                id=os.getComputerID(),
+                x=state.x,
+                y=state.y,
+                z=state.z,
+                dir=state.dir,
+                session=cfg.session
+            })
+
+            os.shutdown()
+        end
+
+        return true
+    end
+
+    local function sendNavigatorStatus()
+        status("navigator",state.chunkTravel and "CHUNK_MOVING" or
+            (state.recalled and "RECALLED_PAUSED" or "GPS_HOST"),{
+            number=cfg.number,
+            x=state.x,
+            y=state.y,
+            z=state.z,
+            chunkIndex=state.chunkIndex,
+            fuel=turtle.getFuelLevel(),
+            gpsHost=not state.recalled and not state.chunkTravel,
+            modemSide=modemSide,
+            message=state.recalled and "Navigator recalled" or "GPS host active",
+            session=cfg.session
+        })
+    end
+
+    local function resumeNavigator()
+        if not state.recalled then
+            return true
+        end
+
+        local site=NAVIGATOR_SITES[cfg.number]
+        if not site then
+            return false
+        end
+
+        if not vertical(NAVIGATOR_CRUISE[cfg.number]) then return false end
+
+        if cfg.number==2 or cfg.number==3 then
+            while state.z<site.z do
+                if not step(DIR_N) then return false end
+            end
+            while state.z>site.z do
+                if not step(DIR_S) then return false end
+            end
+        end
+        while state.x<site.x do
+            if not step(DIR_E) then return false end
+        end
+        while state.x>site.x do
+            if not step(DIR_W) then return false end
+        end
+        if cfg.number~=2 and cfg.number~=3 then
+            while state.z<site.z do
+                if not step(DIR_N) then return false end
+            end
+            while state.z>site.z do
+                if not step(DIR_S) then return false end
+            end
+        end
+
+        if not vertical(site.y) then
+            return false
+        end
+
+        if not face(DIR_N) then
+            return false
+        end
+
+        state.recalled=false
+        state.recallMode=nil
+        save()
+        cfg.x=state.x
+        cfg.y=state.y
+        cfg.z=state.z
+        saveTable("node.cfg",cfg)
+        sendNavigatorStatus()
+        return true
+    end
+
+    sendNavigatorStatus()
+
+    local timer=os.startTimer(5)
+
+    while true do
+        local event={os.pullEvent()}
+
+        if event[1]=="modem_message" then
+            local side=event[2]
+            local channel=event[3]
+            local replyChannel=event[4]
+            local message=event[5]
+
+            if side==modemSide and channel==gps.CHANNEL_GPS and message=="PING" and not state.recalled then
+                modem.transmit(replyChannel,gps.CHANNEL_GPS,{state.x,state.y,
+                    state.z+16*state.chunkIndex})
+            end
+        elseif event[1]=="rednet_message" then
+            local sender=event[2]
+            local message=event[3]
+            local protocol=event[4]
+
+            if sender==cfg.managerId and protocol==PROTOCOL and type(message)=="table" and message.session==cfg.session then
+                if message.type=="status_query" then
+                    sendNavigatorStatus()
+                elseif message.type=="chunk_move" and not state.recalled then
+                    local target=tonumber(message.chunkIndex)
+                    if target and target==state.chunkIndex+1 then
+                        state.chunkTravel=true
+                        save()
+                        local site=NAVIGATOR_SITES[cfg.number]
+                        local ok,reason=travelChunkNorth(state,save,face,site.z,target)
+                        if ok then
+                            state.chunkTravel=nil
+                            save()
+                            sendNavigatorStatus()
+                        else
+                            status("navigator","CHUNK_BLOCKED",{
+                                number=cfg.number,x=state.x,y=state.y,z=state.z,
+                                chunkIndex=state.chunkIndex,message=reason,session=cfg.session
+                            })
+                        end
+                    end
+                    if target==state.chunkIndex and not state.chunkTravel then
+                        send(cfg.managerId,{type="chunk_ack",role="navigator",
+                            number=cfg.number,stage="MOVE_G",chunkIndex=target,
+                            session=cfg.session})
+                    end
+                elseif message.type=="recall_command" then
+                    if not recallNavigator(message.mode or "NORMAL") then
+                        status("navigator","RECALL_BLOCKED",{
+                            number=cfg.number,
+                            x=state.x,
+                            y=state.y,
+                            z=state.z,
+                            message="Navigator recall route blocked",
+                            session=cfg.session
+                        })
+                    end
+                elseif message.type=="pack_clear" and state.recalled and state.recallMode=="PACK" then
+                    if clearNavigatorLabel() then
+                        state.packReady=true
+                        save()
+                        send(cfg.managerId,{
+                            type="pack_ready",role="navigator",number=cfg.number,
+                            session=cfg.session
+                        })
+                    end
+                elseif message.type=="pack_ready_ack" and state.packReady then
+                    state.packAcknowledged=true
+                    save()
+                elseif message.type=="resume_swarm" then
+                    if not resumeNavigator() then
+                        status("navigator","NAVIGATION_ERROR",{
+                            number=cfg.number,
+                            x=state.x,
+                            y=state.y,
+                            z=state.z,
+                            message="Navigator could not return to GPS site",
+                            session=cfg.session
+                        })
+                    end
+                end
+            end
+        elseif event[1]=="timer" and event[2]==timer then
+            sendNavigatorStatus()
+            if state.packReady and not state.packAcknowledged then
+                send(cfg.managerId,{
+                    type="pack_ready",role="navigator",number=cfg.number,
+                    session=cfg.session
+                })
+            end
+            timer=os.startTimer(5)
+        end
+    end
+end
+
+
+local cfg=loadTable("node.cfg")
+
+if not cfg or cfg.role~="navigator" then
+    error("Navigator role file requires navigator node.cfg")
+end
+
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 then
+    cfg.version=VERSION
+    saveTable("node.cfg",cfg)
+elseif cfg.version~=VERSION then
+    error("Old navigator node state detected")
+end
+
+setRegionalManager(cfg.managerId)
+runNavigator(cfg)

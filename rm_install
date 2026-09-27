@@ -1,0 +1,60 @@
+local RAW="https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
+
+if not turtle or not turtle.forward then
+    error("Run rm_install on the designated Advanced Wireless Turtle")
+end
+
+local function fetch(name)
+    local response=http.get(RAW..name)
+    if not response then error("Could not download "..name.."; no files removed") end
+    local body=response.readAll()
+    response.close()
+    if not body or body=="" then error("Empty "..name.."; no files removed") end
+    return body
+end
+
+local files={"updater","startup","common","manager","version"}
+local staged={}
+for _,name in ipairs(files) do staged[name]=fetch(name) end
+local remoteVersion=staged.version:gsub("%s+$","")
+if not tonumber(remoteVersion) or tonumber(remoteVersion)<66 then
+    error("Remote version is older than 66; no files removed")
+end
+staged.startup=staged.startup:gsub("local%s+REGIONAL_MANAGER%s*=%s*%d+",
+    "local REGIONAL_MANAGER = 1",1)
+staged.startup=staged.startup:gsub("local%s+MASTER_FOREMAN%s*=%s*%d+",
+    "local MASTER_FOREMAN = 0",1)
+local compile=loadstring or load
+for _,name in ipairs({"startup","common","manager","updater"}) do
+    if compile and not compile(staged[name],name) then
+        error("Downloaded "..name.." has invalid Lua; no files removed")
+    end
+end
+if not staged.startup:find("local REGIONAL_MANAGER = 1",1,true) or
+    not staged.startup:find("local MASTER_FOREMAN = 0",1,true) then
+    error("Startup role flags unavailable; no files removed")
+end
+
+local function writeFile(name,contents)
+    local f=fs.open(name,"w")
+    if not f then error("Cannot write "..name) end
+    f.write(contents)
+    f.close()
+end
+
+local function clear(path)
+    for _,name in ipairs(fs.list(path)) do
+        local child=fs.combine(path,name)
+        if name~="rom" and not name:match("^disk%d*$") and not fs.isReadOnly(child) and
+            (not fs.getDrive or fs.getDrive(child)=="hdd") then
+            fs.delete(child)
+        end
+    end
+end
+
+clear("")
+for _,name in ipairs(files) do writeFile(name,staged[name]) end
+os.setComputerLabel("Regional Manager")
+local ok=shell.run("updater")
+if not ok then error("Updater failed; downloaded manager files are present") end
+os.reboot()
