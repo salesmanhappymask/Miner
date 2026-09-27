@@ -28,7 +28,15 @@ local function runRegionalManager()
     pcall(rednet.unhost,PROTOCOL)
     pcall(rednet.host,PROTOCOL,"regional_manager")
 
-    local mon=peripheral.getType("right")=="monitor" and peripheral.wrap("right") or nil
+    local function findMonitor()
+        for _,side in ipairs({"left","right","top","bottom","front","back"}) do
+            if peripheral.getType(side)=="monitor" then
+                return side,peripheral.wrap(side)
+            end
+        end
+        return nil,nil
+    end
+    local monitorSide,mon=findMonitor()
     if mon then mon.setTextScale(0.5) end
 
     local data=loadTableLight("regional_manager.tmp")
@@ -38,7 +46,7 @@ local function runRegionalManager()
         error("Regional Manager state unreadable; refusing to create a new session")
     end
 
-    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63) then
+    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64) then
         data.version=VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end
@@ -478,14 +486,16 @@ local function runRegionalManager()
     end
 
     local function drawMonitor()
-        local attached=peripheral.getType("right")=="monitor"
+        local side,attached=findMonitor()
         if not attached then
+            monitorSide=nil
             mon=nil
             monitorButtons={}
             return
         end
-        if not mon then
-            mon=peripheral.wrap("right")
+        if not mon or monitorSide~=side then
+            monitorSide=side
+            mon=attached
             mon.setTextScale(0.5)
             ui=makeUI(mon)
         end
@@ -850,7 +860,8 @@ local function runRegionalManager()
                 foremanNumber=expectedForemanForRow(row),
                 foremanId=message.foremanId,
                 service=message.service,
-                status=message.type=="service_arrived" and "PENDING" or "WAITING_ARRIVAL",
+                status=data.recall.mode and data.recall.mode~="DUMP" and
+                    "SUSPENDED" or (message.type=="service_arrived" and "PENDING" or "WAITING_ARRIVAL"),
                 arrived=message.type=="service_arrived",
                 created=now(),
                 updated=now(),
@@ -1126,6 +1137,7 @@ local function runRegionalManager()
             end
         end
 
+        resumeUntil=0
         data.recall={
             state=mode=="DUMP" and "DUMP_RECALLING" or (mode=="SHUTDOWN" and "SHUTDOWN_RECALL" or (mode=="PACK" and "PACK_RECALL" or "RECALLING")),
             mode=mode,
@@ -1146,15 +1158,17 @@ local function runRegionalManager()
                 end
             end
             data.foremanJobs={}
-            sendRecallToNodes(mode,false)
-        else
-            wakeForemenForDump()
-            sendRecallToNodes("DUMP",true)
         end
 
         lastRecall=now()
         save()
         flushManager(true)
+        if mode=="DUMP" then
+            wakeForemenForDump()
+            sendRecallToNodes("DUMP",true)
+        else
+            sendRecallToNodes(mode,false)
+        end
         drawTerminal()
         drawMonitor()
     end
@@ -1185,15 +1199,15 @@ local function runRegionalManager()
             end
         end
 
-        sendControl({
-            type="resume_swarm",
-            session=data.session
-        },nil,true)
         resumeUntil=now()+15
         lastResumeSend=now()
 
         save()
         flushManager(true)
+        sendControl({
+            type="resume_swarm",
+            session=data.session
+        },nil,true)
         drawTerminal()
         drawMonitor()
     end
@@ -1337,6 +1351,7 @@ local function runRegionalManager()
         data.commissioningComplete=true
         data.swarmStarted=true
         save()
+        flushManager(true)
 
         sendControl({
             type="start_mining",
@@ -2010,7 +2025,7 @@ local function runRegionalManager()
             drawTerminal()
             drawMonitor()
 
-        elseif event[1]=="monitor_touch" and event[2]=="right" then
+        elseif event[1]=="monitor_touch" and event[2]==monitorSide then
             local command=clicked(monitorButtons,event[3],event[4])
             if command then activateCommand(command);drawTerminal();drawMonitor() end
 
@@ -2038,8 +2053,8 @@ local function runRegionalManager()
                 lastQuery=now()
             end
 
-            if now()-lastDispatch>=0.5 and data.recall.mode~="PACK" and data.recall.state~="RECALLED_PAUSED" and
-                data.recall.state~="DUMP_RECALLED_PAUSED" and data.recall.state~="SHUTDOWN_COMPLETE" then
+            if now()-lastDispatch>=0.5 and
+                (data.recall.state=="NORMAL" or data.recall.state=="DUMP_RECALLING") then
                 dispatchJobs()
                 lastDispatch=now()
             end
@@ -2077,7 +2092,7 @@ local function runRegionalManager()
                 lastRecall=now()
             end
 
-            if now()<resumeUntil and now()-lastResumeSend>=5 then
+            if data.recall.state=="NORMAL" and now()<resumeUntil and now()-lastResumeSend>=5 then
                 sendControl({
                     type="resume_swarm",
                     session=data.session

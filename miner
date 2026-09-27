@@ -1064,9 +1064,13 @@ local function runMiner(cfg)
                             save()
                             os.reboot()
                         elseif message.type == "start_mining" then
-                            if not state.advanceStage then flags.start=true end
+                            if not state.advanceStage and not state.recallMode and
+                                state.phase~="RECALLED_PAUSED" and
+                                state.phase~="RECALLING" and not flags.recallMode then
+                                flags.start=true
+                            end
                         elseif message.type=="resume_swarm" then
-                            flags.start=true
+                            if not state.advanceStage then flags.start=true end
                             if state.phase=="RECALLED_PAUSED" or state.phase=="RECALLING" or state.recallMode or state.recallResume or flags.recallMode then
                                 flags.resume=true
                             end
@@ -1113,6 +1117,8 @@ local function runMiner(cfg)
                                     end
                                 end
                             else
+                                flags.start=false
+                                flags.resume=false
                                 flags.recallMode=incomingMode
                             end
                         elseif message.type=="pack_clear" and state.phase=="RECALLED_PAUSED" and
@@ -2005,6 +2011,8 @@ local function runMiner(cfg)
     local function recall(mode)
         mode=mode or flags.recallMode or "NORMAL"
         flags.recallMode=nil
+        flags.start=false
+        flags.resume=false
 
         if not state.recallResume then
             state.recallResume={
@@ -2134,6 +2142,7 @@ local function runMiner(cfg)
     local function resumeFromRecall()
         if not state.recallResume then
             state.phase="WAITING"
+            state.recallMode=nil
             flags.start=true
             save()
             return true
@@ -2145,6 +2154,7 @@ local function runMiner(cfg)
             state.complete=true
             state.phase="COMPLETE"
             state.recallResume=nil
+            state.recallMode=nil
             save()
             return true
         end
@@ -2166,6 +2176,7 @@ local function runMiner(cfg)
             state.phase="WAITING"
             state.recallResume=nil
             state.recallMode=nil
+            flags.start=true
             face(DIR_N)
             save()
             checkpoint()
@@ -2680,7 +2691,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then

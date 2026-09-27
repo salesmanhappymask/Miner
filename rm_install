@@ -17,8 +17,8 @@ local files={"updater","startup","common","manager","version"}
 local staged={}
 for _,name in ipairs(files) do staged[name]=fetch(name) end
 local remoteVersion=staged.version:gsub("%s+$","")
-if not tonumber(remoteVersion) or tonumber(remoteVersion)<64 then
-    error("Remote version is older than 64; no files removed")
+if not tonumber(remoteVersion) or tonumber(remoteVersion)<65 then
+    error("Remote version is older than 65; no files removed")
 end
 staged.startup=staged.startup:gsub("local%s+REGIONAL_MANAGER%s*=%s*%d+",
     "local REGIONAL_MANAGER = 1",1)
