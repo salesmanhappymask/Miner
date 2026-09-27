@@ -689,6 +689,10 @@ local function runMiner(cfg)
     state.y=tonumber(state.y) or -(tonumber(state.depth) or 0)
     state.z=tonumber(state.z) or (tonumber(state.pos) or 0)
     state.dir=tonumber(state.dir) or DIR_N
+    state.chunkIndex=tonumber(state.chunkIndex) or 0
+    resolveChunkMove(state,function()
+        if not saveTableLight(path,state) then error("Miner chunk move recovery write failed") end
+    end)
     state.depth=-state.y
     state.pos=state.z
     state.resumeX=tonumber(state.resumeX) or cfg.row
@@ -713,6 +717,17 @@ local function runMiner(cfg)
     end
 
     local function poseValid()
+        if state.advanceStage=="CHEST" then
+            local clusterStart=math.floor((cfg.row-1)/4)*4+1
+            return cfg.row==clusterStart and state.originEstablished==true and
+                cfg.orientationCalibrated==true and state.y==0 and
+                state.x>=cfg.row and state.x<=cfg.row+1 and
+                state.z>=-1 and state.z<=0
+        end
+        if state.advanceStage=="MOVE" then
+            return state.originEstablished==true and cfg.orientationCalibrated==true and
+                state.y==0 and state.x==cfg.row and state.z>=0 and state.z<=16
+        end
         if cfg.row==16 and (state.phase=="PACK_COLLECT" or state.phase=="PACK_DONE") then
             return state.originEstablished==true and cfg.orientationCalibrated==true and
                 state.x>=1 and state.x<=16 and state.y==0 and state.z==0 and state.dir==DIR_W
@@ -894,7 +909,8 @@ local function runMiner(cfg)
         serviceComplete=false,
         packCollect=false,
         packIdentity=nil,
-        newForeman=nil
+        newForeman=nil,
+        advanceCommand=nil
     }
     local lastStatus = 0
     local lastRequest = 0
@@ -934,6 +950,9 @@ local function runMiner(cfg)
             pos=state.pos,
             fuel=turtle.getFuelLevel(),
             request=state.request and state.request.kind or nil,
+            chunkIndex=state.chunkIndex,
+            advanceStage=state.advanceStage,
+            packMissing=state.packMissing,
             recovery=state.recoveryReason,
             message=message or "",
             session=cfg.session
@@ -1017,8 +1036,35 @@ local function runMiner(cfg)
                             session=cfg.session
                         })
                     elseif sender == cfg.managerId and message.session==cfg.session then
-                        if message.type == "start_mining" then
-                            flags.start=true
+                        if message.type=="chunk_command" and not state.recallMode then
+                            local target=tonumber(message.chunkIndex)
+                            if target==state.chunkIndex+1 and message.stage=="COLLECT_M" and
+                                state.chestCollected then
+                                send(cfg.managerId,{type="chunk_ack",role="miner",
+                                    row=cfg.row,stage="COLLECT_M",chunkIndex=target,
+                                    session=cfg.session})
+                            elseif target==state.chunkIndex and message.stage=="MOVE_M" then
+                                send(cfg.managerId,{type="chunk_ack",role="miner",
+                                    row=cfg.row,stage="MOVE_M",chunkIndex=target,
+                                    session=cfg.session})
+                            elseif target and target==state.chunkIndex+1 and
+                                (message.stage=="COLLECT_M" or message.stage=="MOVE_M") then
+                                flags.advanceCommand={stage=message.stage,target=target}
+                            end
+                        elseif message.type=="chunk_release" and
+                            tonumber(message.chunkIndex)==state.chunkIndex and
+                            state.advanceStage=="WAIT" then
+                            state.advanceStage=nil
+                            state.chestCollected=nil
+                            state.chestProgress=nil
+                            state.dumpSlot=nil
+                            state.fuelSlot=nil
+                            state.complete=false
+                            state.phase="WAITING"
+                            save()
+                            os.reboot()
+                        elseif message.type == "start_mining" then
+                            if not state.advanceStage then flags.start=true end
                         elseif message.type=="resume_swarm" then
                             flags.start=true
                             if state.phase=="RECALLED_PAUSED" or state.phase=="RECALLING" or state.recallMode or state.recallResume or flags.recallMode then
@@ -1127,7 +1173,7 @@ local function runMiner(cfg)
             local ok,gx,gy,gz=pcall(gps.locate,state.recallMode and 0.5 or 2,false)
             if ok and type(gx)=="number" and type(gy)=="number" and type(gz)=="number" then
                 if math.abs(gx-state.x)>0.25 or math.abs(gy-state.y)>0.25 or
-                    math.abs(gz-state.z)>0.25 then
+                    math.abs(gz-(state.z+16*state.chunkIndex))>0.25 then
                     state.recoveryLocked=true
                     state.recoveryReason="GPS position differs from saved miner pose after reboot"
                     state.phase="RECOVERY_LOCK"
@@ -1154,7 +1200,10 @@ local function runMiner(cfg)
 
     local function beginTranslation(kind,toX,toY,toZ)
         if state.y==cfg.homeY and not verifySurfaceGps() then return nil end
-        if toX~=cfg.row or toY>0 or toZ<0 or toZ>15 then
+        local chestMove=state.advanceStage=="CHEST" and
+            toX>=cfg.row and toX<=cfg.row+1 and toY==0 and
+            toZ>=-1 and toZ<=0
+        if not chestMove and (toX~=cfg.row or toY>0 or toZ<0 or toZ>15) then
             state.recoveryLocked=true
             state.recoveryReason="Movement would leave assigned miner shaft"
             state.phase="RECOVERY_LOCK"
@@ -1300,6 +1349,148 @@ local function runMiner(cfg)
             end
         end
         return true
+    end
+
+    local function advanceAck(stage,target)
+        send(cfg.managerId,{type="chunk_ack",role="miner",row=cfg.row,
+            stage=stage,chunkIndex=target,session=cfg.session})
+    end
+
+    local function runChestCollection(target)
+        local start=math.floor((cfg.row-1)/4)*4+1
+        if cfg.row~=start or state.recallMode or state.recoveryLocked then return false end
+        if not state.advanceStage and (freeInventorySlots()<2 or
+            (turtle.getFuelLevel()~="unlimited" and turtle.getFuelLevel()<24)) then
+            sendState("Need two free slots and 24 fuel for chest collection")
+            return false
+        end
+        state.advanceStage="CHEST"
+        state.phase="ADVANCE_CHEST"
+        state.chestProgress=tonumber(state.chestProgress) or 0
+        if state.chestProgress<1 and state.x==cfg.row and state.z==-1 then
+            state.chestProgress=1
+        end
+        if state.chestProgress==2 and state.x==cfg.row+1 and state.z==-1 then
+            state.chestProgress=3
+        end
+        if state.chestProgress==5 and state.x==cfg.row and state.z==-1 then
+            state.chestProgress=6
+        end
+        if state.chestProgress==6 and state.x==cfg.row and state.z==0 then
+            state.chestProgress=7
+        end
+        save()
+        local function changed(before)
+            for slot=1,16 do
+                if turtle.getItemCount(slot)>(before[slot] or 0) then return slot end
+            end
+            return nil
+        end
+        local function digChest(which)
+            local key=which=="dump" and "dumpSlot" or "fuelSlot"
+            if state[key] then return true end
+            if not state.chestIntent then
+                local before={}
+                for slot=1,16 do before[slot]=turtle.getItemCount(slot) end
+                state.chestIntent={kind=which,before=before}
+                save()
+            end
+            local slot=changed(state.chestIntent.before)
+            if not slot and turtle.detect() then
+                if not turtle.dig() then return false end
+                slot=changed(state.chestIntent.before)
+            end
+            if not slot then
+                for attempt=1,3 do
+                    turtle.suck()
+                    slot=changed(state.chestIntent.before)
+                    if slot then break end
+                    sleep(0.2)
+                end
+            end
+            if not slot then return false end
+            state[key]=slot
+            state.chestIntent=nil
+            save()
+            return true
+        end
+        if state.chestProgress<1 then
+            if not face(DIR_S) or not attemptForward() then return false end
+            state.chestProgress=1;save()
+        end
+        if state.chestProgress<2 then
+            if not face(DIR_S) or not digChest("dump") then return false end
+            state.chestProgress=2;save()
+        end
+        if state.chestProgress<3 then
+            if not face(DIR_E) or not attemptForward() then return false end
+            state.chestProgress=3;save()
+        end
+        if state.chestProgress<4 then
+            if not face(DIR_S) or not digChest("fuel") then return false end
+            state.chestProgress=4;save()
+        end
+        if state.chestProgress<5 then
+            if not face(DIR_E) then return false end
+            local slots={state.dumpSlot,state.fuelSlot}
+            for _,slot in ipairs(slots) do
+                if turtle.getItemCount(slot)>0 then
+                    turtle.select(slot)
+                    if not turtle.drop(1) then return false end
+                end
+            end
+            state.chestProgress=5;save()
+        end
+        if state.chestProgress<6 then
+            if not face(DIR_W) or not attemptForward() then return false end
+            state.chestProgress=6;save()
+        end
+        if state.chestProgress<7 then
+            if not face(DIR_N) or not attemptForward() then return false end
+            state.chestProgress=7;save()
+        end
+        state.chestCollected=true
+        state.advanceStage="WAIT_CHEST"
+        state.phase="COMPLETE"
+        save()
+        sendState("Ender chest pair delivered to Foreman-"..tostring(cfg.foremanNumber))
+        advanceAck("COLLECT_M",target)
+        return true
+    end
+
+    local function runChunkMove(target)
+        if state.recoveryLocked or state.recallMode or not state.complete or
+            state.x~=cfg.row or state.y~=0 or state.z<0 or state.z>16 then return false end
+        state.advanceStage="MOVE"
+        state.phase="ADVANCE_MOVE"
+        save()
+        local ok,reason=travelChunkNorth(state,save,face,0,target)
+        if not ok then sendState(reason);return false end
+        state.advanceStage="WAIT"
+        state.phase="ADVANCE_WAIT"
+        state.resumeZ=0
+        save()
+        checkpoint()
+        advanceAck("MOVE_M",target)
+        sendState("Waiting for next chunk release")
+        return true
+    end
+
+    local function runPendingAdvance()
+        local command=flags.advanceCommand
+        if not command then return end
+        flags.advanceCommand=nil
+        if command.stage=="COLLECT_M" and not state.chestCollected then
+            if not runChestCollection(command.target) then
+                sendState("Chest collection blocked; check lane and inventory")
+            end
+        elseif command.stage=="MOVE_M" then
+            if state.chunkIndex>=command.target then
+                advanceAck("MOVE_M",command.target)
+            elseif not runChunkMove(command.target) then
+                sendState("Chunk travel blocked")
+            end
+        end
     end
 
     local function waitBlocked(reason)
@@ -2109,23 +2300,30 @@ local function runMiner(cfg)
                     sendState(state.recoveryReason)
                     return false
                 end
-                state.packStepIntent={stage="DUG"}
-                save()
+                local recovered=false
                 for slot=1,16 do
-                    if turtle.getItemCount(slot)>before[slot] then
-                        local oldSlot=turtle.getSelectedSlot()
-                        turtle.select(slot)
-                        if not turtle.dropUp(turtle.getItemCount(slot)-before[slot]) then
-                            turtle.select(oldSlot)
-                            state.recoveryLocked=true
-                            state.recoveryReason="Cannot discard packed turtle above x=" .. tostring(state.x)
-                            save()
-                            sendState(state.recoveryReason)
-                            return false
+                    if turtle.getItemCount(slot)>before[slot] then recovered=true end
+                end
+                if not recovered then
+                    for attempt=1,3 do
+                        turtle.suck()
+                        for slot=1,16 do
+                            if turtle.getItemCount(slot)>before[slot] then recovered=true end
                         end
-                        turtle.select(oldSlot)
+                        if recovered then break end
+                        sleep(0.2)
                     end
                 end
+                if not recovered then
+                    state.packMissing=state.packMissing or {}
+                    state.packMissing[#state.packMissing+1]=state.x-1
+                    save()
+                    send(cfg.managerId,{type="pack_missing",row=16,
+                        missing=state.x-1,session=cfg.session})
+                    sendState("Miner-"..tostring(state.x-1).." item not collected")
+                end
+                state.packStepIntent={stage="DUG"}
+                save()
             end
             state.packStepIntent.stage="MOVING"
             state.packStepIntent.fuelBefore=turtle.getFuelLevel()
@@ -2153,7 +2351,7 @@ local function runMiner(cfg)
             save()
             checkpoint()
             send(cfg.managerId,{type="pack_progress",row=16,x=state.x,
-                collected=16-state.x,session=cfg.session})
+                collected=16-state.x,missing=state.packMissing,session=cfg.session})
             sendState("Packed " .. tostring(16-state.x) .. "/15; next Miner-" .. tostring(state.x-1))
         end
         os.setComputerLabel(nil)
@@ -2161,7 +2359,7 @@ local function runMiner(cfg)
         state.phase="PACK_DONE"
         save()
         for i=1,5 do
-            send(cfg.managerId,{type="pack_done",row=16,x=state.x,collected=15,session=cfg.session})
+            send(cfg.managerId,{type="pack_done",row=16,x=state.x,collected=15,missing=state.packMissing,session=cfg.session})
             sleep(0.1)
         end
         os.shutdown()
@@ -2223,7 +2421,7 @@ local function runMiner(cfg)
 
         if state.phase=="PACK_DONE" then
             for i=1,5 do
-                send(cfg.managerId,{type="pack_done",row=16,x=state.x,collected=15,session=cfg.session})
+                send(cfg.managerId,{type="pack_done",row=16,x=state.x,collected=15,missing=state.packMissing,session=cfg.session})
                 sleep(0.1)
             end
             os.shutdown()
@@ -2250,7 +2448,7 @@ local function runMiner(cfg)
             end
         end
 
-        if state.complete then
+        if state.complete and not state.advanceStage then
             state.phase="COMPLETE"
             save()
         end
@@ -2265,9 +2463,10 @@ local function runMiner(cfg)
             sleep(0.1)
         end
 
-        if state.phase=="COMPLETE" then
+        if state.phase=="COMPLETE" or state.advanceStage then
             while true do
-                if flags.recallMode then
+                runPendingAdvance()
+                if flags.recallMode and not state.advanceStage then
                     if not handleRecallRequest() then return end
                 elseif flags.resume then
                     flags.resume=false
@@ -2333,6 +2532,7 @@ local function runMiner(cfg)
             state.complete=true
             state.phase="COMPLETE"
             save()
+            sendState("Chunk complete at home")
 
             send(cfg.managerId,{
                 type="miner_complete",
@@ -2344,7 +2544,8 @@ local function runMiner(cfg)
             })
 
             while true do
-                if flags.recallMode then
+                runPendingAdvance()
+                if flags.recallMode and not state.advanceStage then
                     if not handleRecallRequest() then return false end
                 end
                 sleep(0.2)
@@ -2479,7 +2680,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then

@@ -16,15 +16,22 @@ local function writeFile(path,data)
     return true
 end
 
-if peripheral.getType("top")~="drive" then
-    error("Disk Drive must be directly above turtle")
+local driveSide
+if peripheral.getType("top")=="drive" then
+    driveSide="top"
+elseif peripheral.getType("bottom")=="drive" then
+    driveSide="bottom"
+else
+    error("Disk Drive must be directly above or below turtle")
 end
 
 local startup=fetch("startup")
 local common=fetch("common")
 local bootstrap=fetch("bootstrap")
+local foremanInstaller=fetch("install_foreman1")
+local managerInstaller=fetch("rm_install")
 
-if not startup or not common or not bootstrap then
+if not startup or not common or not bootstrap or not foremanInstaller or not managerInstaller then
     error("Could not download modular installer files")
 end
 
@@ -34,10 +41,11 @@ for slot=1,16 do
     if turtle.getItemCount(slot)>0 then
         turtle.select(slot)
 
-        if turtle.dropUp(1) then
+        local deposited=driveSide=="top" and turtle.dropUp(1) or turtle.dropDown(1)
+        if deposited then
             sleep(0.2)
 
-            if disk.isPresent("top") then
+            if disk.isPresent(driveSide) then
                 local files=fs.list("disk")
 
                 for i=1,#files do
@@ -56,11 +64,19 @@ for slot=1,16 do
                     error("Could not write disk/bootstrap")
                 end
 
-                disk.setLabel("top","miner")
+                if not writeFile("disk/install_foreman1",foremanInstaller) then
+                    error("Could not write disk/install_foreman1")
+                end
+
+                if not writeFile("disk/rm_install",managerInstaller) then
+                    error("Could not write disk/rm_install")
+                end
+
+                disk.setLabel(driveSide,"miner")
                 prepared=prepared+1
             end
 
-            turtle.suckUp(1)
+            if driveSide=="top" then turtle.suckUp(1) else turtle.suckDown(1) end
         end
     end
 end

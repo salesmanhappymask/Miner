@@ -38,6 +38,10 @@ local function runForeman(cfg)
     state.session=cfg.session
     state.y=tonumber(state.y) or 0
     state.seq=tonumber(state.seq) or 0
+    state.chunkIndex=tonumber(state.chunkIndex) or 0
+    resolveChunkMove(state,function()
+        if not saveTableLight(statePath,state) then error("Foreman chunk move recovery write failed") end
+    end)
     state.dir=tonumber(state.dir) or DIR_N
 
     local function foremanPoseValid()
@@ -155,7 +159,8 @@ local function runForeman(cfg)
         startMining=false,
         dockGranted=false,
         recallMode=nil,
-        resume=false
+        resume=false,
+        chunkCommand=nil
     }
     local dock = nil
     if number == 1 then
@@ -248,6 +253,9 @@ local function runForeman(cfg)
             y=state.y,
             dir=state.dir,
             seq=state.seq,
+            chunkIndex=state.chunkIndex,
+            advanceStage=state.advanceStage,
+            fuel=turtle.getFuelLevel(),
             queue=#queue + (active and 1 or 0),
             setupDone=state.setupDone and true or false,
             miningStarted=state.miningStarted and true or false,
@@ -1593,6 +1601,13 @@ local function runForeman(cfg)
                         commissionWave[message.number] = nil
                         saveState()
                         pushInbox(sender,message)
+                    elseif sender==cfg.managerId and message.session==cfg.session and
+                        message.type=="chunk_command" then
+                        local target=tonumber(message.chunkIndex)
+                        if target and (target==state.chunkIndex+1 or
+                            target==state.chunkIndex) then
+                            flags.chunkCommand={stage=message.stage,target=target}
+                        end
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type == "start_mining" then
                         flags.startMining = true
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type == "recall_command" then
@@ -4179,6 +4194,87 @@ local function runForeman(cfg)
         return true
     end
 
+    local function chunkAck(stage,target)
+        send(cfg.managerId,{type="chunk_ack",role="foreman",number=number,
+            stage=stage,chunkIndex=target,session=cfg.session})
+    end
+
+    local function runChunkCommand(command)
+        local target=command.target
+        if command.stage=="STAGE_F" then
+            if state.advanceStage=="STAGED" or state.advanceStage=="TRAVEL" or
+                state.chunkIndex==target then
+                chunkAck("STAGE_F",target)
+                return true
+            end
+            if state.recoveryLocked or active or #queue>0 or state.recallMode or
+                state.y~=0 or not state.setupDone or
+                selfCount("ender_dump")>0 or selfCount("ender_fuel")>0 or
+                countRuntimeFreeSlots()<2 or
+                (turtle.getFuelLevel()~="unlimited" and turtle.getFuelLevel()<24) then
+                sendState("Cannot clear chest lane for next chunk")
+                return false
+            end
+            if not goTo(cfg.homeX+2,cfg.homeZ) or not faceTracked(DIR_W) then
+                sendState("Foreman chest staging lane blocked")
+                return false
+            end
+            state.advanceStage="STAGED"
+            state.phase="ADVANCE_STAGED"
+            saveState()
+            checkpointForeman()
+            chunkAck("STAGE_F",target)
+            return true
+        end
+        if command.stage=="VERIFY_F" then
+            if state.advanceStage=="STAGED" and selfCount("ender_dump")>=1 and
+                selfCount("ender_fuel")>=1 then
+                chunkAck("VERIFY_F",target)
+                return true
+            end
+            sendState("Missing dump or fuel Ender Chest after handoff")
+            return false
+        end
+        if command.stage=="MOVE_F" then
+            if state.chunkIndex==target and not state.advanceStage then
+                chunkAck("MOVE_F",target)
+                return true
+            end
+            if (target~=state.chunkIndex+1 and target~=state.chunkIndex) or
+                (state.advanceStage~="STAGED" and state.advanceStage~="TRAVEL") then
+                return false
+            end
+            if state.chunkIndex<target and
+                (selfCount("ender_dump")<1 or selfCount("ender_fuel")<1) then
+                sendState("Chest handoff incomplete or wrong Ender Chest frequencies")
+                return false
+            end
+            state.advanceStage="TRAVEL"
+            state.phase="ADVANCE_TRAVEL"
+            saveState()
+            if state.chunkIndex<target then
+                local ok,reason=travelChunkNorth(state,saveState,faceTracked,cfg.homeZ,target)
+                if not ok then sendState(reason);return false end
+                checkpointForeman()
+            end
+            if state.chestsReady then
+                state.chestsReady=false
+                state.dumpChestPlaced=false
+                state.fuelChestPlaced=false
+                saveState()
+            end
+            if not ensureEnderPair() then return false end
+            state.advanceStage=nil
+            state.phase="IDLE"
+            saveState()
+            checkpointForeman()
+            sendState("Next chunk Ender Chest pair ready")
+            chunkAck("MOVE_F",target)
+            return true
+        end
+        return false
+    end
+
     local function workLoop()
         if state.recoveryLocked then
             state.phase="RECOVERY_LOCK"
@@ -4363,6 +4459,11 @@ local function runForeman(cfg)
         end
 
         while true do
+            if flags.chunkCommand then
+                local command=flags.chunkCommand
+                flags.chunkCommand=nil
+                runChunkCommand(command)
+            end
             if flags.startMining then
                 flags.startMining=false
                 if not state.miningStarted then
@@ -4400,16 +4501,16 @@ local function runForeman(cfg)
                 else
                     sleep(0.2)
                 end
-            else
+            elseif not state.advanceStage then
                 loadOwnFuel()
             end
 
-            if state.phase~="RECALLED_PAUSED" and not active and #queue>0 then
+            if state.phase~="RECALLED_PAUSED" and not state.advanceStage and not active and #queue>0 then
                 active=table.remove(queue,1)
                 saveQueue()
             end
 
-            if state.phase=="RECALLED_PAUSED" then
+            if state.phase=="RECALLED_PAUSED" or state.advanceStage then
                 sleep(0.2)
             elseif active then
                 local ready=true
@@ -4482,8 +4583,8 @@ local function runMaster()
     local newMaster=false
     local id=os.getComputerID()
 
-    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v62.")
+    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 then
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v64.")
     end
 
     if not cfg then
@@ -4590,7 +4691,7 @@ else
         error("Foreman role file requires foreman node.cfg")
     end
 
-    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 then
+    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 then
         cfg.version=VERSION
         saveTable("node.cfg",cfg)
     elseif cfg.version~=VERSION then

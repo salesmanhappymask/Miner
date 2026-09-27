@@ -8,15 +8,6 @@ local function runRegionalManager()
         sleep(1)
     end
 
-    while peripheral.getType("right")~="monitor" do
-        term.setBackgroundColor(colors.black)
-        term.setTextColor(colors.white)
-        term.clear()
-        term.setCursorPos(1,1)
-        print("Regional Manager waiting for monitor on RIGHT...")
-        sleep(1)
-    end
-
     local managerId=os.getComputerID()
     setRegionalManager(managerId)
     local rawSend=send
@@ -37,8 +28,8 @@ local function runRegionalManager()
     pcall(rednet.unhost,PROTOCOL)
     pcall(rednet.host,PROTOCOL,"regional_manager")
 
-    local mon=peripheral.wrap("right")
-    mon.setTextScale(0.5)
+    local mon=peripheral.getType("right")=="monitor" and peripheral.wrap("right") or nil
+    if mon then mon.setTextScale(0.5) end
 
     local data=loadTableLight("regional_manager.tmp")
     if not data and
@@ -47,7 +38,7 @@ local function runRegionalManager()
         error("Regional Manager state unreadable; refusing to create a new session")
     end
 
-    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61) then
+    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63) then
         data.version=VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end
@@ -106,6 +97,19 @@ local function runRegionalManager()
     end
 
     data.managerId=managerId
+    data.chunkIndex=tonumber(data.chunkIndex) or 0
+    data.managerPose=data.managerPose or {x=5,y=0,z=-4,dir=DIR_N,
+        chunkIndex=data.chunkIndex,seq=0}
+    resolveChunkMove(data.managerPose,function()
+        if not saveTableLight("regional_manager.tmp",data) then
+            error("Manager chunk move recovery write failed")
+        end
+    end)
+    if data.advance and data.advance.phase=="MOVE_RM" and
+        data.managerPose.chunkIndex==data.advance.target then
+        data.chunkIndex=data.advance.target
+        saveTableLight("regional_manager.tmp",data)
+    end
     data.nodes=data.nodes or {}
     data.foremen=data.foremen or {}
     data.miners=data.miners or {}
@@ -200,7 +204,7 @@ local function runRegionalManager()
         end
     end
 
-    local IS_COLOR=mon.isColor and mon.isColor() or false
+    local IS_COLOR=(mon and mon.isColor and mon.isColor()) or (term.isColor and term.isColor()) or false
     local C_BG=colors.black
     local C_HEADER=IS_COLOR and colors.lightGray or colors.black
     local C_DIV=IS_COLOR and colors.gray or colors.black
@@ -269,7 +273,7 @@ local function runRegionalManager()
         return {w=w,h=h,rect=rect,field=field,clearAll=clearAll}
     end
 
-    local ui=makeUI(mon)
+    local ui=makeUI(mon or term)
 
     local function cardSurface(x,y,ww,hh,accentColor)
         ui.rect(x,y,ww,hh,C_BG)
@@ -403,7 +407,21 @@ local function runRegionalManager()
     end
 
     local function recallLine()
-        if not data.recall.mode then return "Awaiting commands" end
+        if data.advance then return "NEXT CHUNK "..tostring(data.advance.target)..
+            "  |  "..tostring(data.advance.phase).."  |  "..tostring(data.advance.error or "Working") end
+        if not data.recall.mode then
+            local completed=0
+            for row=1,16 do
+                if data.miners[row] and data.miners[row].state=="COMPLETE" then
+                    completed=completed+1
+                end
+            end
+            if completed==16 and not turtle then
+                return "All miners complete | Mobile RM turtle required for next chunk"
+            end
+            return "Chunk "..tostring(data.chunkIndex+1).."  |  "..
+                tostring(completed).."/16 miners complete"
+        end
         local r=data.recall
         local mh,fh,nh,empty,tm,tf,tn=0,0,0,0,0,0,0
         for row in pairs(r.targets.miners or {}) do
@@ -425,6 +443,9 @@ local function runRegionalManager()
             local m=data.miners[16]
             local collected=tonumber(r.packCollected) or (m and m.state=="PACK_COLLECT" and 16-(tonumber(m.x) or 16)) or 0
             line=line..string.format("  Packed %d/15  M16 x=%s",collected,tostring(m and m.x or "?"))
+            if r.packMissing and #r.packMissing>0 then
+                line=line.."  Missing items: "..table.concat(r.packMissing,",")
+            end
         end
         return line
     end
@@ -457,6 +478,17 @@ local function runRegionalManager()
     end
 
     local function drawMonitor()
+        local attached=peripheral.getType("right")=="monitor"
+        if not attached then
+            mon=nil
+            monitorButtons={}
+            return
+        end
+        if not mon then
+            mon=peripheral.wrap("right")
+            mon.setTextScale(0.5)
+            ui=makeUI(mon)
+        end
         local newW,newH=mon.getSize()
         if newW~=ui.w or newH~=ui.h then ui=makeUI(mon) end
         local w,h=ui.w,ui.h
@@ -514,8 +546,11 @@ local function runRegionalManager()
         end
         local m16=data.miners[16]
         local errorText=m16 and (m16.recovery or (m16.state=="RECOVERY_LOCK" and m16.message))
-        ui.field("footer",2,h-3,w-2,errorText and ("PACK STOP: "..tostring(errorText)) or recallLine(),
-            errorText and C_FAULT or C_WARN,C_BG)
+        local missing=data.recall.packMissing
+        local footer=errorText and ("PACK STOP: "..tostring(errorText)) or
+            (missing and #missing>0 and ("MISSING MINER ITEMS: "..table.concat(missing,",")) or recallLine())
+        ui.field("footer",2,h-3,w-2,footer,
+            errorText and C_FAULT or missing and #missing>0 and C_WARN or C_SUBTXT,C_BG)
         monitorButtons={}
         drawActions(mon,w,h,monitorButtons,false)
     end
@@ -557,6 +592,9 @@ local function runRegionalManager()
         if f1 and f1.setupMissing then line(row,"F1 NEEDS: "..tostring(f1.setupMissing),C_WARN);row=row+1 end
         local m16=data.miners[16]
         if m16 and m16.recovery then line(row,"PACK STOP: "..tostring(m16.recovery),C_FAULT);row=row+1 end
+        if data.recall.packMissing and #data.recall.packMissing>0 then
+            line(row,"MISSING MINER ITEMS: "..table.concat(data.recall.packMissing,","),C_WARN)
+        end
         if data.minerSetupConfirm then line(h-4,"Confirm miner setup: Y / N",C_WARN) end
         line(h-3,"Command: "..input,C_TEXT)
         terminalButtons={}
@@ -857,6 +895,7 @@ local function runRegionalManager()
     end
 
     local function dispatchJobs()
+        if data.advance then return end
         if type(data.foremanJobs)~="table" then
             data.foremanJobs={}
         end
@@ -1040,6 +1079,7 @@ local function runRegionalManager()
     end
 
     local function beginRecall(mode)
+        if data.advance then return false end
         if data.recall.mode=="PACK" and
             (data.recall.state=="PACK_CLEAR" or data.recall.state=="PACK_COLLECT") then
             return false
@@ -1120,6 +1160,7 @@ local function runRegionalManager()
     end
 
     local function resumeSwarm()
+        if data.advance then return end
         if data.recall.mode=="SHUTDOWN" or data.recall.mode=="PACK" or data.recall.state=="SHUTDOWN_RECALL" or data.recall.state=="SHUTDOWN_COMPLETE" then
             return
         end
@@ -1219,7 +1260,7 @@ local function runRegionalManager()
             end
         elseif data.recall.mode=="PACK" then
             if data.recall.state=="PACK_RECALL" and mh==16 and fh==4 and nh==4 and
-                tonumber(data.recall.packFreeSlots or 0)>=1 then
+                tonumber(data.recall.packFreeSlots or 0)>=15 then
                 data.recall.state="PACK_CLEAR"
                 save()
             elseif data.recall.state=="PACK_CLEAR" then
@@ -1274,6 +1315,7 @@ local function runRegionalManager()
     end
 
     local function releaseSwarm()
+        if data.advance then return false end
         if data.recall.state~="NORMAL" or not data.gpsReady or not data.minerSetupApproved then
             return false
         end
@@ -1318,7 +1360,7 @@ local function runRegionalManager()
             recallState=data.recall.state
         })
 
-        if data.recall.state=="NORMAL" and data.swarmStarted then
+        if data.recall.state=="NORMAL" and data.swarmStarted and not data.advance then
             forEachKnownNode(nil,function(id,role,entry)
                 local node
                 if role=="foreman" then
@@ -1334,6 +1376,166 @@ local function runRegionalManager()
                 end
             end)
         end
+    end
+
+    local function chunkKey(role,index)
+        return role..":"..tostring(index)
+    end
+
+    local function beginChunkAdvance()
+        local function enough(fuel,needed)
+            return fuel=="unlimited" or (tonumber(fuel) or -1)>=needed
+        end
+        if data.advance or data.recall.mode or not turtle or not turtle.forward or
+            not data.paired or not data.commissioningComplete or not data.swarmStarted then
+            return false
+        end
+        local pending,active,blocked=countRequests()
+        if pending>0 or active>0 or blocked>0 or next(data.foremanJobs) or
+            not enough(turtle.getFuelLevel(),16) then return false end
+        for row=1,16 do
+            local m=data.miners[row]
+            if not m or not m.id or not online(m,20) or m.state~="COMPLETE" or
+                tonumber(m.chunkIndex or 0)~=data.chunkIndex or tonumber(m.x)~=row or
+                tonumber(m.y)~=0 or tonumber(m.z)~=0 or
+                not enough(m.fuel,(row-1)%4==0 and 24 or 16) then return false end
+        end
+        for n=1,4 do
+            local f=data.foremen[n]
+            local nav=data.navigators[n]
+            local site=NAVIGATOR_SITES[n]
+            if not f or not nav or not f.id or not nav.id or not online(f,20) or
+                not online(nav,20) or f.state~="IDLE" or not nav.gpsHost or
+                tonumber(f.chunkIndex or 0)~=data.chunkIndex or
+                tonumber(nav.chunkIndex or 0)~=data.chunkIndex or
+                tonumber(f.x)~=FOREMAN_IDLE[n].x or tonumber(f.z)~=-1 or
+                tonumber(nav.x)~=site.x or tonumber(nav.z)~=site.z or
+                not enough(f.fuel,24) or not enough(nav.fuel,16) then return false end
+        end
+        if data.managerPose.chunkIndex~=data.chunkIndex or
+            data.managerPose.x~=5 or data.managerPose.y~=0 or
+            data.managerPose.z~=-4 or data.managerPose.dir~=DIR_N then return false end
+        data.advance={target=data.chunkIndex+1,phase="STAGE_F",acks={},lastSend=0}
+        resumeUntil=0
+        save()
+        flushManager(true)
+        return true
+    end
+
+    local function advanceTargets(stage,fn)
+        if stage=="STAGE_F" or stage=="MOVE_F" or stage=="VERIFY_F" then
+            for n=1,4 do fn("foreman",n,data.foremen[n]) end
+        elseif stage=="COLLECT_M" then
+            for n=1,4 do
+                local row=(n-1)*4+1
+                fn("miner",row,data.miners[row])
+            end
+        elseif stage=="MOVE_G" then
+            for n=1,4 do fn("navigator",n,data.navigators[n]) end
+        elseif stage=="MOVE_M" or stage=="RELEASE" then
+            for row=1,16 do fn("miner",row,data.miners[row]) end
+        end
+    end
+
+    local function advanceStageDone(stage)
+        local advance=data.advance
+        if stage=="COLLECT_M" then
+            local all=true
+            advanceTargets(stage,function(role,index)
+                if not advance.acks[chunkKey(role,index)] then all=false end
+            end)
+            advanceTargets("VERIFY_F",function(role,index)
+                if not advance.acks[chunkKey(role,index)] then all=false end
+            end)
+            return all
+        end
+        local all=true
+        advanceTargets(stage,function(role,index,node)
+            if stage=="RELEASE" then
+                if not node or not online(node,30) or
+                    tonumber(node.chunkIndex)~=advance.target or
+                    (node.state~="WAITING" and node.state~="MINING") then all=false end
+            elseif not advance.acks[chunkKey(role,index)] then all=false end
+        end)
+        return all
+    end
+
+    local function runChunkAdvance()
+        if not data.advance then
+            beginChunkAdvance()
+            return
+        end
+        local advance=data.advance
+        local stage=advance.phase
+        if stage=="MOVE_RM" then
+            if data.managerPose.chunkIndex<advance.target then
+                local function savePose() save();flushManager(true) end
+                local function faceNorth(target) return target==DIR_N and
+                    data.managerPose.dir==DIR_N end
+                local ok,reason=travelChunkNorth(data.managerPose,savePose,
+                    faceNorth,-4,advance.target)
+                if not ok then advance.error=reason;save();return end
+                data.chunkIndex=advance.target
+                save();flushManager(true)
+            end
+            local okGps,x,y,z=pcall(gps.locate,2,false)
+            if not okGps or not x or not y or not z then
+                advance.error="Manager waiting for GPS at new idle position"
+                save()
+                return
+            end
+            if math.abs(x-5)>0.25 or math.abs(y)>0.25 or
+                math.abs(z-(-4+16*advance.target))>0.25 then
+                advance.error="Manager GPS differs from new idle position"
+                save();flushManager(true)
+                return
+            end
+            data.chunkIndex=advance.target
+            save();flushManager(true)
+            advance.phase="RELEASE"
+            advance.acks={}
+            advance.lastSend=0
+            advance.error=nil
+            save();flushManager(true)
+            return
+        end
+        if stage=="RELEASE" then
+            if advanceStageDone(stage) then
+                data.advance=nil
+                save();flushManager(true)
+                announceManagerOnline()
+                return
+            end
+        elseif advanceStageDone(stage) then
+            local nextStage=stage=="STAGE_F" and "COLLECT_M" or
+                stage=="COLLECT_M" and "MOVE_G" or
+                stage=="MOVE_G" and "MOVE_M" or
+                stage=="MOVE_M" and "MOVE_F" or "MOVE_RM"
+            advance.phase=nextStage
+            advance.acks={}
+            advance.lastSend=0
+            advance.error=nil
+            save();flushManager(true)
+            return
+        end
+        if now()-(advance.lastSend or -10)<3 then return end
+        advanceTargets(stage,function(role,index,node)
+            if node and node.id and
+                (stage=="RELEASE" or not advance.acks[chunkKey(role,index)]) then
+                send(node.id,{type=stage=="RELEASE" and "chunk_release" or
+                    "chunk_command",stage=stage,chunkIndex=advance.target,
+                    session=data.session})
+            end
+        end)
+        if stage=="COLLECT_M" then
+            advanceTargets("VERIFY_F",function(role,index,node)
+                if node and node.id and not advance.acks[chunkKey(role,index)] then
+                    send(node.id,{type="chunk_command",stage="VERIFY_F",
+                        chunkIndex=advance.target,session=data.session})
+                end
+            end)
+        end
+        advance.lastSend=now()
     end
 
     broadcast({
@@ -1735,6 +1937,18 @@ local function runRegionalManager()
                         send(sender,{type="pack_ready_ack",session=data.session})
                     end
 
+                elseif message.type=="pack_missing" and message.session==data.session and
+                    data.recall.mode=="PACK" and sender==data.recall.targets.miners[16] and
+                    tonumber(message.missing) and tonumber(message.missing)>=1 and
+                    tonumber(message.missing)<=15 then
+                    data.recall.packMissing=data.recall.packMissing or {}
+                    local found=false
+                    for _,row in ipairs(data.recall.packMissing) do
+                        if row==tonumber(message.missing) then found=true end
+                    end
+                    if not found then data.recall.packMissing[#data.recall.packMissing+1]=tonumber(message.missing) end
+                    save()
+
                 elseif message.type=="pack_progress" and message.session==data.session and
                     data.recall.mode=="PACK" and sender==data.recall.targets.miners[16] and
                     data.recall.state=="PACK_COLLECT" and tonumber(message.row)==16 and
@@ -1750,9 +1964,24 @@ local function runRegionalManager()
                     tonumber(message.collected)==15 and
                     (data.recall.state=="PACK_COLLECT" or data.recall.state=="PACK_COMPLETE") then
                     data.recall.packCollected=15
+                    if type(message.missing)=="table" then
+                        data.recall.packMissing=message.missing
+                    end
                     data.recall.state="PACK_COMPLETE"
                     data.recall.active=false
                     save()
+
+                elseif message.type=="chunk_ack" and message.session==data.session and
+                    data.advance and tonumber(message.chunkIndex)==data.advance.target and
+                    message.stage and message.role then
+                    local index=message.role=="miner" and message.row or message.number
+                    local stage=data.advance.phase
+                    if registeredNodeSender(message.role,index,sender) and
+                        (message.stage==stage or
+                            (stage=="COLLECT_M" and message.stage=="VERIFY_F")) then
+                        data.advance.acks[chunkKey(message.role,index)]=true
+                        save()
+                    end
 
                 elseif message.type=="miner_complete" and message.session==data.session and message.row then
                     local m=registeredNodeSender("miner",message.row,sender) and data.miners[tonumber(message.row)]
@@ -1858,6 +2087,7 @@ local function runRegionalManager()
 
             refreshGpsReady()
             updateRecallState()
+            runChunkAdvance()
 
             local expiredRequests={}
             for requestId,request in pairs(data.requests) do
