@@ -47,7 +47,7 @@ local function runRegionalManager()
         error("Regional Manager state unreadable; refusing to create a new session")
     end
 
-    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60) then
+    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61) then
         data.version=VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end
@@ -362,185 +362,211 @@ local function runRegionalManager()
         return true
     end
 
+    local monitorButtons={}
+    local terminalButtons={}
+    local actions={
+        {key="1",label="RECALL"},{key="2",label="DUMP + RECALL"},
+        {key="3",label="SHUTDOWN"},{key="4",label="RESUME"},
+        {key="5",label="MINER SETUP"},{key="6",label="PACK IT UP"}
+    }
+
+    local function drawActions(surface,w,h,buttons,terminal)
+        local labels=actions
+        if data.minerSetupConfirm then
+            labels={{key="y",label="YES, SET UP MINERS"},{key="n",label="NO, WAIT"}}
+        end
+        local cols=3
+        local rows=math.ceil(#labels/cols)
+        if #labels==2 then cols=2;rows=1 end
+        local width=math.floor(w/cols)
+        for i,item in ipairs(labels) do
+            local col=(i-1)%cols
+            local row=math.floor((i-1)/cols)
+            local x=col*width+1
+            local ww=col==cols-1 and w-x+1 or width
+            local y=h-rows+row+1
+            local bg=IS_COLOR and (item.key=="6" and colors.orange or
+                item.key=="3" and colors.red or colors.blue) or colors.black
+            if terminal then
+                surface.setBackgroundColor(bg)
+                surface.setTextColor(colors.white)
+                surface.setCursorPos(x,y)
+                surface.write(string.rep(" ",ww))
+                surface.setCursorPos(x+1,y)
+                surface.write(("["..item.key.."] "..item.label):sub(1,ww-2))
+            else
+                ui.rect(x,y,ww,1,bg)
+                ui.field("btn"..i,x+1,y,ww-2,"["..item.key.."] "..item.label,C_TEXT,bg)
+            end
+            buttons[#buttons+1]={x=x,y=y,w=ww,key=item.key}
+        end
+    end
+
+    local function recallLine()
+        if not data.recall.mode then return "Awaiting commands" end
+        local r=data.recall
+        local mh,fh,nh,empty,tm,tf,tn=0,0,0,0,0,0,0
+        for row in pairs(r.targets.miners or {}) do
+            tm=tm+1
+            if r.homeMiners[row] then mh=mh+1 end
+            if r.emptied[row] then empty=empty+1 end
+        end
+        for n in pairs(r.targets.foremen or {}) do
+            tf=tf+1
+            if r.homeForemen[n] then fh=fh+1 end
+        end
+        for n in pairs(r.targets.navigators or {}) do
+            tn=tn+1
+            if r.homeNavigators[n] then nh=nh+1 end
+        end
+        local line=string.format("%s  M %d/%d  F %d/%d  GPS %d/%d  Empty %d/%d",
+            tostring(r.state),mh,tm,fh,tf,nh,tn,empty,tm)
+        if r.mode=="PACK" then
+            local m=data.miners[16]
+            local collected=tonumber(r.packCollected) or (m and m.state=="PACK_COLLECT" and 16-(tonumber(m.x) or 16)) or 0
+            line=line..string.format("  Packed %d/15  M16 x=%s",collected,tostring(m and m.x or "?"))
+        end
+        return line
+    end
+
+    local function clusterInfo(n)
+        local f=data.foremen[n]
+        local nav=data.navigators[n]
+        local job=data.foremanJobs[n]
+        local fs=f and tostring(f.state or "?") or "NO SIGNAL"
+        local gps=nav and (online(nav,20) and tostring(nav.state or "ONLINE") or "OFFLINE") or "NO SIGNAL"
+        local pos=f and string.format("%s,%s,%s",tostring(f.x or "?"),tostring(f.y or "?"),tostring(f.z or "?")) or "?"
+        local task=job and ("M"..tostring(job.row or "?").." "..tostring(job.service or "")) or "Idle"
+        return fs,gps,pos,task
+    end
+
+    local function minerLine(row)
+        local m=data.miners[row]
+        if not m then return string.format("M%02d   NO SIGNAL",row),C_FAULT end
+        local c=online(m,20) and C_TEXT or C_FAULT
+        if m.state=="RECOVERY_LOCK" or m.recovery then c=C_FAULT end
+        local task=""
+        for _,r in pairs(data.requests) do
+            if r.row==row and r.status~="COMPLETE" then
+                task=tostring(r.service or "").." "..tostring(r.status or "")
+                if r.status=="BLOCKED" then c=C_FAULT else c=C_WARN end
+                break
+            end
+        end
+        return string.format("M%02d   %-18s %s",row,tostring(m.state or "?"):sub(1,18),task),c
+    end
+
     local function drawMonitor()
+        local newW,newH=mon.getSize()
+        if newW~=ui.w or newH~=ui.h then ui=makeUI(mon) end
         local w,h=ui.w,ui.h
-
-        local overviewY=3
-        local overviewH=6
-
-        if not monitorInitialized then
-            ui.clearAll()
-            drawHeader("Regional Manager")
-            cardSurface(1,overviewY,w,overviewH,C_ACCENT)
-        end
-
+        ui.clearAll()
+        drawHeader("REGIONAL MANAGER  v"..tostring(VERSION))
         local pending,activeJobs,blocked=countRequests()
-        local pairText=data.paired and ("Manager " .. tostring(managerId) .. " / Master " .. tostring(data.masterForemanId or "?")) or "Waiting for Master Foreman pairing"
-        local stateText=data.recall.state or "NORMAL"
-
-        ui.field("ov_pair",3,overviewY+1,w-4,pairText,data.paired and C_TEXT or C_WARN,C_INSET)
-        ui.field("ov_state",3,overviewY+2,w-4,"State: " .. stateText,C_SUBTXT,C_INSET)
-        ui.field("ov_jobs",3,overviewY+3,w-4,
-            string.format("Jobs P:%d A:%d B:%d Nodes:%d/24 Manager RX/TX %.1f/%.1f/s",
-                pending,activeJobs,blocked,countTable(data.nodes),radioRxRate,radioTxRate),
-            blocked>0 and C_WARN or C_MUTED,C_INSET)
-
         local gpsCount=refreshGpsReady()
-        local gpsText
-        local gpsColor=C_WARN
-
-        if data.gpsReady then
-            if data.minerSetupApproved then
-                gpsText="GPS 4/4 READY | Miner setup APPROVED"
-                gpsColor=C_OK
-            elseif foremenReadyForMinerSetup() then
-                gpsText="GPS 4/4 READY | Miner setup available: option 5"
-                gpsColor=C_OK
-            else
-                gpsText="GPS 4/4 READY | Waiting for Foremen"
-            end
-        else
-            gpsText="GPS " .. tostring(gpsCount) .. "/4 | Waiting for Navigators"
-        end
-
-        ui.field("ov_gps",3,overviewY+4,w-4,gpsText,gpsColor,C_INSET)
-        local master=data.foremen[1]
-        local supplyWarning=master and master.setupMissing
-        ui.field("ov_supply",3,overviewY+5,w-4,
-            supplyWarning and ("F1 SUPPLIES: " .. tostring(supplyWarning)) or "",
-            supplyWarning and C_WARN or C_MUTED,C_INSET)
-
-        local foreY=overviewY+overviewH
-        local foreH=7
-
-        if not monitorInitialized then
-            cardSurface(1,foreY,w,foreH,C_ACCENT)
-            ui.field("fore_title",3,foreY+1,w-4,"FOREMEN",C_SUBTXT,C_INSET)
-        end
-
+        cardSurface(1,3,w,5,C_ACCENT)
+        ui.field("pair",3,4,w-4,data.paired and
+            ("Manager "..managerId.."  |  Master "..tostring(data.masterForemanId or "?")) or
+            "Waiting for Master Foreman pairing",data.paired and C_TEXT or C_WARN,C_INSET)
+        ui.field("metrics",3,5,w-4,string.format("GPS %d/4  |  Nodes %d/24  |  Jobs %d queued / %d active / %d blocked  |  Radio RX %.1f  TX %.1f /s",
+            gpsCount,countTable(data.nodes),pending,activeJobs,blocked,radioRxRate,radioTxRate),C_MUTED,C_INSET)
+        local f1=data.foremen[1]
+        local warning=f1 and f1.setupMissing
+        ui.field("supplies",3,6,w-4,warning and ("F1 needs: "..tostring(warning)) or
+            (data.minerSetupConfirm and "Confirm miner setup using YES or NO" or recallLine()),
+            warning and C_WARN or C_SUBTXT,C_INSET)
+        local gridTop=8
+        local gridBottom=h-4
+        local total=gridBottom-gridTop+1
+        local cardH=math.floor(total/2)
+        local widths={math.floor(w/2),w-math.floor(w/2)}
         for n=1,4 do
-            local f=data.foremen[n]
-            local line
-            local c=C_TEXT
-
-            if f then
-                local job=data.foremanJobs[n]
-                line=string.format("F%d %-11s @%s,%s,%s %s",n,tostring(f.state or "?"),tostring(f.x or "?"),tostring(f.y or "?"),tostring(f.z or "?"),job and ("M"..tostring(job.row or "?").." "..tostring(job.service or "")) or "IDLE")
-                if not online(f,15) or f.state=="RECOVERY_LOCK" or f.state=="ERROR" then
-                    c=C_FAULT
-                elseif job then
-                    c=C_WARN
-                end
-            else
-                line="F" .. tostring(n) .. " NO SIGNAL"
-                c=C_FAULT
-            end
-
-            ui.field("fore_"..n,3,foreY+1+n,w-4,line,c,C_INSET)
-        end
-
-        local minersY=foreY+foreH
-        local minersH=h-minersY+1
-        if minersH<8 then minersH=8 end
-
-        if not monitorInitialized then
-            cardSurface(1,minersY,w,minersH,C_ACCENT)
-            ui.field("miners_title",3,minersY+1,w-4,"MINERS",C_SUBTXT,C_INSET)
-        end
-
-        local cols=4
-        local colW=math.floor((w-5)/cols)
-        if colW<10 then
-            cols=2
-            colW=math.floor((w-4)/2)
-        end
-
-        for row=1,16 do
-            local col=(row-1)%cols
-            local rr=math.floor((row-1)/cols)
-            local x=3+col*colW
-            local y=minersY+2+rr
-            local m=data.miners[row]
-            local line
-            local c=C_TEXT
-
-            if m then
-                local rq=nil
-                for _,r in pairs(data.requests) do
-                    if r.row==row and r.status~="COMPLETE" then
-                        rq=r
-                        break
+            local col=(n-1)%2
+            local row=math.floor((n-1)/2)
+            local x=col==0 and 1 or widths[1]+1
+            local y=gridTop+row*cardH
+            local ww=widths[col+1]
+            local hh=row==0 and cardH or gridBottom-y+1
+            if hh>=4 and ww>=14 then
+                cardSurface(x,y,ww,hh,C_ACCENT)
+                local fs,gps,pos,task=clusterInfo(n)
+                ui.field("cluster"..n,x+3,y+1,ww-5,
+                    string.format("FOREMAN %d  %s",n,fs),
+                    online(data.foremen[n],20) and C_ACCENT or C_FAULT,C_INSET)
+                ui.field("gps"..n,x+3,y+2,ww-5,"GPS "..n.." "..gps.."  |  "..pos,C_MUTED,C_INSET)
+                if hh>=7 then ui.field("job"..n,x+3,y+3,ww-5,"JOB  "..task,C_SUBTXT,C_INSET) end
+                local start=y+(hh>=7 and 5 or 4)
+                for k=1,4 do
+                    local yy=start+k-1
+                    if yy<y+hh-1 then
+                        local line,color=minerLine((n-1)*4+k)
+                        ui.field("clusterMiner"..n.."_"..k,x+3,yy,ww-5,line,color,C_INSET)
                     end
                 end
-                line=string.format("%02d %-7s %s",row,tostring(m.state or "?"):sub(1,7),rq and tostring(rq.service or "") or "")
-                if not online(m,20) or m.state=="RECOVERY_LOCK" then
-                    c=C_FAULT
-                elseif rq then
-                    c=rq.status=="BLOCKED" and C_FAULT or C_WARN
-                elseif m.state=="RECALLED_PAUSED" or m.state=="HOME" then
-                    c=C_OK
+                if hh>=12 then
+                    local f=data.foremen[n]
+                    local message=f and (f.recovery or f.message or f.setupMissing)
+                    if message and message~="" then
+                        ui.field("detail"..n,x+3,y+hh-3,ww-5,tostring(message),C_WARN,C_INSET)
+                    end
                 end
-            else
-                line=string.format("%02d OFFLINE",row)
-                c=C_FAULT
             end
-
-            ui.field("miner_"..row,x,y,colW-1,line,c,C_INSET)
         end
-
-        local bottom=h-1
-        if data.recall.mode then
-            local mh,fh,nh,empty,tm,tf,tn=0,0,0,0,0,0,0
-            local targets=data.recall.targets or {miners={},foremen={},navigators={}}
-            for row in pairs(targets.miners or {}) do
-                tm=tm+1
-                if data.recall.homeMiners[row] then mh=mh+1 end
-                if data.recall.emptied[row] then empty=empty+1 end
-            end
-            for n in pairs(targets.foremen or {}) do
-                tf=tf+1
-                if data.recall.homeForemen[n] then fh=fh+1 end
-            end
-            for n in pairs(targets.navigators or {}) do
-                tn=tn+1
-                if data.recall.homeNavigators and data.recall.homeNavigators[n] then nh=nh+1 end
-            end
-            ui.field("recall_status",3,bottom,w-4,string.format("%s M:%d/%d F:%d/%d N:%d/%d E:%d/%d",tostring(data.recall.mode),mh,tm,fh,tf,nh,tn,empty,tm),C_WARN,C_INSET)
-        else
-            ui.field("recall_status",3,bottom,w-4,"",C_MUTED,C_INSET)
-        end
-
-        monitorInitialized=true
+        local m16=data.miners[16]
+        local errorText=m16 and (m16.recovery or (m16.state=="RECOVERY_LOCK" and m16.message))
+        ui.field("footer",2,h-3,w-2,errorText and ("PACK STOP: "..tostring(errorText)) or recallLine(),
+            errorText and C_FAULT or C_WARN,C_BG)
+        monitorButtons={}
+        drawActions(mon,w,h,monitorButtons,false)
     end
 
     local function drawTerminal()
+        local w,h=term.getSize()
         term.setBackgroundColor(colors.black)
         term.setTextColor(colors.white)
         term.clear()
-        term.setCursorPos(1,1)
-        print("ZelOS Regional Manager")
-        print("")
-        print("1 = Recall")
-        print("2 = Dump & Recall")
-        print("3 = Shutdown Recall")
-        print("4 = Resume")
-        print("6 = Pack it up")
-        print("")
-        if data.minerSetupConfirm and foremenReadyForMinerSetup() then
-            print("Begin miner setup? Y/N")
+        local function line(y,value,fg)
+            if y<1 or y>h then return end
+            term.setBackgroundColor(colors.black)
+            term.setTextColor(fg or colors.white)
+            term.setCursorPos(1,y)
+            term.write(tostring(value or ""):sub(1,w))
         end
-        print("State: " .. tostring(data.recall.state or "NORMAL"))
-        print(string.format("Manager RX/TX: %.1f/%.1f per second",radioRxRate,radioTxRate))
-        local master=data.foremen[1]
-        if master and master.setupMissing then
-            print("F1 supplies: " .. tostring(master.setupMissing))
+        line(1,"ZelOS  MANAGER  v"..VERSION.."    "..tostring(data.recall.state),C_ACCENT)
+        line(2,string.format("GPS %d/4  Nodes %d/24  RX %.1f TX %.1f/s",
+            refreshGpsReady(),countTable(data.nodes),radioRxRate,radioTxRate),C_MUTED)
+        line(3,recallLine(),C_WARN)
+        local row=4
+        for n=1,4 do
+            local fs,gps,pos,task=clusterInfo(n)
+            line(row,string.format("F%d %-15s GPS %-12s %s",n,fs:sub(1,15),gps:sub(1,12),task),
+                online(data.foremen[n],20) and C_ACCENT or C_FAULT)
+            row=row+1
+            if h>=17 then
+                local parts={}
+                for k=1,4 do
+                    local id=(n-1)*4+k
+                    local m=data.miners[id]
+                    parts[#parts+1]=string.format("%02d:%-8s",id,tostring(m and m.state or "OFFLINE"):sub(1,8))
+                end
+                line(row,table.concat(parts," "),C_MUTED)
+                row=row+1
+            end
         end
-        if not data.paired then
-            print("Pairing: waiting for Master Foreman")
-        else
-            print("Master Foreman: " .. tostring(data.masterForemanId))
+        local f1=data.foremen[1]
+        if f1 and f1.setupMissing then line(row,"F1 NEEDS: "..tostring(f1.setupMissing),C_WARN);row=row+1 end
+        local m16=data.miners[16]
+        if m16 and m16.recovery then line(row,"PACK STOP: "..tostring(m16.recovery),C_FAULT);row=row+1 end
+        if data.minerSetupConfirm then line(h-4,"Confirm miner setup: Y / N",C_WARN) end
+        line(h-3,"Command: "..input,C_TEXT)
+        terminalButtons={}
+        drawActions(term,w,h,terminalButtons,true)
+    end
+
+    local function clicked(buttons,x,y)
+        for _,button in ipairs(buttons) do
+            if y==button.y and x>=button.x and x<button.x+button.w then return button.key end
         end
-        write("Command: " .. input)
     end
 
     local function expectedForemanForRow(row)
@@ -1193,7 +1219,7 @@ local function runRegionalManager()
             end
         elseif data.recall.mode=="PACK" then
             if data.recall.state=="PACK_RECALL" and mh==16 and fh==4 and nh==4 and
-                tonumber(data.recall.packFreeSlots or 0)>=15 then
+                tonumber(data.recall.packFreeSlots or 0)>=1 then
                 data.recall.state="PACK_CLEAR"
                 save()
             elseif data.recall.state=="PACK_CLEAR" then
@@ -1323,6 +1349,51 @@ local function runRegionalManager()
     releaseSwarm()
 
     local timer=os.startTimer(1)
+
+    local function activateCommand(command)
+        local lowerCommand=lower(tostring(command or ""))
+        if data.minerSetupConfirm then
+            if lowerCommand=="y" and foremenReadyForMinerSetup() then
+                data.minerSetupApproved=true
+                data.minerSetupDeclined=false
+                data.minerSetupConfirm=false
+                save()
+                flushManager(true)
+                if data.masterForemanId then
+                    send(data.masterForemanId,{type="miner_setup_approved",session=data.session})
+                end
+            elseif lowerCommand=="n" then
+                data.minerSetupConfirm=false
+                data.minerSetupDeclined=true
+                save()
+                flushManager(true)
+            end
+        elseif command=="1" then
+            beginRecall("NORMAL")
+        elseif command=="2" then
+            beginRecall("DUMP")
+        elseif command=="3" then
+            beginRecall("SHUTDOWN")
+        elseif command=="6" then
+            if data.commissioningComplete then
+                if data.recall.mode=="DUMP" and not data.recall.active then
+                    beginRecall("PACK")
+                elseif data.recall.mode~="DUMP" and data.recall.mode~="PACK" then
+                    beginRecall("DUMP")
+                end
+                if data.recall.mode=="DUMP" then
+                    data.recall.packAfterDump=true
+                    save()
+                end
+            end
+        elseif command=="4" then
+            resumeSwarm()
+        elseif command=="5" and foremenReadyForMinerSetup() then
+            data.minerSetupConfirm=true
+            data.minerSetupDeclined=false
+            save()
+        end
+    end
 
     while true do
         local event={os.pullEvent()}
@@ -1664,8 +1735,21 @@ local function runRegionalManager()
                         send(sender,{type="pack_ready_ack",session=data.session})
                     end
 
+                elseif message.type=="pack_progress" and message.session==data.session and
+                    data.recall.mode=="PACK" and sender==data.recall.targets.miners[16] and
+                    data.recall.state=="PACK_COLLECT" and tonumber(message.row)==16 and
+                    tonumber(message.x) and tonumber(message.collected)==16-tonumber(message.x) and
+                    tonumber(message.x)>=1 and tonumber(message.x)<=16 then
+                    data.recall.packCollected=math.max(tonumber(data.recall.packCollected) or 0,
+                        tonumber(message.collected))
+                    save()
+
                 elseif message.type=="pack_done" and message.session==data.session and
-                    data.recall.mode=="PACK" and sender==data.recall.targets.miners[16] then
+                    data.recall.mode=="PACK" and sender==data.recall.targets.miners[16] and
+                    tonumber(message.row)==16 and tonumber(message.x)==1 and
+                    tonumber(message.collected)==15 and
+                    (data.recall.state=="PACK_COLLECT" or data.recall.state=="PACK_COMPLETE") then
+                    data.recall.packCollected=15
                     data.recall.state="PACK_COMPLETE"
                     data.recall.active=false
                     save()
@@ -1686,65 +1770,24 @@ local function runRegionalManager()
             input=input .. event[2]
             drawTerminal()
 
-        elseif event[1]=="key" then
-            if event[2]==keys.backspace then
-                input=string.sub(input,1,math.max(0,#input-1))
-                drawTerminal()
-            elseif event[2]==keys.enter then
-                local command=input
-                input=""
+        elseif event[1]=="key" and event[2]==keys.backspace then
+            input=string.sub(input,1,math.max(0,#input-1))
+            drawTerminal()
 
-                local lowerCommand=lower(command)
+        elseif event[1]=="key" and event[2]==keys.enter then
+            local command=input
+            input=""
+            activateCommand(command)
+            drawTerminal()
+            drawMonitor()
 
-                if data.minerSetupConfirm then
-                    if lowerCommand=="y" and foremenReadyForMinerSetup() then
-                        data.minerSetupApproved=true
-                        data.minerSetupDeclined=false
-                        data.minerSetupConfirm=false
-                        save()
-                        flushManager(true)
+        elseif event[1]=="monitor_touch" and event[2]=="right" then
+            local command=clicked(monitorButtons,event[3],event[4])
+            if command then activateCommand(command);drawTerminal();drawMonitor() end
 
-                        if data.masterForemanId then
-                            send(data.masterForemanId,{
-                                type="miner_setup_approved",
-                                session=data.session
-                            })
-                        end
-                    elseif lowerCommand=="n" then
-                        data.minerSetupConfirm=false
-                        data.minerSetupDeclined=true
-                        save()
-                        flushManager(true)
-                    end
-                elseif command=="1" then
-                    beginRecall("NORMAL")
-                elseif command=="2" then
-                    beginRecall("DUMP")
-                elseif command=="3" then
-                    beginRecall("SHUTDOWN")
-                elseif command=="6" then
-                    if data.commissioningComplete then
-                        if data.recall.mode=="DUMP" and not data.recall.active then
-                            beginRecall("PACK")
-                        elseif data.recall.mode~="DUMP" and data.recall.mode~="PACK" then
-                            beginRecall("DUMP")
-                        end
-                        if data.recall.mode=="DUMP" then
-                            data.recall.packAfterDump=true
-                            save()
-                        end
-                    end
-                elseif command=="4" then
-                    resumeSwarm()
-                elseif command=="5" and foremenReadyForMinerSetup() then
-                    data.minerSetupConfirm=true
-                    data.minerSetupDeclined=false
-                    save()
-                end
-
-                drawTerminal()
-                drawMonitor()
-            end
+        elseif event[1]=="mouse_click" and event[2]==1 then
+            local command=clicked(terminalButtons,event[3],event[4])
+            if command then activateCommand(command);drawTerminal();drawMonitor() end
 
         elseif event[1]=="timer" and event[2]==timer then
             local elapsed=now()-radioWindowStart

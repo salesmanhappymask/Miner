@@ -704,11 +704,9 @@ local function runMiner(cfg)
         saveTableLight(path,state)
     end
 
-    if cfg.row==16 and state.recoveryLocked and
-        (state.recoveryReason=="Turtle inspect unavailable for safe pack collection" or
-         string.find(tostring(state.recoveryReason),"^Expected Miner%-")) and
-        state.x>=1 and state.x<=16 and state.y==0 and state.z==0 and
-        state.phase=="PACK_COLLECT" and not state.packStepIntent then
+    if cfg.row==16 and state.phase=="PACK_DONE" and state.x>1 and
+        state.recallMode=="PACK" and type(state.packMinerIds)=="table" then
+        state.phase="PACK_COLLECT"
         state.recoveryLocked=false
         state.recoveryReason=nil
         saveTableLight(path,state)
@@ -740,6 +738,19 @@ local function runMiner(cfg)
             state.recoveryLocked=true
             state.recoveryReason="Cannot resolve interrupted Miner-16 pack move"
         end
+        saveTableLight(path,state)
+    end
+
+    if cfg.row==16 and state.recoveryLocked and
+        (state.recoveryReason=="Turtle inspect unavailable for safe pack collection" or
+         string.find(tostring(state.recoveryReason),"^Expected Miner%-") or
+         string.find(tostring(state.recoveryReason),"^Cannot verify Miner%-") or
+         string.find(tostring(state.recoveryReason),"^Pack collection blocked")) and
+        state.x>=1 and state.x<=16 and state.y==0 and state.z==0 and
+        state.phase=="PACK_COLLECT" and
+        (not state.packStepIntent or state.packStepIntent.stage=="DUG") then
+        state.recoveryLocked=false
+        state.recoveryReason=nil
         saveTableLight(path,state)
     end
 
@@ -2032,13 +2043,7 @@ local function runMiner(cfg)
         if cfg.row~=16 or state.recallMode~="PACK" or state.z~=0 or state.y~=0 then
             return false
         end
-        if state.x==16 and freeInventorySlots()<15 then
-            state.recoveryLocked=true
-            state.recoveryReason="Miner-16 needs 15 free inventory slots for packing"
-            save()
-            sendState(state.recoveryReason)
-            return false
-        end
+
         if state.dir~=DIR_W then
             if not face(DIR_W) then return false end
         end
@@ -2046,6 +2051,13 @@ local function runMiner(cfg)
         save()
         while state.x>1 do
             if not state.packStepIntent then
+                if freeInventorySlots()<1 then
+                    state.recoveryLocked=true
+                    state.recoveryReason="Miner-16 inventory full at x=" .. tostring(state.x)
+                    save()
+                    sendState(state.recoveryReason)
+                    return false
+                end
                 local expected=state.packMinerIds and tonumber(state.packMinerIds[state.x-1])
                 local ok,neighbor=pcall(peripheral.call,"front","getID")
                 if not turtle.detect() or not expected or (ok and neighbor and
@@ -2088,6 +2100,8 @@ local function runMiner(cfg)
                         return false
                     end
                 end
+                local before={}
+                for slot=1,16 do before[slot]=turtle.getItemCount(slot) end
                 if not turtle.dig() then
                     state.recoveryLocked=true
                     state.recoveryReason="Could not break parked miner at x=" .. tostring(state.x-1)
@@ -2097,6 +2111,21 @@ local function runMiner(cfg)
                 end
                 state.packStepIntent={stage="DUG"}
                 save()
+                for slot=1,16 do
+                    if turtle.getItemCount(slot)>before[slot] then
+                        local oldSlot=turtle.getSelectedSlot()
+                        turtle.select(slot)
+                        if not turtle.dropUp(turtle.getItemCount(slot)-before[slot]) then
+                            turtle.select(oldSlot)
+                            state.recoveryLocked=true
+                            state.recoveryReason="Cannot discard packed turtle above x=" .. tostring(state.x)
+                            save()
+                            sendState(state.recoveryReason)
+                            return false
+                        end
+                        turtle.select(oldSlot)
+                    end
+                end
             end
             state.packStepIntent.stage="MOVING"
             state.packStepIntent.fuelBefore=turtle.getFuelLevel()
@@ -2123,13 +2152,16 @@ local function runMiner(cfg)
             state.packStepIntent=nil
             save()
             checkpoint()
+            send(cfg.managerId,{type="pack_progress",row=16,x=state.x,
+                collected=16-state.x,session=cfg.session})
+            sendState("Packed " .. tostring(16-state.x) .. "/15; next Miner-" .. tostring(state.x-1))
         end
         os.setComputerLabel(nil)
         if os.getComputerLabel()~=nil then return false end
         state.phase="PACK_DONE"
         save()
         for i=1,5 do
-            send(cfg.managerId,{type="pack_done",row=16,session=cfg.session})
+            send(cfg.managerId,{type="pack_done",row=16,x=state.x,collected=15,session=cfg.session})
             sleep(0.1)
         end
         os.shutdown()
@@ -2191,7 +2223,7 @@ local function runMiner(cfg)
 
         if state.phase=="PACK_DONE" then
             for i=1,5 do
-                send(cfg.managerId,{type="pack_done",row=16,session=cfg.session})
+                send(cfg.managerId,{type="pack_done",row=16,x=state.x,collected=15,session=cfg.session})
                 sleep(0.1)
             end
             os.shutdown()
@@ -2447,7 +2479,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then
