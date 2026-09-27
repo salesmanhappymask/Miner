@@ -1553,12 +1553,37 @@ local function runMiner(cfg)
     local function digForward()
         local attempts=0
 
-        while not attemptForward() do
+        while true do
+            local nextZ=state.dir==DIR_N and state.z+1 or
+                (state.dir==DIR_S and state.z-1 or nil)
+            if state.x~=cfg.row or state.y>0 or not nextZ or
+                nextZ<cfg.shaftMinZ or nextZ>cfg.shaftMaxZ then
+                state.recoveryLocked=true
+                state.recoveryReason="Miner refused to dig outside its assigned shaft"
+                state.phase="RECOVERY_LOCK"
+                save()
+                sendState(state.recoveryReason)
+                return false
+            end
+            if state.complete or state.phase=="COMPLETE" then
+                return false
+            end
+            if attemptForward() then return true end
             if state.recoveryLocked or flags.recallMode then
                 return false
             end
 
             attempts=attempts+1
+
+            local ok,peripheralType=pcall(peripheral.getType,"front")
+            if ok and peripheralType then
+                state.recoveryLocked=true
+                state.recoveryReason="Miner refused to dig a peripheral in its shaft"
+                state.phase="RECOVERY_LOCK"
+                save()
+                sendState(state.recoveryReason)
+                return false
+            end
 
             if turtle.detect() then
                 turtle.dig()
@@ -1578,8 +1603,6 @@ local function runMiner(cfg)
 
             sleep(0.15)
         end
-
-        return true
     end
 
     local function moveUp()
@@ -1651,6 +1674,7 @@ local function runMiner(cfg)
     end
 
     local function descendMine()
+        if state.complete or state.phase=="COMPLETE" then return false end
         for i=1,5 do
             if state.recoveryLocked or flags.recallMode then
                 return false
@@ -1673,7 +1697,8 @@ local function runMiner(cfg)
     end
 
     local function clearMiningColumn()
-        if turtle.detectUp() then
+        if state.complete or state.phase=="COMPLETE" then return end
+        if state.y< -1 and turtle.detectUp() then
             turtle.digUp()
         end
 
@@ -2563,14 +2588,6 @@ local function runMiner(cfg)
 
         if resumedFinalService then return end
 
-        if state.phase=="MINING" and state.y==0 and not state.complete then
-            if not descendMine() then
-                state.complete=true
-                state.phase="COMPLETE"
-                save()
-            end
-        end
-
         local function finishMining()
             sendState("Bedrock reached")
 
@@ -2622,7 +2639,14 @@ local function runMiner(cfg)
             end
         end
 
+        if state.phase=="MINING" and state.y==0 and not state.complete then
+            if not descendMine() then
+                if not finishMining() then return end
+            end
+        end
+
         while true do
+            if state.complete or state.phase=="COMPLETE" then return end
             if flags.recallMode then
                 if not handleRecallRequest() then return end
             end
@@ -2757,7 +2781,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then
