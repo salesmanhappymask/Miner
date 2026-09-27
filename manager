@@ -46,7 +46,7 @@ local function runRegionalManager()
         error("Regional Manager state unreadable; refusing to create a new session")
     end
 
-    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70) then
+    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70 or data.version==71 or data.version==72 or data.version==73) then
         data.version=VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end
@@ -106,7 +106,7 @@ local function runRegionalManager()
 
     data.managerId=managerId
     data.chunkIndex=tonumber(data.chunkIndex) or 0
-    data.managerPose=data.managerPose or {x=5,y=0,z=-4,dir=DIR_N,
+    data.managerPose=data.managerPose or {x=MANAGER_IDLE.x,y=0,z=MANAGER_IDLE.z,dir=DIR_N,
         chunkIndex=data.chunkIndex,seq=0}
     resolveChunkMove(data.managerPose,function()
         if not saveTableLight("regional_manager.tmp",data) then
@@ -465,10 +465,15 @@ local function runRegionalManager()
         local nav=data.navigators[n]
         local job=data.foremanJobs[n]
         local fs=f and tostring(f.state or "?") or "NO SIGNAL"
-        local gps=nav and (online(nav,20) and tostring(nav.state or "ONLINE") or "OFFLINE") or "NO SIGNAL"
-        local pos=f and string.format("%s,%s,%s",tostring(f.x or "?"),tostring(f.y or "?"),tostring(f.z or "?")) or "?"
+        local gps=nav and (online(nav,20) and
+            (nav.gpsHost==true and "HOSTING" or tostring(nav.state or "ONLINE")) or
+            "OFFLINE") or "NO SIGNAL"
+        local foremanPos=f and string.format("%s,%s,%s",tostring(f.x or "?"),
+            tostring(f.y or "?"),tostring(f.z or "?")) or "?"
+        local gpsPos=nav and string.format("%s,%s,%s",tostring(nav.x or "?"),
+            tostring(nav.y or "?"),tostring(nav.z or "?")) or "?"
         local task=job and ("M"..tostring(job.row or "?").." "..tostring(job.service or "")) or "Idle"
-        return fs,gps,pos,task
+        return fs,gps,foremanPos,gpsPos,task
     end
 
     local function minerLine(row)
@@ -535,11 +540,11 @@ local function runRegionalManager()
             local hh=row==0 and cardH or gridBottom-y+1
             if hh>=4 and ww>=14 then
                 cardSurface(x,y,ww,hh,C_ACCENT)
-                local fs,gps,pos,task=clusterInfo(n)
+                local fs,gps,foremanPos,gpsPos,task=clusterInfo(n)
                 ui.field("cluster"..n,x+3,y+1,ww-5,
-                    string.format("FOREMAN %d  %s",n,fs),
+                    string.format("FOREMAN %d  %s  @ %s",n,fs,foremanPos),
                     online(data.foremen[n],20) and C_ACCENT or C_FAULT,C_INSET)
-                ui.field("gps"..n,x+3,y+2,ww-5,"GPS "..n.." "..gps.."  |  "..pos,C_MUTED,C_INSET)
+                ui.field("gps"..n,x+3,y+2,ww-5,"GPS "..n.." "..gps.."  @ "..gpsPos,C_MUTED,C_INSET)
                 if hh>=7 then ui.field("job"..n,x+3,y+3,ww-5,"JOB  "..task,C_SUBTXT,C_INSET) end
                 local start=y+(hh>=7 and 5 or 4)
                 for k=1,4 do
@@ -587,7 +592,7 @@ local function runRegionalManager()
         line(3,recallLine(),C_WARN)
         local row=4
         for n=1,4 do
-            local fs,gps,pos,task=clusterInfo(n)
+            local fs,gps,foremanPos,gpsPos,task=clusterInfo(n)
             line(row,string.format("F%d %-15s GPS %-12s %s",n,fs:sub(1,15),gps:sub(1,12),task),
                 online(data.foremen[n],20) and C_ACCENT or C_FAULT)
             row=row+1
@@ -975,6 +980,7 @@ local function runRegionalManager()
             return a.id<b.id
         end)
 
+        local assignedAny=false
         for i=1,#pending do
                 local requestId=pending[i].id
                 local request=pending[i].request
@@ -993,7 +999,13 @@ local function runRegionalManager()
                     request.status="ASSIGNING"
                     request.foremanId=f.id
                     request.updated=now()
+                    assignedAny=true
                 end
+        end
+
+        if assignedAny then
+            save()
+            flushManager(true)
         end
 
         for n,job in pairs(data.foremanJobs) do
@@ -1465,10 +1477,92 @@ local function runRegionalManager()
             if not slot then break end
             turtle.select(slot)
             local before=turtle.getFuelLevel()
+            data.managerBucketSlot=slot
+            save()
             if not turtle.refuel(1) or turtle.getFuelLevel()<=before then break end
         end
         turtle.select(previous)
         return turtle.getFuelLevel()=="unlimited" or turtle.getFuelLevel()>=target
+    end
+
+    local function managerAtFuelChest()
+        if data.advance then return false end
+        local pose=data.managerPose
+        if pose.x==5 and pose.y==0 and pose.z==-4 and pose.dir==DIR_N then
+            local ok,x,y,z=pcall(gps.locate,2,false)
+            if not ok or not x or not y or not z or
+                math.abs(x-MANAGER_IDLE.x)>0.25 or math.abs(y)>0.25 or
+                math.abs(z-(MANAGER_IDLE.z+16*data.chunkIndex))>0.25 then
+                return false
+            end
+            pose.x=MANAGER_IDLE.x
+            pose.z=MANAGER_IDLE.z
+            save()
+            flushManager(true)
+        end
+        if pose.x~=MANAGER_IDLE.x or pose.y~=0 or
+            pose.z~=MANAGER_IDLE.z or pose.dir~=DIR_N then return false end
+        if data.commissioningComplete and data.gpsReady then
+            local ok,x,y,z=pcall(gps.locate,2,false)
+            if not ok or not x or not y or not z or
+                math.abs(x-MANAGER_IDLE.x)>0.25 or math.abs(y)>0.25 or
+                math.abs(z-(MANAGER_IDLE.z+16*data.chunkIndex))>0.25 then
+                return false
+            end
+        end
+        return true
+    end
+
+    local function refuelManagerAtChest(target)
+        if not managerAtFuelChest() or not wrapInventory("front") then return false end
+        local previous=turtle.getSelectedSlot()
+        local function returnBucket()
+            local slot=tonumber(data.managerBucketSlot)
+            if not slot then return true end
+            turtle.select(slot)
+            if turtle.getItemCount(slot)>0 and not turtle.refuel(0) then
+                if not turtle.drop(1) then turtle.select(previous);return false end
+            end
+            data.managerBucketSlot=nil
+            save()
+            return true
+        end
+        if not returnBucket() then return false end
+        if turtle.getFuelLevel()=="unlimited" then
+            turtle.select(previous)
+            return true
+        end
+        while turtle.getFuelLevel()<target do
+            local slot=nil
+            for i=1,16 do
+                if turtle.getItemCount(i)==0 then slot=i;break end
+            end
+            if not slot then turtle.select(previous);return false end
+            local kind=nil
+            for _,candidate in ipairs(FUEL_PRIORITY) do
+                if findInventorySlot("front",candidate) then kind=candidate;break end
+            end
+            if not kind then
+                refuelManagerTo(target)
+                if not returnBucket() then return false end
+                turtle.select(previous)
+                return turtle.getFuelLevel()>=target
+            end
+            if takeNamedFromFront(kind,1,slot)<1 then
+                turtle.select(previous)
+                return false
+            end
+            turtle.select(slot)
+            if not turtle.refuel(0) then turtle.select(previous);return false end
+            if kind=="lava_bucket" then
+                data.managerBucketSlot=slot
+                save()
+            end
+            if not turtle.refuel(1) then turtle.select(previous);return false end
+            if not returnBucket() then return false end
+        end
+        turtle.select(previous)
+        return true
     end
 
     local function chunkKey(role,index)
@@ -1494,8 +1588,12 @@ local function runRegionalManager()
             return blocked(string.format("Service requests P%d A%d B%d",pending,active,blockedCount))
         end
         if next(data.foremanJobs) then return blocked("Foreman job outstanding") end
-        if not enough(turtle.getFuelLevel(),16) and not refuelManagerTo(16) then
-            return blocked("RM needs 16 fuel in inventory")
+        if not managerAtFuelChest() then
+            return blocked("Move RM behind Foreman-2 fuel chest, face north, then restart")
+        end
+        if (not enough(turtle.getFuelLevel(),16) or data.managerBucketSlot) and
+            not refuelManagerAtChest(1000) then
+            return blocked("RM needs fuel or bucket return at fuel chest")
         end
         for row=1,16 do
             local m=data.miners[row]
@@ -1547,8 +1645,8 @@ local function runRegionalManager()
             end
         end
         if data.managerPose.chunkIndex~=data.chunkIndex or
-            data.managerPose.x~=5 or data.managerPose.y~=0 or
-            data.managerPose.z~=-4 or data.managerPose.dir~=DIR_N then
+            data.managerPose.x~=MANAGER_IDLE.x or data.managerPose.y~=0 or
+            data.managerPose.z~=MANAGER_IDLE.z or data.managerPose.dir~=DIR_N then
             return blocked("RM pose/chunk mismatch")
         end
         chunkBlockReason=nil
@@ -1624,7 +1722,7 @@ local function runRegionalManager()
                 local function faceNorth(target) return target==DIR_N and
                     data.managerPose.dir==DIR_N end
                 local ok,reason=travelChunkNorth(data.managerPose,savePose,
-                    faceNorth,-4,advance.target)
+                    faceNorth,MANAGER_IDLE.z,advance.target)
                 if not ok then advance.error=reason;save();return end
                 data.chunkIndex=advance.target
                 save();flushManager(true)
@@ -1635,8 +1733,8 @@ local function runRegionalManager()
                 save()
                 return
             end
-            if math.abs(x-5)>0.25 or math.abs(y)>0.25 or
-                math.abs(z-(-4+16*advance.target))>0.25 then
+            if math.abs(x-MANAGER_IDLE.x)>0.25 or math.abs(y)>0.25 or
+                math.abs(z-(MANAGER_IDLE.z+16*advance.target))>0.25 then
                 advance.error="Manager GPS differs from new idle position"
                 save();flushManager(true)
                 return
@@ -2280,6 +2378,14 @@ local function runRegionalManager()
 
             refreshGpsReady()
             updateRecallState()
+            if not data.advance and
+                (data.managerBucketSlot or
+                 (turtle.getFuelLevel()~="unlimited" and
+                  turtle.getFuelLevel()<=FOREMAN_FUEL_LOW)) and
+                now()-(data.lastManagerFuelAttempt or 0)>=10 then
+                data.lastManagerFuelAttempt=now()
+                refuelManagerAtChest(1000)
+            end
             runChunkAdvance()
 
             local expiredRequests={}

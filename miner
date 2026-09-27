@@ -397,23 +397,39 @@ local function runMinerCommissioning(cfg)
                     })
                 end
             elseif message.type=="commission_refuel" then
+                local burned=state.commissionBucketSlots or {}
                 for slot=1,16 do
                     turtle.select(slot)
                     while turtle.getFuelLevel()~="unlimited" and
                         turtle.getFuelLevel()<MINER_FUEL_TARGET and
                         turtle.getItemCount(slot)>0 and turtle.refuel(0) do
                         if not turtle.refuel(1) then break end
+                        if message.fuelKind=="lava_bucket" then
+                            burned[slot]=true
+                            state.commissionBucketSlots=burned
+                            save()
+                        end
                     end
                 end
                 local bucketCount=0
+                local bucketReturned=tonumber(state.commissionBucketReturned) or 0
                 if message.fuelKind=="lava_bucket" then
                     for slot=1,16 do
                         turtle.select(slot)
                         if turtle.getItemCount(slot)>0 and not turtle.refuel(0) then
                             local detail=turtle.getItemDetail and turtle.getItemDetail(slot)
                             if matchesItem(detail,"empty_bucket") or
-                                (not detail and slot<=tonumber(message.fuelUnits or 1)) then
+                                (not detail and burned[slot]) then
                                 bucketCount=bucketCount+turtle.getItemCount(slot)
+                                if faceCommissioning(DIR_S) then
+                                    turtle.select(slot)
+                                    if turtle.drop(1) then
+                                        bucketReturned=bucketReturned+1
+                                        state.commissionBucketReturned=bucketReturned
+                                        burned[slot]=nil
+                                        save()
+                                    end
+                                end
                             end
                         end
                     end
@@ -423,6 +439,7 @@ local function runMinerCommissioning(cfg)
                     type="commission_refueled",
                     bucketPresent=bucketCount>0,
                     bucketCount=bucketCount,
+                    bucketReturned=bucketReturned,
                     id=os.getComputerID(),
                     row=cfg.row,
                     fuel=turtle.getFuelLevel()
@@ -2740,7 +2757,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then

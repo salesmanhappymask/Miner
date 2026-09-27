@@ -7,6 +7,7 @@ local function runNavigator(cfg)
 
     local statePath="navigator" .. tostring(cfg.number) .. ".tmp"
     local state=loadTableLight(statePath)
+    local deploymentRecall=nil
     if not state then
         state={
             x=tonumber(cfg.startX) or 1,
@@ -67,7 +68,7 @@ local function runNavigator(cfg)
     end
 
     local function turnRight()
-        if state.recoveryLocked then return false end
+        if state.recoveryLocked or deploymentRecall then return false end
         state.turnIntent={from=state.dir,to=(state.dir+1)%4}
         save()
         if not turtle.turnRight() then
@@ -90,7 +91,7 @@ local function runNavigator(cfg)
     end
 
     local function moveTracked(kind,tx,ty,tz)
-        if state.recoveryLocked or tx< -2 or tx>19 or tz< -2 or tz>16 or
+        if state.recoveryLocked or deploymentRecall or tx< -2 or tx>19 or tz< -2 or tz>16 or
             ty<0 or ty>18 then return false end
         local intent={
             kind=kind,
@@ -137,7 +138,7 @@ local function runNavigator(cfg)
         return true
     end
 
-    local function refuelStartupFuel()
+    local function refuelStartupFuel(fuelKind)
         if turtle.getFuelLevel()=="unlimited" then return true end
         local selected=turtle.getSelectedSlot()
         for slot=1,16 do
@@ -152,9 +153,10 @@ local function runNavigator(cfg)
             local detail=turtle.getItemDetail and turtle.getItemDetail(slot)
             if turtle.getItemCount(slot)>0 and
                 (matchesItem(detail,"empty_bucket") or
-                 matchesItem(detail,"lava_bucket")) then
+                 matchesItem(detail,"lava_bucket") or
+                 (fuelKind=="lava_bucket" and not detail and not turtle.refuel(0))) then
                 if not face(DIR_S) then return false end
-                if not turtle.drop() then return false end
+                if not turtle.drop(1) then return false end
                 if not face(DIR_N) then return false end
             end
         end
@@ -243,78 +245,6 @@ local function runNavigator(cfg)
         saveTable("node.cfg",cfg)
         return true
     end
-
-    if state.recoveryLocked then
-        status("navigator","RECOVERY_LOCK",{
-            number=cfg.number,
-            x=state.x,y=state.y,z=state.z,
-            message=state.recoveryReason,session=cfg.session
-        })
-        error(state.recoveryReason)
-    end
-
-    if not state.deployed then
-        local deployRequested=state.deploying and true or false
-
-        while not deployRequested do
-            local sender,message=rednet.receive(PROTOCOL,2)
-            if sender==cfg.controller and type(message)=="table" and
-                message.type=="deploy_navigator" and
-                tonumber(message.number)==tonumber(cfg.number) then
-                deployRequested=true
-            end
-        end
-
-        if not calibrateOrientation() then
-            error("Navigator orientation calibration blocked")
-        end
-        while not refuelStartupFuel() do
-            status("navigator","WAITING_FUEL",{
-                number=cfg.number,
-                fuel=turtle.getFuelLevel(),
-                message="Waiting for startup fuel or bucket return",
-                session=cfg.session
-            })
-            sleep(5)
-        end
-
-        state.deploying=true
-        cfg.deploymentStarted=true
-        save()
-        if not saveTable("node.cfg",cfg) then error("Navigator deployment marker write failed") end
-
-        if not travelToSite() then
-            error("Navigator travel blocked")
-        end
-    end
-
-    cfg.x=state.x
-    cfg.y=state.y
-    cfg.z=state.z
-    cfg.deployed=state.deployed and true or false
-    saveTable("node.cfg",cfg)
-
-    if not ensureManagerRegistration(cfg) then
-        error("Navigator Regional Manager registration failed")
-    end
-
-    local modemSide=nil
-    for _,side in ipairs(SIDES) do
-        if peripheral.getType(side)=="modem" then
-            local ok,wireless=pcall(peripheral.call,side,"isWireless")
-            if ok and wireless then
-                modemSide=side
-                break
-            end
-        end
-    end
-
-    if not modemSide then
-        error("Navigator requires a Wireless Modem")
-    end
-
-    local modem=peripheral.wrap(modemSide)
-    modem.open(gps.CHANNEL_GPS)
 
     local function clearNavigatorLabel()
         for i=1,5 do
@@ -419,6 +349,219 @@ local function runNavigator(cfg)
 
         return true
     end
+
+    if state.recoveryLocked then
+        status("navigator","RECOVERY_LOCK",{
+            number=cfg.number,
+            x=state.x,y=state.y,z=state.z,
+            message=state.recoveryReason,session=cfg.session
+        })
+        error(state.recoveryReason)
+    end
+
+    if not ensureManagerRegistration(cfg) then
+        error("Navigator Regional Manager registration failed")
+    end
+
+    if not state.deployed then
+        local function setupMessage(sender,message)
+            if type(message)~="table" then return end
+            if sender==cfg.managerId and message.session==cfg.session and
+                message.type=="recall_command" then
+                deploymentRecall=message.mode or "NORMAL"
+            elseif sender==cfg.controller and message.type=="configure" and
+                message.target==os.getComputerID() then
+                send(cfg.controller,{type="install_ok",role="navigator",number=cfg.number})
+            end
+        end
+
+        local function pauseDeployment()
+            local mode=deploymentRecall or state.recallMode or "NORMAL"
+            deploymentRecall=nil
+            if not state.recalled or state.recallMode~=mode then
+                if not recallNavigator(mode) then
+                    status("navigator","RECALL_BLOCKED",{
+                        number=cfg.number,x=state.x,y=state.y,z=state.z,
+                        message="Initial deployment recall route blocked",
+                        session=cfg.session
+                    })
+                    return false
+                end
+            end
+            local lastHome=0
+            while state.recalled do
+                local sender,message=rednet.receive(PROTOCOL,1)
+                if sender==cfg.managerId and type(message)=="table" and
+                    message.session==cfg.session then
+                    if message.type=="resume_swarm" and state.recallMode~="PACK" then
+                        state.recalled=false
+                        state.recallMode=nil
+                        save()
+                    elseif message.type=="recall_command" and
+                        message.mode~=state.recallMode then
+                        if not recallNavigator(message.mode or "NORMAL") then
+                            status("navigator","RECALL_BLOCKED",{
+                                number=cfg.number,x=state.x,y=state.y,z=state.z,
+                                message="Initial deployment recall route blocked",
+                                session=cfg.session
+                            })
+                        end
+                    elseif message.type=="pack_clear" and state.recallMode=="PACK" then
+                        if clearNavigatorLabel() then
+                            state.packReady=true
+                            save()
+                            send(cfg.managerId,{type="pack_ready",role="navigator",
+                                number=cfg.number,session=cfg.session})
+                        end
+                    end
+                end
+                if state.recalled and now()-lastHome>=3 then
+                    send(cfg.managerId,{type="recall_home",role="navigator",
+                        number=cfg.number,id=os.getComputerID(),mode=state.recallMode,
+                        x=state.x,y=state.y,z=state.z,dir=state.dir,
+                        session=cfg.session})
+                    lastHome=now()
+                end
+            end
+            return true
+        end
+
+        while not state.deployed do
+            if deploymentRecall or state.recalled then
+                if not pauseDeployment() then sleep(1) end
+            else
+                local deployRequested=state.deploying and true or false
+                local startupFuelKind=state.startupFuelKind
+                local alreadyTraveling=state.deploying and
+                    (state.x~=cfg.startX or state.y~=cfg.startY or state.z~=cfg.startZ)
+
+                local lastWaitingStatus=-10
+                while not deployRequested and not deploymentRecall do
+                    if now()-lastWaitingStatus>=5 then
+                        status("navigator","WAITING_DEPLOY",{
+                            number=cfg.number,x=state.x,y=state.y,z=state.z,
+                            gpsHost=false,session=cfg.session
+                        })
+                        lastWaitingStatus=now()
+                    end
+                    local sender,message=rednet.receive(PROTOCOL,1)
+                    setupMessage(sender,message)
+                    if sender==cfg.controller and type(message)=="table" and
+                        message.type=="deploy_navigator" and
+                        tonumber(message.number)==tonumber(cfg.number) then
+                        deployRequested=true
+                        startupFuelKind=message.fuelKind or startupFuelKind
+                        state.startupFuelKind=startupFuelKind
+                        save()
+                    end
+                end
+
+                if deployRequested and not deploymentRecall and not alreadyTraveling then
+                    if not calibrateOrientation() then
+                        status("navigator","DEPLOY_BLOCKED",{
+                            number=cfg.number,message="Orientation calibration blocked",
+                            session=cfg.session
+                        })
+                        sleep(1)
+                    else
+                        while not deploymentRecall and not refuelStartupFuel(startupFuelKind) do
+                            status("navigator","WAITING_FUEL",{
+                                number=cfg.number,fuel=turtle.getFuelLevel(),
+                                message="Waiting for startup fuel or bucket return",
+                                session=cfg.session
+                            })
+                            local sender,message=rednet.receive(PROTOCOL,1)
+                            setupMessage(sender,message)
+                        end
+                        local receipt=false
+                        local lastReady=0
+                        local lastReceiptStatus=-10
+                        while not receipt and not deploymentRecall do
+                            if now()-lastReady>=1 then
+                                send(cfg.controller,{type="navigator_fuel_ready",number=cfg.number,
+                                    fuel=turtle.getFuelLevel()})
+                                lastReady=now()
+                            end
+                            if now()-lastReceiptStatus>=5 then
+                                status("navigator","WAITING_FUEL_RECEIPT",{
+                                    number=cfg.number,x=state.x,y=state.y,z=state.z,
+                                    gpsHost=false,session=cfg.session
+                                })
+                                lastReceiptStatus=now()
+                            end
+                            local sender,message=rednet.receive(PROTOCOL,0.5)
+                            setupMessage(sender,message)
+                            if sender==cfg.controller and type(message)=="table" and
+                                message.type=="navigator_fuel_receipt" and
+                                tonumber(message.number)==tonumber(cfg.number) then
+                                receipt=true
+                            end
+                        end
+                    end
+                end
+
+                if deployRequested and not deploymentRecall and
+                    (alreadyTraveling or turtle.getFuelLevel()=="unlimited" or
+                     turtle.getFuelLevel()>=800) then
+                    state.deploying=true
+                    cfg.deploymentStarted=true
+                    save()
+                    if not saveTable("node.cfg",cfg) then
+                        error("Navigator deployment marker write failed")
+                    end
+                    local travelDone=false
+                    parallel.waitForAny(function()
+                        travelDone=travelToSite()
+                    end,function()
+                        local lastTravelStatus=-10
+                        while not travelDone do
+                            if now()-lastTravelStatus>=5 then
+                                status("navigator","DEPLOYING",{
+                                    number=cfg.number,x=state.x,y=state.y,z=state.z,
+                                    gpsHost=false,session=cfg.session
+                                })
+                                lastTravelStatus=now()
+                            end
+                            local sender,message=rednet.receive(PROTOCOL,0.5)
+                            setupMessage(sender,message)
+                        end
+                    end)
+                    if not travelDone and not deploymentRecall then
+                        status("navigator","DEPLOY_BLOCKED",{
+                            number=cfg.number,x=state.x,y=state.y,z=state.z,
+                            message="Navigator travel blocked; retrying and listening for recall",
+                            session=cfg.session
+                        })
+                        sleep(1)
+                    end
+                end
+            end
+        end
+    end
+
+    cfg.x=state.x
+    cfg.y=state.y
+    cfg.z=state.z
+    cfg.deployed=state.deployed and true or false
+    saveTable("node.cfg",cfg)
+
+    local modemSide=nil
+    for _,side in ipairs(SIDES) do
+        if peripheral.getType(side)=="modem" then
+            local ok,wireless=pcall(peripheral.call,side,"isWireless")
+            if ok and wireless then
+                modemSide=side
+                break
+            end
+        end
+    end
+
+    if not modemSide then
+        error("Navigator requires a Wireless Modem")
+    end
+
+    local modem=peripheral.wrap(modemSide)
+    modem.open(gps.CHANNEL_GPS)
 
     local function sendNavigatorStatus()
         status("navigator",state.chunkTravel and "CHUNK_MOVING" or
@@ -594,7 +737,7 @@ if not cfg or cfg.role~="navigator" then
     error("Navigator role file requires navigator node.cfg")
 end
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then

@@ -155,7 +155,6 @@ local function runForeman(cfg)
     local commissionWave = {}
     local flags = {
         commissionStart=false,
-        navigatorSetupStart=false,
         startMining=false,
         dockGranted=false,
         recallMode=nil,
@@ -234,12 +233,16 @@ local function runForeman(cfg)
     end
 
     local function saveQueue()
-        saveTableLight(queuePath,{queue=queue,active=active,resolved=resolved})
+        if not saveTableLight(queuePath,{queue=queue,active=active,resolved=resolved}) then
+            error("Foreman service queue write failed; service halted")
+        end
     end
 
     local function saveDock()
         if number == 1 and dock then
-            saveTableLight("dock.tmp",dock)
+            if not saveTableLight("dock.tmp",dock) then
+                error("Foreman dock queue write failed; dispatch halted")
+            end
         end
     end
 
@@ -1514,7 +1517,12 @@ local function runForeman(cfg)
                 local message = event[3]
                 local protocol = event[4]
                 if protocol == PROTOCOL and type(message) == "table" then
-                    if sender==cfg.managerId and message.type=="manager_job" and
+                    if message.type=="foreman_setup_probe" and sender==cfg.controller and
+                        message.session==cfg.session and tonumber(message.number)==number then
+                        send(sender,{type="foreman_setup_status",number=number,
+                            deployed=true,probeId=message.probeId,session=cfg.session,
+                            x=state.x,y=state.y,z=state.z})
+                    elseif sender==cfg.managerId and message.type=="manager_job" and
                         message.session==cfg.session and message.foremanNumber==number and
                         state.phase~="RECALLED_PAUSED" and not state.recallMode and
                         not flags.recallMode then
@@ -1578,16 +1586,6 @@ local function runForeman(cfg)
                     elseif message.type=="dock_released" and sender==cfg.controller then
                         state.dockReleasePending=nil
                         saveState()
-                    elseif message.type == "navigator_setup_start" and number==4 and sender==cfg.controller then
-                        if state.navigatorSetupDone then
-                            send(cfg.controller,{
-                                type="navigator_setup_done",
-                                number=4,
-                                id=id
-                            })
-                        else
-                            flags.navigatorSetupStart=true
-                        end
                     elseif message.type == "commission_start" and message.number == number and sender == cfg.controller then
                         if state.setupDone then
                             send(cfg.controller,{
@@ -2083,6 +2081,7 @@ local function runForeman(cfg)
         local lastWarning=now()
 
         while not ready do
+            if flags.recallMode then return false end
             if now()-lastRequest>=1 then
                 send(workerId,{type="return_installer"})
                 lastRequest=now()
@@ -2135,6 +2134,7 @@ local function runForeman(cfg)
         local driveReceived=false
 
         while not driveReceived do
+            if flags.recallMode then return false end
             turtle.suck(1)
             sleep(0.1)
 
@@ -2172,6 +2172,7 @@ local function runForeman(cfg)
         lastWarning=now()
 
         while not returned do
+            if flags.recallMode then return false end
             if now()-lastTaken>=1 then
                 send(workerId,{type="installer_taken"})
                 lastTaken=now()
@@ -2195,6 +2196,11 @@ local function runForeman(cfg)
     end
 
     local function validateCommissionPackage()
+        if state.commissionProgress and state.commissionProgress.row and
+            not (state.commissionedRows and
+                 state.commissionedRows[state.commissionProgress.row]) then
+            return true
+        end
         local remaining = 0
         state.commissionedRows = state.commissionedRows or {}
 
@@ -2248,12 +2254,26 @@ local function runForeman(cfg)
             return false
         end
 
+        local progress=state.commissionProgress
+        if progress and progress.row~=row then
+            state.phase="RECOVERY_LOCK"
+            state.recoveryLocked=true
+            state.recoveryReason="Different miner commissioning stage is still pending"
+            saveState()
+            return false
+        end
+        if not progress then
+            progress={row=row,bootstrap=useBootstrapDrive}
+            state.commissionProgress=progress
+            saveState()
+        end
+
         local targetX=row
         local targetZ=0
         local stagingZ=-1
         local temporary=false
 
-        if useBootstrapDrive then
+        if useBootstrapDrive and not progress.workerId then
             targetX=1
             targetZ=0
             stagingZ=-1
@@ -2321,7 +2341,8 @@ local function runForeman(cfg)
                 return false
             end
 
-            if not placeDriveAndDiskAt(targetX,targetZ) then
+            if not progress.workerId and not useBootstrapDrive and
+                not placeDriveAndDiskAt(targetX,targetZ) then
                 return false
             end
         end
@@ -2339,46 +2360,48 @@ local function runForeman(cfg)
             return false
         end
 
-        if frontComputerId() then
+        if frontComputerId() and frontComputerId()~=progress.workerId then
             state.phase="PLACEMENT_ERROR"
             saveState()
             sendState("Miner target already occupied")
             return false
         end
 
-        if turtle.detect() then
+        if not progress.workerId and turtle.detect() then
             turtle.dig()
             sleep(0.2)
         end
 
-        if turtle.detect() then
+        if not progress.workerId and turtle.detect() then
             state.phase="PLACEMENT_ERROR"
             saveState()
             sendState("Miner target remains blocked")
             return false
         end
 
-        if not selfSelectKind("wireless_mining_turtle") then
+        if not progress.workerId and not selfSelectKind("wireless_mining_turtle") then
             state.phase="WAITING_SUPPLIES"
             saveState()
             sendState("Wireless Mining Turtle missing")
             return false
         end
 
-        if not turtle.place() then
+        if not progress.workerId and not turtle.place() then
             state.phase="PLACEMENT_ERROR"
             saveState()
             sendState("Cannot place Miner-" .. tostring(row))
             return false
         end
 
-        local workerId=waitFrontComputerId(1)
+        local workerId=progress.workerId or waitFrontComputerId(1)
         if not workerId then
             state.phase="PLACEMENT_ERROR"
             saveState()
             sendState("Cannot identify Miner-" .. tostring(row))
             return false
         end
+        progress.workerId=workerId
+        saveState()
 
         pcall(peripheral.call,"front","turnOn")
 
@@ -2399,7 +2422,8 @@ local function runForeman(cfg)
         local lastConfigure=0
         local warning=now()
 
-        while not installed do
+        while not installed and not progress.installed do
+            if flags.recallMode then return false end
             if now()-lastConfigure>=1 then
                 send(workerId,configurePacket)
                 pcall(peripheral.call,"front","turnOn")
@@ -2412,6 +2436,8 @@ local function runForeman(cfg)
 
             if reply then
                 installed=reply
+                progress.installed=true
+                saveState()
             elseif now()-warning>=10 then
                 state.phase="WAITING_MINER_BOOT"
                 saveState()
@@ -2427,21 +2453,46 @@ local function runForeman(cfg)
             return false
         end
 
-        local setupKind=state.commissionFuelKind
-        local setupUnits=state.commissionFuelUnits
+        local setupKind=progress.setupKind or state.commissionFuelKind
+        local setupUnits=progress.setupUnits or state.commissionFuelUnits
         if not setupKind or not setupUnits then return false end
-        if not selfDropKind(setupKind,setupUnits) then
-            state.phase="WAITING_FUEL"
+        progress.setupKind=setupKind
+        progress.setupUnits=setupUnits
+        saveState()
+        if not progress.fuelHanded then
+            if progress.fuelTransferPending then
+                state.phase="WAITING_FUEL"
+                saveState()
+                sendState("Miner-" .. tostring(row) .. " fuel transfer was interrupted; inspect inventory")
+                return false
+            end
+            progress.fuelTransferPending=true
             saveState()
-            sendState("Cannot give Miner-" .. tostring(row) .. " startup fuel")
+            if not selfDropKind(setupKind,setupUnits) then
+                state.phase="WAITING_FUEL"
+                saveState()
+                sendState("Miner-" .. tostring(row) .. " fuel transfer incomplete; inspect inventory")
+                return false
+            end
+            progress.fuelHanded=true
+            progress.fuelTransferPending=nil
+            progress.bucketsBefore=selfCount("empty_bucket")
+            saveState()
+        end
+        if setupKind=="lava_bucket" and not selfTargetSlot("empty_bucket") then
+            state.phase="WAITING_BUCKET_RETURN"
+            saveState()
+            sendState("Foreman has no inventory space for Miner-" .. tostring(row) .. " empty bucket")
             return false
         end
+        local bucketsBefore=progress.bucketsBefore or selfCount("empty_bucket")
 
         local fueled=nil
         local lastFuel=0
         warning=now()
 
-        while not fueled do
+        while not fueled and not progress.fuelDone do
+            if flags.recallMode then return false end
             if now()-lastFuel>=1 then
                 send(workerId,{type="commission_refuel",fuelKind=setupKind,
                     fuelUnits=setupUnits})
@@ -2466,25 +2517,21 @@ local function runForeman(cfg)
                 if recovered==true then recovered=1 end
                 local expected=setupKind=="lava_bucket" and setupUnits or 0
                 if expected>recovered and
-                    (tonumber(reply.bucketCount) or (reply.bucketPresent and 1 or 0))<expected-recovered then
+                    ((tonumber(reply.bucketReturned) or 0)<expected-recovered or
+                     selfCount("empty_bucket")<bucketsBefore+expected-recovered) then
                     state.phase="WAITING_BUCKET_RETURN"
                     saveState()
                     sendState("Miner-" .. tostring(row) .. " has not returned its empty bucket")
                     return false
                 end
-                while recovered<expected do
-                    local before=selfCount("empty_bucket")
-                    if not turtle.suck(1) or selfCount("empty_bucket")<=before then
-                        state.phase="WAITING_BUCKET_RETURN"
-                        saveState()
-                        sendState("Cannot retrieve empty bucket from Miner-" .. tostring(row))
-                        return false
-                    end
-                    recovered=recovered+1
+                if recovered<expected then
+                    recovered=expected
                     state.commissionBucketsRecovered=state.commissionBucketsRecovered or {}
                     state.commissionBucketsRecovered[row]=recovered
                     saveState()
                 end
+                progress.fuelDone=true
+                saveState()
             elseif now()-warning>=10 then
                 state.phase="WAITING_MINER_FUEL"
                 saveState()
@@ -2493,15 +2540,20 @@ local function runForeman(cfg)
             end
         end
 
-        if not recoverInstaller(workerId,targetX,targetZ,useBootstrapDrive) then
-            return false
+        if not progress.installerRecovered then
+            if not recoverInstaller(workerId,targetX,targetZ,useBootstrapDrive) then
+                return false
+            end
+            progress.installerRecovered=true
+            saveState()
         end
 
         local deployed=nil
         local lastDeploy=0
         warning=now()
 
-        while not deployed do
+        while not deployed and not progress.deployed do
+            if flags.recallMode then return false end
             if now()-lastDeploy>=1 then
                 send(workerId,{type="deploy_miner"})
                 lastDeploy=now()
@@ -2515,6 +2567,8 @@ local function runForeman(cfg)
             if reply then
                 if reply.type=="miner_deployed" then
                     deployed=reply
+                    progress.deployed=true
+                    saveState()
                 else
                     state.phase="MINER_DEPLOY_BLOCKED"
                     saveState()
@@ -2760,372 +2814,6 @@ local function runForeman(cfg)
         return leaveDockJunction()
     end
 
-    local function navigatorVertical(targetY)
-        if number~=4 or targetY<0 or targetY>15 then
-            return false
-        end
-
-        while state.y<targetY do
-            local intent={
-                seq=state.seq+1,
-                from=state.y,
-                to=state.y+1,
-                fuelBefore=turtle.getFuelLevel()
-            }
-            state.verticalIntent=intent
-            saveState()
-
-            if not turtle.up() then
-                state.verticalIntent=nil
-                saveState()
-                return false
-            end
-
-            state.y=intent.to
-            state.seq=intent.seq
-            checkpointForeman()
-            state.verticalIntent=nil
-            saveState()
-        end
-
-        while state.y>targetY do
-            local intent={
-                seq=state.seq+1,
-                from=state.y,
-                to=state.y-1,
-                fuelBefore=turtle.getFuelLevel()
-            }
-            state.verticalIntent=intent
-            saveState()
-
-            if not turtle.down() then
-                state.verticalIntent=nil
-                saveState()
-                return false
-            end
-
-            state.y=intent.to
-            state.seq=intent.seq
-            checkpointForeman()
-            state.verticalIntent=nil
-            saveState()
-        end
-
-        return state.y==targetY
-    end
-
-    local function navigatorForward(targetDir)
-        if number~=4 or not faceTracked(targetDir) then
-            return false
-        end
-
-        local tx=state.x
-        local tz=state.z
-
-        if targetDir==DIR_N then
-            tz=tz+1
-        elseif targetDir==DIR_E then
-            tx=tx+1
-        elseif targetDir==DIR_S then
-            tz=tz-1
-        else
-            tx=tx-1
-        end
-
-        if tx<-1 or tx>16 or tz<-5 or tz>14 or state.y<10 or state.y>15 then
-            return false
-        end
-
-        local intent={
-            seq=state.seq+1,
-            fuelBefore=turtle.getFuelLevel(),
-            from={x=state.x,z=state.z,y=state.y,dir=state.dir},
-            to={x=tx,z=tz,y=state.y,dir=state.dir}
-        }
-
-        state.motionIntent=intent
-        saveState()
-
-        if not turtle.forward() then
-            state.motionIntent=nil
-            saveState()
-            return false
-        end
-
-        state.x=tx
-        state.z=tz
-        state.seq=intent.seq
-        checkpointForeman()
-        state.motionIntent=nil
-        saveState()
-        return true
-    end
-
-    local function navigatorGoTo(tx,ty,tz)
-        if number~=4 then
-            return false
-        end
-
-        if state.y<10 then
-            if not navigatorVertical(10) then return false end
-        end
-
-        while state.x<tx do
-            if not navigatorForward(DIR_E) then return false end
-        end
-        while state.x>tx do
-            if not navigatorForward(DIR_W) then return false end
-        end
-        while state.z<tz do
-            if not navigatorForward(DIR_N) then return false end
-        end
-        while state.z>tz do
-            if not navigatorForward(DIR_S) then return false end
-        end
-
-        return navigatorVertical(ty)
-    end
-
-    local function loadNavigatorSupplies()
-        if number~=4 then
-            return false
-        end
-
-        if selfCount("computer")>=4 and selfCount("wireless_modem")>=4 and
-            selfCount("disk_drive")>=4 then
-            return true
-        end
-
-        if not atSupply() then
-            return false
-        end
-
-        local needComputers=4-selfCount("computer")
-        if needComputers>0 and takeNamedIntoSelf("computer",needComputers)<needComputers then
-            state.phase="WAITING_NAVIGATOR_SUPPLIES"
-            saveState()
-            sendState("Need 4 regular Computers in the supply chest")
-            return false
-        end
-
-        local needModems=4-selfCount("wireless_modem")
-        if needModems>0 and takeNamedIntoSelf("wireless_modem",needModems)<needModems then
-            state.phase="WAITING_NAVIGATOR_SUPPLIES"
-            saveState()
-            sendState("Need 4 Wireless Modems in the supply chest")
-            return false
-        end
-
-        local needDrives=4-selfCount("disk_drive")
-        if needDrives>0 and takeNamedIntoSelf("disk_drive",needDrives)<needDrives then
-            state.phase="WAITING_NAVIGATOR_SUPPLIES"
-            saveState()
-            sendState("Need 4 additional Disk Drives in the supply chest")
-            return false
-        end
-
-        return exitDockHome()
-    end
-
-    local function deployNavigator(navNumber)
-        local site=NAVIGATOR_SITES[navNumber]
-        if not site then return false end
-
-        local sx=site.x
-        local sz=site.z-1
-
-        if not navigatorGoTo(sx,site.y,sz) then
-            return false
-        end
-
-        if not navigatorVertical(site.y-1) then
-            return false
-        end
-
-        if peripheral.getType("front")~="drive" then
-            if turtle.detect() then
-                return false
-            end
-            if not selfSelectKind("disk_drive") or not turtle.place() then
-                return false
-            end
-            sleep(0.2)
-        end
-
-        if not disk.isPresent("front") then
-            if not selfSelectKind("floppy") or not turtle.drop(1) then
-                return false
-            end
-            waitFrontDisk(1)
-        end
-
-        if not disk.isPresent("front") then
-            return false
-        end
-
-        if not navigatorVertical(site.y) then
-            return false
-        end
-
-        if not faceTracked(DIR_N) then
-            return false
-        end
-
-        if frontComputerId() then
-            return false
-        end
-
-        if turtle.detect() then
-            return false
-        end
-
-        if not selfSelectKind("computer") or not turtle.place() then
-            return false
-        end
-
-        local navigatorId=waitFrontComputerId(1)
-        if not navigatorId then
-            return false
-        end
-
-        if not navigatorVertical(site.y+1) then
-            return false
-        end
-
-        if turtle.detect() then
-            return false
-        end
-
-        if not selfSelectKind("wireless_modem") or not turtle.place() then
-            return false
-        end
-
-        sleep(0.2)
-
-        if not navigatorVertical(site.y) then
-            return false
-        end
-
-        pcall(peripheral.call,"front","turnOn")
-
-        local packet={
-            type="configure",
-            target=navigatorId,
-            role="navigator",
-            number=navNumber,
-            managerId=cfg.managerId,
-            masterForemanId=cfg.masterForemanId,
-            session=cfg.session
-        }
-
-        local installed=false
-        local lastConfigure=0
-        local deadline=now()+30
-
-        while not installed and now()<deadline do
-            if now()-lastConfigure>=1 then
-                send(navigatorId,packet)
-                pcall(peripheral.call,"front","turnOn")
-                lastConfigure=now()
-            end
-
-            local _,reply=waitInbox(function(sender,m)
-                return sender==navigatorId and type(m)=="table" and
-                    m.type=="install_ok" and m.role=="navigator" and
-                    tonumber(m.number)==navNumber
-            end,0.5)
-
-            if reply then
-                installed=true
-            end
-        end
-
-        if not installed then
-            return false
-        end
-
-        return true
-    end
-
-    local function setupNavigators()
-        if number~=4 then return false end
-
-        state.navigatorSetupActive=true
-        state.navigatorsReady=state.navigatorsReady or {}
-        state.phase="NAVIGATOR_SETUP"
-        saveState()
-        sendState("Preparing GPS Navigators")
-
-        if not state.navigatorSuppliesLoaded then
-            if not loadNavigatorSupplies() then
-                return false
-            end
-            state.navigatorSuppliesLoaded=true
-            saveState()
-        end
-
-        local order={1,2,4,3}
-
-        for _,navNumber in ipairs(order) do
-            if not state.navigatorsReady[navNumber] then
-                state.phase="NAVIGATOR_" .. tostring(navNumber)
-                saveState()
-                sendState("Deploying Navigator-" .. tostring(navNumber))
-
-                if not deployNavigator(navNumber) then
-                    state.phase="NAVIGATOR_SETUP_BLOCKED"
-                    saveState()
-                    sendState("Navigator-" .. tostring(navNumber) .. " deployment blocked")
-                    return false
-                end
-
-                state.navigatorsReady[navNumber]=true
-                saveState()
-            end
-        end
-
-        if state.y<10 then
-            if not navigatorVertical(10) then return false end
-        end
-
-        if not navigatorGoTo(0,10,-5) then
-            return false
-        end
-
-        if not navigatorVertical(0) then
-            return false
-        end
-
-        if not faceTracked(DIR_N) then
-            return false
-        end
-
-        state.navigatorSetupActive=false
-        state.navigatorSetupDone=true
-        state.navigatorSuppliesLoaded=nil
-        state.phase="IDLE"
-        saveState()
-        checkpointForeman()
-        sendState("GPS Navigator deployment complete")
-
-        for i=1,3 do
-            send(cfg.controller,{
-                type="navigator_setup_done",
-                number=4,
-                id=id
-            })
-            send(cfg.managerId,{
-                type="navigator_setup_done",
-                number=4,
-                id=id,
-                session=cfg.session
-            })
-            sleep(0.1)
-        end
-
-        return true
-    end
-
     local function commissionAssigned()
         state.phase="COMMISSIONING"
         state.commissionedRows = state.commissionedRows or {}
@@ -3209,6 +2897,7 @@ local function runForeman(cfg)
 
                 state.commissionedRows[row]=true
                 state.commissionFuelLoaded=false
+                state.commissionProgress=nil
                 saveState()
 
                 if row<last then
@@ -3298,7 +2987,9 @@ local function runForeman(cfg)
             state.setupBlockReason="Supply chest is not readable directly north of Master Foreman"
             return false
         end
-        if not refuelAtFrontTo(FOREMAN_FUEL_TARGET,false) then
+        if turtle.getFuelLevel()~="unlimited" and
+            turtle.getFuelLevel()<=FOREMAN_FUEL_LOW and
+            not refuelAtFrontTo(FOREMAN_FUEL_TARGET,false) then
             state.setupBlockReason="Supply chest needs fuel for Master Foreman"
             return false
         end
@@ -3506,9 +3197,22 @@ local function runForeman(cfg)
     end
 
     local function masterCommissionNavigator(n)
-        if selfCount("advanced_wireless_turtle")<1 or
-            selfCount(state.navigatorFuelKind or "lava_bucket")<(state.navigatorFuelUnits or 1) then
+        local progress=state.navigatorProgress
+        if progress and progress.number~=n then
+            state.phase="RECOVERY_LOCK"
+            state.recoveryLocked=true
+            state.recoveryReason="Another navigator handoff is unfinished"
+            saveState()
             return nil
+        end
+        if progress and progress.stage=="TRAVELING" then
+            return progress.id
+        end
+        if not progress then
+            if selfCount("advanced_wireless_turtle")<1 or
+                selfCount(state.navigatorFuelKind or "lava_bucket")<(state.navigatorFuelUnits or 1) then
+                return nil
+            end
         end
 
         if not goTo(1,-1) then
@@ -3529,22 +3233,35 @@ local function runForeman(cfg)
             return nil
         end
 
-        if frontComputerId() then
-            state.phase="PLACEMENT_ERROR"
+        if not progress then
+            if frontComputerId() then
+                state.phase="PLACEMENT_ERROR"
+                saveState()
+                sendState("Navigator bootstrap position occupied")
+                return nil
+            end
+            progress={number=n,stage="PLACEMENT_PENDING"}
+            state.navigatorProgress=progress
             saveState()
-            sendState("Navigator bootstrap position occupied")
-            return nil
         end
 
-        if not selfSelectKind("advanced_wireless_turtle") then
+        local newId=frontComputerId()
+        if progress.id and newId~=progress.id then
+            state.phase="WAITING_NAVIGATOR_RECOVERY"
+            saveState()
+            sendState("Navigator-"..tostring(n).." left the bootstrap pad before travel was recorded")
             return nil
         end
-
-        if not turtle.place() then
-            return nil
+        if not newId then
+            if progress.stage~="PLACEMENT_PENDING" or
+                not selfSelectKind("advanced_wireless_turtle") or not turtle.place() then
+                state.phase="WAITING_NAVIGATOR_RECOVERY"
+                saveState()
+                sendState("Navigator-"..tostring(n).." placement must be inspected")
+                return nil
+            end
+            newId=waitFrontComputerId(1)
         end
-
-        local newId=waitFrontComputerId(1)
         if not newId then
             state.phase="PLACEMENT_ERROR"
             saveState()
@@ -3552,6 +3269,9 @@ local function runForeman(cfg)
             return nil
         end
 
+        progress.id=newId
+        if progress.stage=="PLACEMENT_PENDING" then progress.stage="PLACED" end
+        saveState()
         pcall(peripheral.call,"front","turnOn")
 
         local packet={
@@ -3564,7 +3284,8 @@ local function runForeman(cfg)
             session=cfg.session
         }
 
-        local installed=nil
+        local installed=progress.stage=="INSTALLED" or progress.stage=="FUEL_PENDING" or
+            progress.stage=="FUEL_GIVEN"
         local lastConfigure=0
 
         while not installed do
@@ -3583,14 +3304,39 @@ local function runForeman(cfg)
 
             if reply then
                 installed=reply
+                progress.stage="INSTALLED"
+                saveState()
             end
         end
 
-        if not selfDropKind(state.navigatorFuelKind,state.navigatorFuelUnits) then
-            state.phase="WAITING_FUEL"
+        if progress.stage=="FUEL_PENDING" then
+            state.phase="WAITING_NAVIGATOR_RECOVERY"
             saveState()
-            sendState("Cannot give Navigator-" .. tostring(n) .. " startup fuel")
+            sendState("Navigator-"..tostring(n).." fuel handoff interrupted; inspect both inventories")
             return nil
+        end
+        if progress.stage~="FUEL_GIVEN" then
+            progress.stage="FUEL_PENDING"
+            saveState()
+            if not selfDropKind(state.navigatorFuelKind,state.navigatorFuelUnits) then
+                state.phase="WAITING_FUEL"
+                saveState()
+                sendState("Navigator-" .. tostring(n) .. " fuel handoff incomplete; inspect inventories")
+                return nil
+            end
+            progress.bucketsBefore=selfCount("empty_bucket")
+            progress.stage="FUEL_GIVEN"
+            saveState()
+        end
+
+        local bucketsBefore=progress.bucketsBefore or selfCount("empty_bucket")
+        local expectedBucket=state.navigatorFuelKind=="lava_bucket" and 1 or 0
+        while expectedBucket>0 and not selfTargetSlot("empty_bucket") do
+            state.phase="WAITING_BUCKET_RETURN"
+            saveState()
+            sendState("Foreman-1 has no inventory space for Navigator-" .. tostring(n) .. " empty bucket")
+            if flags.recallMode then return nil end
+            sleep(2)
         end
 
         local traveling=nil
@@ -3603,44 +3349,84 @@ local function runForeman(cfg)
                 send(newId,{
                     type="deploy_navigator",
                     target=newId,
-                    number=n
+                    number=n,
+                    fuelKind=state.navigatorFuelKind
                 })
                 lastDeploy=now()
             end
 
             local _,reply=waitInbox(function(sender,m)
                 return sender==newId and type(m)=="table" and
-                    m.type=="navigator_traveling" and tonumber(m.number)==n
+                    (m.type=="navigator_fuel_ready" or
+                     m.type=="navigator_traveling") and tonumber(m.number)==n
             end,0.5)
 
-            if reply then
+            if reply and reply.type=="navigator_fuel_ready" then
+                if expectedBucket==0 or selfCount("empty_bucket")>=bucketsBefore+expectedBucket then
+                    send(newId,{type="navigator_fuel_receipt",number=n})
+                else
+                    state.phase="WAITING_BUCKET_RETURN"
+                    saveState()
+                    sendState("Navigator-" .. tostring(n) .. " must return its empty bucket")
+                end
+            elseif reply then
                 traveling=reply
             end
         end
 
+        progress.stage="TRAVELING"
+        saveState()
         sendState("Navigator-" .. tostring(n) .. " traveling")
         return newId
     end
 
     local function masterCommissionForeman(n)
-        if selfCount("narcissistic_wireless_turtle")<1
-            or selfCount("disk_drive")<1
-            or selfCount("floppy")<1
-            or selfCount("wireless_mining_turtle")<4
-            or selfCount("ender_dump")<1
-            or selfCount("ender_fuel")<1
-            or not state.foremanFuelPackages or not state.foremanFuelPackages[n] or
-            selfCount(state.foremanFuelPackages[n].kind)<state.foremanFuelPackages[n].units then
+        local progress=state.foremanProgress
+        if progress and progress.number~=n then
+            state.phase="RECOVERY_LOCK"
+            state.recoveryLocked=true
+            state.recoveryReason="Another foreman handoff is unfinished"
+            saveState()
             return nil
         end
-
-        if not goTo(1,-1) then
-            return nil
+        if not progress then
+            if selfCount("narcissistic_wireless_turtle")<1
+                or selfCount("disk_drive")<1
+                or selfCount("floppy")<1
+                or selfCount("wireless_mining_turtle")<4
+                or selfCount("ender_dump")<1
+                or selfCount("ender_fuel")<1
+                or not state.foremanFuelPackages or not state.foremanFuelPackages[n] or
+                selfCount(state.foremanFuelPackages[n].kind)<state.foremanFuelPackages[n].units then
+                return nil
+            end
         end
 
+        local function probeDeployed(workerId)
+            local probeId=tostring(n)..":"..tostring(now())..":"..tostring(math.random(1,999999))
+            for attempt=1,3 do
+                send(workerId,{type="foreman_setup_probe",number=n,probeId=probeId,
+                    session=cfg.session})
+                local _,reply=waitInbox(function(sender,m)
+                    return sender==workerId and type(m)=="table" and
+                        m.type=="foreman_setup_status" and m.probeId==probeId and
+                        tonumber(m.number)==n and m.session==cfg.session
+                end,1)
+                if reply then return reply.deployed==true end
+            end
+            return false
+        end
+
+        if progress and progress.stage=="DEPLOY_SENT" and progress.id and
+            probeDeployed(progress.id) then
+            return progress.id
+        end
+
+        if not goTo(1,-1) or not ensureGroundLevel() then
+            return nil
+        end
         faceTracked(DIR_N)
         saveState()
-
         if state.dir~=DIR_N then
             state.phase="PLACEMENT_ERROR"
             saveState()
@@ -3648,29 +3434,44 @@ local function runForeman(cfg)
             return nil
         end
 
-        if frontComputerId() then
-            state.phase="PLACEMENT_ERROR"
+        if not progress then
+            if frontComputerId() then
+                state.phase="PLACEMENT_ERROR"
+                saveState()
+                sendState("Foreman bootstrap position occupied")
+                return nil
+            end
+            progress={number=n,stage="PLACEMENT_PENDING",nextItem=1}
+            state.foremanProgress=progress
             saveState()
-            sendState("Foreman bootstrap position occupied")
-            return nil
         end
 
-        if not selfSelectKind("narcissistic_wireless_turtle") then
+        local newId=frontComputerId()
+        if progress.id and newId~=progress.id then
+            state.phase="WAITING_FOREMAN_RECOVERY"
+            saveState()
+            sendState("Foreman-"..tostring(n).." left bootstrap pad before deployment receipt")
             return nil
         end
-
-        if not turtle.place() then
-            return nil
+        if not newId then
+            if progress.stage~="PLACEMENT_PENDING" or
+                not selfSelectKind("narcissistic_wireless_turtle") or not turtle.place() then
+                state.phase="WAITING_FOREMAN_RECOVERY"
+                saveState()
+                sendState("Foreman-"..tostring(n).." placement must be inspected")
+                return nil
+            end
+            newId=waitFrontComputerId(1)
         end
-
-        local newId=waitFrontComputerId(1)
         if not newId then
             state.phase="PLACEMENT_ERROR"
             saveState()
-            sendState("Cannot identify Foreman-" .. tostring(n))
+            sendState("Cannot identify Foreman-"..tostring(n))
             return nil
         end
-
+        progress.id=newId
+        if progress.stage=="PLACEMENT_PENDING" then progress.stage="PLACED" end
+        saveState()
         pcall(peripheral.call,"front","turnOn")
 
         local packet={
@@ -3684,64 +3485,142 @@ local function runForeman(cfg)
             masterForemanId=cfg.masterForemanId,
             session=cfg.session
         }
-
-        local installed=nil
+        local installed=progress.stage=="INSTALLED" or
+            progress.stage=="PACKAGING" or progress.stage=="DEPLOY_SENT"
         local lastConfigure=0
-
         while not installed do
             if flags.recallMode then return nil end
-
             if now()-lastConfigure>=1 then
                 send(newId,packet)
                 pcall(peripheral.call,"front","turnOn")
                 lastConfigure=now()
             end
-
             local _,reply=waitInbox(function(sender,m)
-                return sender==newId and type(m)=="table" and m.type=="install_ok" and m.number==n
+                return sender==newId and type(m)=="table" and
+                    m.type=="install_ok" and tonumber(m.number)==n
             end,0.5)
-
             if reply then
-                installed=reply
+                installed=true
+                progress.stage="INSTALLED"
+                saveState()
             end
         end
 
-        if not selfDropKind(state.foremanFuelPackages[n].kind,
-            state.foremanFuelPackages[n].units) then
+        local fuel=state.foremanFuelPackages and state.foremanFuelPackages[n]
+        if not fuel then
+            state.phase="WAITING_FOREMAN_RECOVERY"
+            saveState()
+            sendState("Foreman-"..tostring(n).." fuel package record missing")
             return nil
         end
-        if not selfDropKind("disk_drive",1) then
+        local items={
+            {kind=fuel.kind,count=fuel.units},
+            {kind="disk_drive",count=1},
+            {kind="floppy",count=1},
+            {kind="wireless_mining_turtle",count=4},
+            {kind="ender_dump",count=1},
+            {kind="ender_fuel",count=1}
+        }
+        local function probeInventory(kind,index)
+            local probeId=tostring(n)..":"..tostring(index)..":"..
+                tostring(now())..":"..tostring(math.random(1,999999))
+            for attempt=1,3 do
+                send(newId,{type="package_probe",target=newId,number=n,
+                    transferId=probeId,kind=kind})
+                local _,reply=waitInbox(function(sender,m)
+                    return sender==newId and type(m)=="table" and
+                        m.type=="package_inventory" and m.transferId==probeId and
+                        m.kind==kind and tonumber(m.number)==n
+                end,1)
+                if reply then return tonumber(reply.count) end
+            end
             return nil
         end
-        if not selfDropKind("floppy",1) then
-            return nil
+
+        if progress.stage~="DEPLOY_SENT" then
+            progress.stage="PACKAGING"
+            saveState()
+            for i=progress.nextItem or 1,#items do
+                if flags.recallMode then return nil end
+                local item=items[i]
+                if progress.transfer and progress.transfer.index~=i then
+                    state.phase="WAITING_FOREMAN_RECOVERY"
+                    saveState()
+                    sendState("Foreman package journal has conflicting item index")
+                    return nil
+                end
+                local received=probeInventory(item.kind,i)
+                if not received then
+                    state.phase="WAITING_FOREMAN_PACKAGE"
+                    saveState()
+                    sendState("Cannot inspect Foreman-"..tostring(n).." inventory")
+                    return nil
+                end
+                if not progress.transfer then
+                    progress.transfer={index=i,baseline=received}
+                    saveState()
+                end
+                local expected=progress.transfer.baseline+item.count
+                if received<progress.transfer.baseline or received>expected then
+                    state.phase="WAITING_FOREMAN_RECOVERY"
+                    saveState()
+                    sendState("Foreman-"..tostring(n).." "..item.kind.." count disagrees with journal")
+                    return nil
+                end
+                local remaining=expected-received
+                if remaining>0 then
+                    if selfCount(item.kind)<remaining then
+                        local missing=remaining-selfCount(item.kind)
+                        if not goTo(0,-1) or not faceTracked(DIR_N) or
+                            takeNamedIntoSelf(item.kind,missing)<missing or
+                            not goTo(1,-1) or not faceTracked(DIR_N) or
+                            frontComputerId()~=newId then
+                            state.phase="WAITING_FOREMAN_PACKAGE"
+                            saveState()
+                            sendState("Foreman-"..tostring(n).." needs "..remaining.." "..item.kind)
+                            return nil
+                        end
+                    end
+                    if not selfDropKind(item.kind,remaining) then
+                        state.phase="WAITING_FOREMAN_PACKAGE"
+                        saveState()
+                        sendState("Foreman-"..tostring(n).." needs "..remaining.." "..item.kind)
+                        return nil
+                    end
+                    received=probeInventory(item.kind,i)
+                end
+                if received~=expected then
+                    state.phase="WAITING_FOREMAN_PACKAGE"
+                    saveState()
+                    sendState("Foreman-"..tostring(n).." "..item.kind.." receipt pending")
+                    return nil
+                end
+                progress.nextItem=i+1
+                progress.transfer=nil
+                saveState()
+            end
+            progress.stage="DEPLOY_SENT"
+            saveState()
         end
-        if not selfDropKind("wireless_mining_turtle",4) then
-            return nil
-        end
-        if not selfDropKind("ender_dump",1) then return nil end
-        if not selfDropKind("ender_fuel",1) then return nil end
 
         local deployed=nil
         local lastDeploy=0
-
         while not deployed do
             if flags.recallMode then return nil end
-
             if now()-lastDeploy>=1 then
                 send(newId,{type="deploy_foreman",target=newId})
                 lastDeploy=now()
             end
-
             local _,reply=waitInbox(function(sender,m)
-                return sender==newId and type(m)=="table" and m.type=="foreman_deployed" and m.number==n
+                return sender==newId and type(m)=="table" and
+                    m.type=="foreman_deployed" and tonumber(m.number)==n
             end,0.5)
-
             if reply then
                 deployed=reply
+            elseif frontComputerId()~=newId and probeDeployed(newId) then
+                deployed=true
             end
         end
-
         return newId
     end
 
@@ -3815,6 +3694,8 @@ local function runForeman(cfg)
                 cfg.navigators[n]=nid
                 saveTable("node.cfg",cfg)
                 saveState()
+                state.navigatorProgress=nil
+                saveState()
             end
         end
 
@@ -3823,17 +3704,29 @@ local function runForeman(cfg)
 
         for _,n in ipairs({4,3,2}) do
             if not state.foremenReady[n] then
-                if not masterLoadForemanPackage(n) then return false end
+                if not (state.foremanProgress and state.foremanProgress.number==n) and
+                    not masterLoadForemanPackage(n) then return false end
                 local fid=masterCommissionForeman(n)
                 if not fid then
-                    state.phase="WAITING_SETUP"
+                    if state.phase=="WAITING_FOREMAN_PACKAGE" or
+                        state.phase=="WAITING_FOREMAN_RECOVERY" then
+                        state.setupBlockReason="Foreman-"..tostring(n).." "..
+                            state.phase.." item "..
+                            tostring(state.foremanProgress and state.foremanProgress.nextItem or "?")
+                    else
+                        state.phase="WAITING_SETUP"
+                        state.setupBlockReason="Foreman-"..tostring(n).." setup paused"
+                    end
                     saveState()
-                    sendState("Foreman-" .. tostring(n) .. " setup paused")
+                    sendState(state.setupBlockReason)
                     return false
                 end
                 state.foremenReady[n]=true
                 cfg.foremen[n]=fid
                 saveTable("node.cfg",cfg)
+                saveState()
+                state.foremanProgress=nil
+                state.setupBlockReason=nil
                 saveState()
             end
         end
@@ -4063,6 +3956,13 @@ local function runForeman(cfg)
     end
 
     local function serviceRequest(req)
+        if state.fuelTransferPendingId then
+            state.phase="SERVICE_TRANSFER_ERROR"
+            saveState()
+            sendState("Miner fuel handoff needs inventory inspection: " ..
+                tostring(state.fuelTransferPendingId))
+            return false
+        end
         active = req
         saveQueue()
         state.phase="SERVICING"
@@ -4129,6 +4029,14 @@ local function runForeman(cfg)
             local kind=state.runtimeFuelKind
             local moved=state.fuelTransferredUnits
             if state.fuelTransferId~=req.requestId then
+                if state.fuelTransferPendingId==req.requestId then
+                    state.phase="SERVICE_TRANSFER_ERROR"
+                    saveState()
+                    sendState("Miner-" .. tostring(req.row) .. " fuel handoff interrupted; inspect inventories")
+                    return false
+                end
+                state.fuelTransferPendingId=req.requestId
+                saveState()
                 local transferred
                 transferred,moved=dropMinerFuel(kind,state.runtimeFuelUnits)
                 if not transferred then
@@ -4139,6 +4047,7 @@ local function runForeman(cfg)
                 end
                 state.fuelTransferId=req.requestId
                 state.fuelTransferredUnits=moved
+                state.fuelTransferPendingId=nil
                 saveState()
             end
 
@@ -4477,7 +4386,10 @@ local function runForeman(cfg)
                     if flags.recallMode then
                         pauseForSetupRecall()
                     else
-                        if state.phase~="WAITING_SUPPLIES" and state.phase~="WAITING_SEED_FUEL" then
+                        if state.phase~="WAITING_SUPPLIES" and state.phase~="WAITING_SEED_FUEL" and
+                            state.phase~="WAITING_FOREMAN_PACKAGE" and
+                            state.phase~="WAITING_FOREMAN_RECOVERY" and
+                            state.phase~="WAITING_NAVIGATOR_RECOVERY" then
                             state.phase="WAITING_SETUP"
                         end
                         saveState()
@@ -4506,6 +4418,7 @@ local function runForeman(cfg)
                 sendState("All foremen released for simultaneous commissioning")
 
                 while not commissionAssigned() do
+                    if flags.recallMode then pauseForSetupRecall() end
                     state.phase="WAITING_SETUP"
                     saveState()
                     sendState("Foreman-1 commissioning paused, retrying")
@@ -4517,6 +4430,7 @@ local function runForeman(cfg)
             end
 
             while not (state.groupsCommissioned[2] and state.groupsCommissioned[3] and state.groupsCommissioned[4]) do
+                if flags.recallMode then pauseForSetupRecall() end
                 state.phase="WAITING_SETUP"
                 saveState()
                 sendState("Waiting for all foremen to finish commissioning")
@@ -4696,8 +4610,8 @@ local function runMaster()
     local newMaster=false
     local id=os.getComputerID()
 
-    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 and cfg.version~=64 and cfg.version~=65 and cfg.version~=66 and cfg.version~=67 and cfg.version~=68 and cfg.version~=69 and cfg.version~=70 then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v71.")
+    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 and cfg.version~=64 and cfg.version~=65 and cfg.version~=66 and cfg.version~=67 and cfg.version~=68 and cfg.version~=69 and cfg.version~=70 and cfg.version~=71 and cfg.version~=72 and cfg.version~=73 then
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v74.")
     end
 
     if not cfg then
@@ -4804,7 +4718,7 @@ else
         error("Foreman role file requires foreman node.cfg")
     end
 
-    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 then
+    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 then
         cfg.version=VERSION
         saveTable("node.cfg",cfg)
     elseif cfg.version~=VERSION then

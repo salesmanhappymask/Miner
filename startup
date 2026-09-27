@@ -68,6 +68,28 @@ local function ensureLocal(name)
     return true
 end
 
+local function releaseBase(role)
+    local found=false
+    for _,marker in ipairs({"active_release.new","active_release","active_release.bak"}) do
+        if fs.exists(marker) then
+            found=true
+            local version=(readFile(marker) or ""):match("^%s*(%d+)%s*$")
+            if version then
+                local base="releases/" .. version .. "/"
+                local ready=readFile(base .. "ready")
+                local common=readFile(base .. "common")
+                if ready==version and common and
+                    common:match("^%s*VERSION%s*=%s*(%d+)")==version and
+                    fs.exists(base .. role) then
+                    return base
+                end
+            end
+        end
+    end
+    if found then error("No complete active release; inspect releases and activation markers") end
+    return nil
+end
+
 local function runFile(path,role)
     local ok,err=pcall(dofile,path)
 
@@ -124,12 +146,15 @@ if runningFromDisk() and not cfg then
         error("Installer disk is missing common/bootstrap")
     end
 else
-    if not ensureLocal("common") then
-        error("Cannot install common")
-    end
+    base=releaseBase(roleFile) or ""
+    if base=="" then
+        if not ensureLocal("common") then
+            error("Cannot install common")
+        end
 
-    if not ensureLocal(roleFile) then
-        error("Cannot install role file " .. tostring(roleFile))
+        if not ensureLocal(roleFile) then
+            error("Cannot install role file " .. tostring(roleFile))
+        end
     end
 end
 

@@ -1,5 +1,5 @@
-VERSION = 71
-PROTOCOL = "miner_swarm_v71"
+VERSION = 74
+PROTOCOL = "miner_swarm_v74"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -27,6 +27,7 @@ FOREMAN_FUEL = {
     [3]={x=10,y=0,z=-2},
     [4]={x=14,y=0,z=-2}
 }
+MANAGER_IDLE = {x=6,y=0,z=-3}
 NAVIGATOR_RECALL = {
     [1]={x=1,y=1,z=-1},
     [2]={x=5,y=1,z=-1},

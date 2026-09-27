@@ -92,7 +92,21 @@ local function bootstrap()
         while not deployed do
             local sender, message = rednet.receive(PROTOCOL, 5)
             if sender == configured.controller and type(message) == "table" then
-                if message.type == "deploy_foreman" and message.target == myID then
+                if message.type=="package_probe" and message.target==myID and
+                    tonumber(message.number)==tonumber(cfg.number) then
+                    send(configured.controller,{
+                        type="package_inventory",
+                        number=cfg.number,
+                        transferId=message.transferId,
+                        kind=message.kind,
+                        count=selfCount(message.kind),
+                        id=myID
+                    })
+                elseif message.type=="configure" and message.target==myID then
+                    send(configured.controller,{
+                        type="install_ok",id=myID,role="foreman",number=cfg.number
+                    })
+                elseif message.type == "deploy_foreman" and message.target == myID then
                     local statePath="foreman" .. tostring(cfg.number) .. ".tmp"
                     local state={
                         x=cfg.startX,
