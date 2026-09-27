@@ -1,7 +1,11 @@
 local args={...}
 local duration=tonumber(args[1]) or 120
-if args[2] or duration%1~=0 or duration<1 or duration>600 then
-  print("Usage: pvp_stop [seconds 1-600]")
+local controller=tonumber(args[2]) or 901
+if args[3] or (args[1] and not tonumber(args[1])) or
+  (args[2] and not tonumber(args[2])) or
+  duration%1~=0 or duration<1 or duration>600 or
+  controller%1~=0 or controller<0 or controller>=65500 then
+  print("Usage: pvp_stop [seconds 1-600] [controller ID]")
   return
 end
 
@@ -21,8 +25,8 @@ while os.clock()<deadline do
     message={cmd="stop"},
     sProtocol="chunkquarry"
   }
-  modem.transmit(65535,673,packet)
+  modem.transmit(65535,controller,packet)
   sent=sent+1
   sleep(1.1)
 end
-print("Sent " .. sent .. " broadcast stop packets. Delivery is unconfirmed.")
+print("Sent " .. sent .. " broadcasts as " .. controller .. ". Delivery is unconfirmed.")
