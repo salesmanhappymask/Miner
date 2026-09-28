@@ -677,7 +677,6 @@ local function runMiner(cfg)
 
     local path="miner.tmp"
     local state=loadTableLight(path)
-    if state then sanitizeStaleTimestamp(state,"lastPackSend") end
 
     if not state then
         local monitorState=requestPoseBackup("miner",5,cfg.session)
@@ -1046,12 +1045,6 @@ local function runMiner(cfg)
             session=cfg.session
         })
         lastStatus = now()
-    end
-
-    if state.gpsWitnessSkipped then
-        sendState("Boot position check skipped: " .. tostring(state.gpsWitnessSkipped))
-        state.gpsWitnessSkipped=nil
-        save()
     end
 
     local function requestPacket(arrived)
