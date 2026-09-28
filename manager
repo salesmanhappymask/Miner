@@ -46,7 +46,7 @@ local function runRegionalManager()
         error("Regional Manager state unreadable; refusing to create a new session")
     end
 
-    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70 or data.version==71 or data.version==72 or data.version==73 or data.version==74 or data.version==75 or data.version==76 or data.version==77) then
+    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70 or data.version==71 or data.version==72 or data.version==73 or data.version==74 or data.version==75 or data.version==76 or data.version==77 or data.version==78) then
         data.version=VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end

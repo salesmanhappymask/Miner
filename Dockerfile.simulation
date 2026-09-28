@@ -1,5 +1,5 @@
 FROM alpine:3.20
 RUN apk add --no-cache lua5.4
 WORKDIR /swarm
-COPY quarry_work/v77 /swarm/quarry_work/v77
-CMD ["lua5.4", "quarry_work/v77/simulate_swarm_grid.lua"]
+COPY quarry_work/v79 /swarm/quarry_work/v79
+CMD ["lua5.4", "quarry_work/v79/simulate_swarm_grid.lua"]

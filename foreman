@@ -3043,42 +3043,6 @@ local function runForeman(cfg)
         return true
     end
 
-    local function masterLoadMinerFuelPackage(n)
-        if not goTo(0,-1) or not faceTracked(DIR_N) then return false end
-        state.foremanMinerFuelPackages=state.foremanMinerFuelPackages or {}
-        if not state.foremanMinerFuelPackages[n] then
-            local reserved=state.foremanFuelPackages and state.foremanFuelPackages[n]
-            local selected,units
-            for _,kind in ipairs(FUEL_PRIORITY) do
-                local perMiner=math.ceil(MINER_FUEL_TARGET/FUEL_VALUE[kind])
-                local keep=reserved and reserved.kind==kind and reserved.units or 0
-                if selfCount(kind)+frontFuelCount(kind)>=perMiner*4+keep then
-                    selected,units=kind,perMiner
-                    break
-                end
-            end
-            if not selected then
-                state.setupBlockReason="Supply chest needs four miner fuel packets for Foreman-"..tostring(n)
-                state.phase="WAITING_SUPPLIES"
-                saveState()
-                sendState(state.setupBlockReason)
-                return false
-            end
-            local keep=reserved and reserved.kind==selected and reserved.units or 0
-            local needed=units*4+keep-selfCount(selected)
-            if needed>0 and takeNamedIntoSelf(selected,needed)<needed then
-                state.setupBlockReason="Cannot load miner fuel for Foreman-"..tostring(n)
-                state.phase="WAITING_SUPPLIES"
-                saveState()
-                sendState(state.setupBlockReason)
-                return false
-            end
-            state.foremanMinerFuelPackages[n]={kind=selected,units=units*4}
-            saveState()
-        end
-        return true
-    end
-
     local function masterLoadForemanPackage(n)
         if not goTo(0,-1) or not faceTracked(DIR_N) then return false end
         if not returnBucketsAtFuel() then
@@ -3128,7 +3092,6 @@ local function runForeman(cfg)
                 saveState()
             end
         end
-        if not masterLoadMinerFuelPackage(n) then return false end
         state.setupBlockReason=nil
         return true
     end
@@ -3578,14 +3541,17 @@ local function runForeman(cfg)
             {kind="ender_dump",count=1},
             {kind="ender_fuel",count=1}
         }
-        if progress.stage~="DEPLOY_SENT" then
-            if not state.foremanMinerFuelPackages or
-                not state.foremanMinerFuelPackages[n] then
-                if not masterLoadMinerFuelPackage(n) or
-                    not goTo(1,-1) or not faceTracked(DIR_N) then return nil end
-            end
+        if progress.stage~="DEPLOY_SENT" and state.foremanMinerFuelPackages and
+            state.foremanMinerFuelPackages[n] then
             local minerFuel=state.foremanMinerFuelPackages[n]
             items[#items+1]={kind=minerFuel.kind,count=minerFuel.units}
+        elseif progress.stage~="DEPLOY_SENT" and
+            (progress.nextItem or 1)>6 then
+            state.phase="WAITING_FOREMAN_RECOVERY"
+            state.setupBlockReason="Foreman-"..tostring(n).." saved fuel transfer record missing"
+            saveState()
+            sendState(state.setupBlockReason)
+            return nil
         end
         local function probeInventory(kind,index)
             local probeId=tostring(n)..":"..tostring(index)..":"..
@@ -4682,8 +4648,8 @@ local function runMaster()
     local newMaster=false
     local id=os.getComputerID()
 
-    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 and cfg.version~=64 and cfg.version~=65 and cfg.version~=66 and cfg.version~=67 and cfg.version~=68 and cfg.version~=69 and cfg.version~=70 and cfg.version~=71 and cfg.version~=72 and cfg.version~=73 and cfg.version~=74 and cfg.version~=75 and cfg.version~=76 and cfg.version~=77 then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v78.")
+    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 and cfg.version~=64 and cfg.version~=65 and cfg.version~=66 and cfg.version~=67 and cfg.version~=68 and cfg.version~=69 and cfg.version~=70 and cfg.version~=71 and cfg.version~=72 and cfg.version~=73 and cfg.version~=74 and cfg.version~=75 and cfg.version~=76 and cfg.version~=77 and cfg.version~=78 then
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v79.")
     end
 
     if not cfg then
@@ -4790,7 +4756,7 @@ else
         error("Foreman role file requires foreman node.cfg")
     end
 
-    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 then
+    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 or cfg.version==78 then
         cfg.version=VERSION
         saveTable("node.cfg",cfg)
     elseif cfg.version~=VERSION then
