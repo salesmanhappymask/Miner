@@ -46,7 +46,7 @@ local function runRegionalManager()
         error("Regional Manager state unreadable; refusing to create a new session")
     end
 
-    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70 or data.version==71 or data.version==72 or data.version==73 or data.version==74 or data.version==75 or data.version==76 or data.version==77 or data.version==78 or data.version==79 or data.version==80 or data.version==81 or data.version==82 or data.version==83 or data.version==84 or data.version==85 or data.version==86 or data.version==87 or data.version==88) then
+    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70 or data.version==71 or data.version==72 or data.version==73 or data.version==74 or data.version==75 or data.version==76 or data.version==77 or data.version==78 or data.version==79 or data.version==80 or data.version==81 or data.version==82 or data.version==83 or data.version==84 or data.version==85 or data.version==86 or data.version==87 or data.version==88 or data.version==89) then
         data.version=VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end
@@ -427,6 +427,23 @@ local function runRegionalManager()
         if data.advance then return "NEXT CHUNK "..tostring(data.advance.target)..
             "  |  "..tostring(data.advance.phase).."  |  "..tostring(data.advance.error or "Working") end
         if not data.recall.mode then
+            if not data.swarmStarted then
+                if not data.gpsReady then return "START WAIT: GPS hosts not ready" end
+                if not data.minerSetupApproved then return "START WAIT: miner setup approval" end
+                for n=1,4 do
+                    local f=data.foremen[n]
+                    if not f or not f.setupDone then
+                        return "START WAIT: Foreman-"..tostring(n)..
+                            " setup "..tostring(f and f.state or "offline")
+                    end
+                end
+                for row=1,16 do
+                    if not data.miners[row] or not data.miners[row].id then
+                        return "START WAIT: Miner-"..tostring(row).." registration"
+                    end
+                end
+                return "START WAIT: master commissioning confirmation"
+            end
             local completed=0
             for row=1,16 do
                 if data.miners[row] and data.miners[row].state=="COMPLETE" then
