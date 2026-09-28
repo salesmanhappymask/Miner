@@ -74,8 +74,8 @@ for _,name in ipairs(releaseFiles) do
     if not staged[name] then staged[name]=fetch(name) end
 end
 local version=staged.version:match("^%s*(%d+)%s*$")
-if not version or tonumber(version)<85 then
-    error("Remote release must be version 85 or later; nothing removed")
+if not version or tonumber(version)<86 then
+    error("Remote release must be version 86 or later; nothing removed")
 end
 if staged.common:match("^%s*VERSION%s*=%s*(%d+)")~=version then
     error("Common/version mismatch; nothing removed")
