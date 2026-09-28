@@ -1,0 +1,45 @@
+local out="diagnostics.txt"
+local function readFile(path)
+    local h=fs.open(path,"r")
+    if not h then return nil end
+    local data=h.readAll() or ""
+    h.close()
+    return data
+end
+local function append(h,title,body)
+    h.write("\n===== "..title.." =====\n")
+    h.write(body or "<missing>")
+    h.write("\n")
+end
+if debugFlush then pcall(debugFlush) end
+sleep(1)
+local h=fs.open(out,"w")
+if not h then error("Cannot create diagnostics.txt") end
+h.write("QUARRY SWARM DIAGNOSTIC BUNDLE\n")
+h.write("version="..tostring(VERSION or readFile("version") or "unknown").."\n")
+h.write("computer_id="..tostring(os.getComputerID()).."\n")
+h.write("label="..tostring(os.getComputerLabel() or "").."\n")
+h.write("clock="..tostring(os.clock()).."\n")
+h.write("free_space="..tostring(fs.getFreeSpace("")).."\n")
+local root=fs.list("")
+table.sort(root)
+h.write("root_files="..table.concat(root,",").."\n")
+local stateFiles={"version","updater.cfg","node.cfg","world_anchor","regional_manager.tmp","regional_manager.tmp.bak","regional_manager.tmp.new","foreman1.tmp","foreman2.tmp","foreman3.tmp","foreman4.tmp","miner.tmp","navigator.tmp","dock.tmp"}
+for _,path in ipairs(stateFiles) do
+    if fs.exists(path) and not fs.isDir(path) then append(h,path,readFile(path)) end
+end
+if fs.exists("logs") and fs.isDir("logs") then
+    local logs=fs.list("logs")
+    table.sort(logs)
+    for _,name in ipairs(logs) do
+        local path=fs.combine("logs",name)
+        if not fs.isDir(path) then append(h,path,readFile(path)) end
+    end
+end
+h.close()
+print("Diagnostic bundle created: "..out)
+if fs.exists("push") then
+    shell.run("push",out)
+else
+    print("push is not installed; upload diagnostics.txt manually")
+end
