@@ -14,6 +14,7 @@ local function runForeman(cfg)
     local statePath = "foreman" .. tostring(number) .. ".tmp"
     local queuePath = "foreman" .. tostring(number) .. "_queue.tmp"
     local state=loadTableLight(statePath)
+    if state then sanitizeStaleTimestamp(state,"lastPackSend") end
 
     if not state then
         local monitorState=requestPoseBackup("foreman",5,cfg.session)
@@ -295,6 +296,12 @@ local function runForeman(cfg)
             session=cfg.session
         })
         lastStatus = now()
+    end
+
+    if state.gpsWitnessSkipped then
+        sendState("Boot position check skipped: " .. tostring(state.gpsWitnessSkipped))
+        state.gpsWitnessSkipped=nil
+        saveState()
     end
 
     local function pushInbox(sender,message)
@@ -3402,12 +3409,77 @@ local function runForeman(cfg)
         end
 
         faceTracked(DIR_N)
+        saveState()
 
         if peripheral.getType("front")=="drive" then
             state.phase="VERTICAL_ERROR"
             saveState()
-            sendState("Bootstrap Disk Drive detected at ground level")
-            return false
+            sendState("Bootstrap Disk Drive is at ground level; correcting placement")
+
+            local slot=selfTargetSlot("disk_drive")
+            if not slot then
+                sendState("No room to recover misplaced ground bootstrap Disk Drive")
+                return false
+            end
+
+            turtle.select(slot)
+            if not turtle.dig() then
+                sendState("Cannot recover misplaced ground bootstrap Disk Drive")
+                return false
+            end
+
+            if not ensureInstallerLevel() then
+                return false
+            end
+
+            faceTracked(DIR_N)
+
+            local driveSlot=selfFindSlot("disk_drive")
+            if not driveSlot then
+                ensureGroundLevel()
+                return false
+            end
+
+            turtle.select(driveSlot)
+            if not turtle.place() then
+                ensureGroundLevel()
+                return false
+            end
+            waitFrontDrive(1)
+
+            if peripheral.getType("front")~="drive" then
+                ensureGroundLevel()
+                return false
+            end
+
+            if not disk.isPresent("front") then
+                if not selfSelectKind("floppy") or not turtle.drop(1) then
+                    ensureGroundLevel()
+                    return false
+                end
+                waitFrontDisk(1)
+            end
+
+            if not disk.isPresent("front") then
+                ensureGroundLevel()
+                state.phase="PLACEMENT_ERROR"
+                saveState()
+                sendState("Bootstrap floppy verification failed after correction")
+                return false
+            end
+
+            if not ensureGroundLevel() then
+                return false
+            end
+
+            faceTracked(DIR_N)
+
+            if peripheral.getType("front")=="drive" then
+                state.phase="VERTICAL_ERROR"
+                saveState()
+                sendState("Bootstrap Disk Drive remained at ground level after correction")
+                return false
+            end
         end
 
         saveState()
@@ -4628,6 +4700,10 @@ local function runForeman(cfg)
         end
 
         if cfg.master and not state.setupDone then
+            local SETUP_STALL_LIMIT=5
+            local setupStallReason=nil
+            local setupStallCount=0
+
             while not state.masterSetupDone do
                 if flags.recallMode then
                     pauseForSetupRecall()
@@ -4638,10 +4714,36 @@ local function runForeman(cfg)
                     if flags.recallMode then
                         pauseForSetupRecall()
                     else
-                        if state.phase~="WAITING_SUPPLIES" and state.phase~="WAITING_SEED_FUEL" and
-                            state.phase~="WAITING_FOREMAN_PACKAGE" and
-                            state.phase~="WAITING_FOREMAN_RECOVERY" and
-                            state.phase~="WAITING_NAVIGATOR_RECOVERY" then
+                        local waitingOnSupplies=
+                            state.phase=="WAITING_SUPPLIES" or state.phase=="WAITING_SEED_FUEL" or
+                            state.phase=="WAITING_FOREMAN_PACKAGE" or
+                            state.phase=="WAITING_FOREMAN_RECOVERY" or
+                            state.phase=="WAITING_NAVIGATOR_RECOVERY"
+
+                        if waitingOnSupplies then
+                            setupStallReason=nil
+                            setupStallCount=0
+                        else
+                            local reason=state.setupBlockReason or state.phase or "unknown"
+                            if reason==setupStallReason then
+                                setupStallCount=setupStallCount+1
+                            else
+                                setupStallReason=reason
+                                setupStallCount=1
+                            end
+
+                            if setupStallCount>=SETUP_STALL_LIMIT then
+                                state.recoveryLocked=true
+                                state.recoveryReason="Master setup repeated the same failure "..
+                                    tostring(setupStallCount).." times without progress: "..tostring(reason)
+                                state.phase="RECOVERY_LOCK"
+                                saveState()
+                                while true do
+                                    sendState(state.recoveryReason)
+                                    sleep(5)
+                                end
+                            end
+
                             state.phase="WAITING_SETUP"
                         end
                         saveState()

@@ -121,7 +121,16 @@ function worldPose(localX,localY,localZ,chunkIndex,origin)
 end
 
 function now()
+    if os.epoch then
+        return os.epoch("utc")/1000
+    end
     return os.clock()
+end
+
+function sanitizeStaleTimestamp(t,key)
+    if type(t)=="table" and type(t[key])=="number" and t[key]>now() then
+        t[key]=nil
+    end
 end
 
 function readFile(path)
@@ -1036,11 +1045,21 @@ function verifyBootWitness(state,origin,hadIntent)
         return false,"Fuel differs from saved pose after reboot; possible world rollback"
     end
     if not origin or type(state.x)~="number" or
-        type(state.y)~="number" or type(state.z)~="number" or
-        not gps or not gps.locate then return true end
+        type(state.y)~="number" or type(state.z)~="number" then
+        state.gpsWitnessSkipped="No world origin recorded yet"
+        return true
+    end
+    if not gps or not gps.locate then
+        state.gpsWitnessSkipped="GPS unavailable at boot"
+        return true
+    end
     local ok,x,y,z=pcall(gps.locate,2,false)
     if not ok or type(x)~="number" or type(y)~="number" or
-        type(z)~="number" then return true end
+        type(z)~="number" then
+        state.gpsWitnessSkipped="GPS did not respond at boot"
+        return true
+    end
+    state.gpsWitnessSkipped=nil
     local ex,ey,ez=worldPose(state.x,state.y,state.z,state.chunkIndex,origin)
     if ex and (math.abs(x-ex)>0.25 or math.abs(y-ey)>0.25 or
         math.abs(z-ez)>0.25) then

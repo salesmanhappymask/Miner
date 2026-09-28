@@ -40,6 +40,7 @@ local function runRegionalManager()
     if mon then mon.setTextScale(0.5) end
 
     local data=loadTableLight("regional_manager.tmp")
+    if data then sanitizeStaleTimestamp(data,"lastManagerFuelAttempt") end
     if not data and
         (fs.exists("regional_manager.tmp") or fs.exists("regional_manager.tmp.new") or
          fs.exists("regional_manager.tmp.bak")) then
