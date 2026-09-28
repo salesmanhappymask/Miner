@@ -28,10 +28,9 @@ end
 local startup=fetch("startup")
 local common=fetch("common")
 local bootstrap=fetch("bootstrap")
-local foremanInstaller=fetch("install_foreman1")
-local managerInstaller=fetch("rm_install")
+local setup=fetch("setup")
 
-if not startup or not common or not bootstrap or not foremanInstaller or not managerInstaller then
+if not startup or not common or not bootstrap or not setup then
     error("Could not download modular installer files")
 end
 
@@ -64,12 +63,8 @@ for slot=1,16 do
                     error("Could not write disk/bootstrap")
                 end
 
-                if not writeFile("disk/install_foreman1",foremanInstaller) then
-                    error("Could not write disk/install_foreman1")
-                end
-
-                if not writeFile("disk/rm_install",managerInstaller) then
-                    error("Could not write disk/rm_install")
+                if not writeFile("disk/setup",setup) then
+                    error("Could not write disk/setup")
                 end
 
                 disk.setLabel(driveSide,"miner")

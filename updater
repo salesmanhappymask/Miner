@@ -63,17 +63,25 @@ elseif cfg and cfg.role then
 else
     role="bootstrap"
 end
+local admin=regional=="1" or master=="1"
 
 local version=fetch("version"):match("^%s*(%d+)%s*$")
 if not version then error("Invalid remote version") end
 if activeVersion()==version and
     read("releases/"..version.."/common") and
-    read("releases/"..version.."/"..role) then
+    read("releases/"..version.."/"..role) and
+    (not admin or (read("setup") and read("movement_controller") and
+    read("enter_foreman_origin"))) then
     print("Already current: "..version)
     return
 end
 
 local files={"common",role,"prep"}
+if admin then
+    files[#files+1]="setup"
+    files[#files+1]="movement_controller"
+    files[#files+1]="enter_foreman_origin"
+end
 local contents={}
 for _,name in ipairs(files) do contents[name]=fetch(name) end
 local startup=fetch("startup")
@@ -106,6 +114,11 @@ write(base.."/ready",version)
 
 write("startup.next",startup)
 write("updater.next",updater)
+if admin then
+    for _,name in ipairs({"setup","movement_controller","enter_foreman_origin"}) do
+        write(name..".next",contents[name])
+    end
+end
 if fs.exists("startup") then
     if fs.exists("startup.previous") then fs.delete("startup.previous") end
     fs.copy("startup","startup.previous")
@@ -118,6 +131,12 @@ if fs.exists("startup") then fs.delete("startup") end
 fs.move("startup.next","startup")
 if fs.exists("updater") then fs.delete("updater") end
 fs.move("updater.next","updater")
+if admin then
+    for _,name in ipairs({"setup","movement_controller","enter_foreman_origin"}) do
+        if fs.exists(name) then fs.delete(name) end
+        fs.move(name..".next",name)
+    end
+end
 
 write("active_release.new",version)
 if fs.exists("active_release.bak") then fs.delete("active_release.bak") end

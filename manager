@@ -46,7 +46,7 @@ local function runRegionalManager()
         error("Regional Manager state unreadable; refusing to create a new session")
     end
 
-    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70 or data.version==71 or data.version==72 or data.version==73 or data.version==74 or data.version==75 or data.version==76 or data.version==77 or data.version==78) then
+    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70 or data.version==71 or data.version==72 or data.version==73 or data.version==74 or data.version==75 or data.version==76 or data.version==77 or data.version==78 or data.version==79) then
         data.version=VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end
@@ -112,7 +112,7 @@ local function runRegionalManager()
         if not saveTableLight("regional_manager.tmp",data) then
             error("Manager chunk move recovery write failed")
         end
-    end)
+    end,data.worldOrigin)
     if data.advance and data.advance.phase=="MOVE_RM" and
         data.managerPose.chunkIndex==data.advance.target then
         data.chunkIndex=data.advance.target
@@ -679,6 +679,7 @@ local function runRegionalManager()
         data.commissioningComplete=false
         data.swarmStarted=false
         data.gpsReady=false
+        data.worldOrigin=nil
         data.minerSetupApproved=false
         data.minerSetupDeclined=false
         data.minerSetupGateRequested=false
@@ -709,6 +710,19 @@ local function runRegionalManager()
         end
 
         if tonumber(message.masterForemanId)~=tonumber(data.masterForemanId) then
+            return false
+        end
+
+        local origin=message.worldOrigin
+        if type(origin)~="table" or type(origin.x)~="number" or
+            type(origin.y)~="number" or type(origin.z)~="number" then
+            return false
+        end
+        if data.worldOrigin then
+            if data.worldOrigin.x~=origin.x or data.worldOrigin.y~=origin.y or
+                data.worldOrigin.z~=origin.z then return false end
+        elseif sender~=data.masterForemanId or message.role~="foreman" or
+            tonumber(message.number)~=1 then
             return false
         end
 
@@ -769,6 +783,7 @@ local function runRegionalManager()
 
         if sender==data.masterForemanId and message.role=="foreman" and tonumber(message.number)==1 then
             masterLastSeen=now()
+            data.worldOrigin=message.worldOrigin
         end
 
         if message.role=="foreman" then
@@ -1493,11 +1508,16 @@ local function runRegionalManager()
     local function managerAtFuelChest()
         if data.advance then return false end
         local pose=data.managerPose
+        local function matchesIdle(x,y,z)
+            local ex,ey,ez=worldPose(MANAGER_IDLE.x,0,MANAGER_IDLE.z,
+                data.chunkIndex,data.worldOrigin)
+            return ex and math.abs(x-ex)<0.25 and math.abs(y-ey)<0.25 and
+                math.abs(z-ez)<0.25
+        end
         if pose.x==5 and pose.y==0 and pose.z==-4 and pose.dir==DIR_N then
             local ok,x,y,z=pcall(gps.locate,2,false)
             if not ok or not x or not y or not z or
-                math.abs(x-MANAGER_IDLE.x)>0.25 or math.abs(y)>0.25 or
-                math.abs(z-(MANAGER_IDLE.z+16*data.chunkIndex))>0.25 then
+                not matchesIdle(x,y,z) then
                 return false
             end
             pose.x=MANAGER_IDLE.x
@@ -1510,8 +1530,7 @@ local function runRegionalManager()
         if data.commissioningComplete and data.gpsReady then
             local ok,x,y,z=pcall(gps.locate,2,false)
             if not ok or not x or not y or not z or
-                math.abs(x-MANAGER_IDLE.x)>0.25 or math.abs(y)>0.25 or
-                math.abs(z-(MANAGER_IDLE.z+16*data.chunkIndex))>0.25 then
+                not matchesIdle(x,y,z) then
                 return false
             end
         end
@@ -1727,7 +1746,7 @@ local function runRegionalManager()
                 local function faceNorth(target) return target==DIR_N and
                     data.managerPose.dir==DIR_N end
                 local ok,reason=travelChunkNorth(data.managerPose,savePose,
-                    faceNorth,MANAGER_IDLE.z,advance.target)
+                    faceNorth,MANAGER_IDLE.z,advance.target,data.worldOrigin)
                 if not ok then advance.error=reason;save();return end
                 data.chunkIndex=advance.target
                 save();flushManager(true)
@@ -1738,8 +1757,10 @@ local function runRegionalManager()
                 save()
                 return
             end
-            if math.abs(x-MANAGER_IDLE.x)>0.25 or math.abs(y)>0.25 or
-                math.abs(z-(MANAGER_IDLE.z+16*advance.target))>0.25 then
+            local expectedX,expectedY,expectedZ=worldPose(MANAGER_IDLE.x,0,
+                MANAGER_IDLE.z,advance.target,data.worldOrigin)
+            if not expectedX or math.abs(x-expectedX)>0.25 or
+                math.abs(y-expectedY)>0.25 or math.abs(z-expectedZ)>0.25 then
                 advance.error="Manager GPS differs from new idle position"
                 save();flushManager(true)
                 return

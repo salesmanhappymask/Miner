@@ -511,15 +511,18 @@ local function runMinerCommissioning(cfg)
                 state.phase="ORIENTING_FOR_DEPLOYMENT"
                 save()
 
-                if not state.orientationCalibrated then
-                    if not establishPlacedMinerNorth() then
-                        ack({
-                            type="miner_deploy_blocked",
-                            id=os.getComputerID(),
-                            row=cfg.row,
-                            reason=state.recoveryReason
-                        })
-                    end
+                if not faceCommissioning(DIR_N) then
+                    ack({
+                        type="miner_deploy_blocked",
+                        id=os.getComputerID(),
+                        row=cfg.row,
+                        reason=state.recoveryReason or "Miner could not physically face north"
+                    })
+                    state.recoveryLocked=true
+                    state.recoveryReason=state.recoveryReason or
+                        "Miner could not physically face north for deployment"
+                    state.phase="RECOVERY_LOCK"
+                    save()
                 end
 
                 if state.recoveryLocked then
@@ -723,7 +726,7 @@ local function runMiner(cfg)
     end
     resolveChunkMove(state,function()
         if not saveTableLight(path,state) then error("Miner chunk move recovery write failed") end
-    end)
+    end,cfg.worldOrigin)
     state.depth=-state.y
     state.pos=state.z
     state.resumeX=tonumber(state.resumeX) or cfg.row
@@ -1203,8 +1206,10 @@ local function runMiner(cfg)
         while not state.recoveryLocked do
             local ok,gx,gy,gz=pcall(gps.locate,state.recallMode and 0.5 or 2,false)
             if ok and type(gx)=="number" and type(gy)=="number" and type(gz)=="number" then
-                if math.abs(gx-state.x)>0.25 or math.abs(gy-state.y)>0.25 or
-                    math.abs(gz-(state.z+16*state.chunkIndex))>0.25 then
+                local expectedX,expectedY,expectedZ=worldPose(state.x,state.y,
+                    state.z,state.chunkIndex,cfg.worldOrigin)
+                if not expectedX or math.abs(gx-expectedX)>0.25 or
+                    math.abs(gy-expectedY)>0.25 or math.abs(gz-expectedZ)>0.25 then
                     state.recoveryLocked=true
                     state.recoveryReason="GPS position differs from saved miner pose after reboot"
                     state.phase="RECOVERY_LOCK"
@@ -1494,7 +1499,7 @@ local function runMiner(cfg)
         state.advanceStage="MOVE"
         state.phase="ADVANCE_MOVE"
         save()
-        local ok,reason=travelChunkNorth(state,save,face,0,target)
+        local ok,reason=travelChunkNorth(state,save,face,0,target,cfg.worldOrigin)
         if not ok then sendState(reason);return false end
         state.advanceStage="WAIT"
         state.phase="ADVANCE_WAIT"
@@ -2784,7 +2789,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 or cfg.version==78 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 or cfg.version==78 or cfg.version==79 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then

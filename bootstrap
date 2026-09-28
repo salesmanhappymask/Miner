@@ -17,6 +17,23 @@ local function bootstrap()
 
     local placementSupported,detectedPlacementMode,detectedStartDir=detectPlacement()
 
+    if type(configured.worldOrigin)~="table" then
+        error("World origin missing from placement order")
+    end
+
+    if configured.role=="foreman" or configured.role=="miner" then
+        local localX=configured.role=="miner" and configured.row or 1
+        local expectedX,expectedY,expectedZ=worldPose(localX,0,0,0,
+            configured.worldOrigin)
+        local supplied=configured.expectedGps
+        if not supplied or not expectedX or expectedX~=supplied.x or
+            expectedY~=supplied.y or expectedZ~=supplied.z then
+            error("Placement order disagrees with the master world origin")
+        end
+        local valid,reason=verifyWorldPlacement(configured.expectedGps)
+        if not valid then error("Cannot commission turtle: "..tostring(reason)) end
+    end
+
     local source=readFile("/disk/startup") or readFile("disk/startup")
     local commonSource=readFile("/disk/common") or readFile("disk/common")
 
@@ -64,6 +81,8 @@ local function bootstrap()
             placementMode = detectedPlacementMode,
             placementSupported = placementSupported,
             startDir = detectedStartDir,
+            placementGps = configured.expectedGps,
+            worldOrigin = configured.worldOrigin,
             master = false,
             managerId = configured.managerId,
             masterForemanId = configured.masterForemanId,
@@ -325,6 +344,7 @@ local function bootstrap()
             placementSupported=placementSupported,
             placementMode=detectedPlacementMode,
             startDir=detectedStartDir,
+            worldOrigin=configured.worldOrigin,
             deployed=false,
             managerId=configured.managerId,
             masterForemanId=configured.masterForemanId,
@@ -364,6 +384,8 @@ local function bootstrap()
             tempDeployment=configured.tempDeployment and true or false,
             placementMode=detectedPlacementMode,
             placementSupported=placementSupported,
+            placementGps=configured.expectedGps,
+            worldOrigin=configured.worldOrigin,
             managerId=configured.managerId,
             masterForemanId=configured.masterForemanId,
             session=configured.session,

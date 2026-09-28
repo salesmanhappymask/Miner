@@ -1,5 +1,5 @@
-VERSION = 79
-PROTOCOL = "miner_swarm_v79"
+VERSION = 80
+PROTOCOL = "miner_swarm_v80"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -81,6 +81,35 @@ function detectPlacement()
 
     local supported=turtle.detectDown() and true or false
     return supported,supported and "SUPPORTED" or "AIR",supported and DIR_N or DIR_S
+end
+
+function verifyWorldPlacement(expected)
+    if type(expected)~="table" or type(expected.x)~="number" or
+        type(expected.y)~="number" or type(expected.z)~="number" then
+        return false,"Missing expected world coordinates"
+    end
+    if not gps or not gps.locate then return false,"GPS unavailable" end
+    for attempt=1,8 do
+        local ok,x,y,z=pcall(gps.locate,2,false)
+        if ok and type(x)=="number" and type(y)=="number" and type(z)=="number" then
+            if math.abs(x-expected.x)<0.25 and math.abs(y-expected.y)<0.25 and
+                math.abs(z-expected.z)<0.25 then
+                return true
+            end
+            return false,"GPS placement mismatch: "..tostring(x)..","..
+                tostring(y)..","..tostring(z)
+        end
+        sleep(0.5)
+    end
+    return false,"GPS unavailable during placement"
+end
+
+function worldPose(localX,localY,localZ,chunkIndex,origin)
+    if type(origin)~="table" then return nil end
+    if type(origin.x)~="number" or type(origin.y)~="number" or
+        type(origin.z)~="number" then return nil end
+    return origin.x+localX,origin.y+localY,
+        origin.z-localZ-16*(tonumber(chunkIndex) or 0)
 end
 
 function now()
@@ -883,7 +912,8 @@ function registerNodeWithManager(cfg,timeout)
         foremanNumber=cfg.foremanNumber,
         x=cfg.x,
         y=cfg.y,
-        z=cfg.z
+        z=cfg.z,
+        worldOrigin=cfg.worldOrigin
     }
 
     local deadline=now()+(tonumber(timeout) or 15)
@@ -939,21 +969,31 @@ function ensureManagerRegistration(cfg)
     return true
 end
 
-function resolveChunkMove(state,save)
+function resolveChunkMove(state,save,origin)
     local intent=state.chunkMoveIntent
     if not intent then return true end
     local moved=nil
+    local gpsDisagreed=false
+    local gpsAvailable=false
     if gps and gps.locate and type(state.x)=="number" and
         type(state.y)=="number" then
         local ok,x,y,z=pcall(gps.locate,1,false)
-        if ok and x and y and z and math.abs(x-state.x)<0.25 and
-            math.abs(y-state.y)<0.25 then
-            local offset=16*(tonumber(state.chunkIndex) or 0)
-            if math.abs(z-(intent.toZ+offset))<0.25 then moved=true
-            elseif math.abs(z-(intent.fromZ+offset))<0.25 then moved=false end
+        local tx,ty,tz=worldPose(state.x,state.y,intent.toZ,
+            state.chunkIndex,origin)
+        local fx,fy,fz=worldPose(state.x,state.y,intent.fromZ,
+            state.chunkIndex,origin)
+        if ok and x and y and z and tx then
+            gpsAvailable=true
+            if math.abs(x-tx)<0.25 and math.abs(y-ty)<0.25 then
+                if math.abs(z-tz)<0.25 then moved=true
+                elseif math.abs(z-fz)<0.25 then moved=false
+                else gpsDisagreed=true end
+            else
+                gpsDisagreed=true
+            end
         end
     end
-    if moved==nil then
+    if moved==nil and not origin then
         local fuel=turtle.getFuelLevel()
         if type(fuel)=="number" and type(intent.fuelBefore)=="number" then
             moved=fuel<intent.fuelBefore
@@ -961,7 +1001,10 @@ function resolveChunkMove(state,save)
     end
     if moved==nil then
         state.recoveryLocked=true
-        state.recoveryReason="Chunk move interrupted with uncertain position"
+        state.recoveryReason=gpsDisagreed and
+            "GPS disagrees with interrupted chunk move" or
+            (origin and not gpsAvailable and "GPS unavailable for interrupted chunk move" or
+            "Chunk move interrupted with uncertain position")
         save()
         return false
     end
@@ -973,7 +1016,7 @@ function resolveChunkMove(state,save)
     return true
 end
 
-function travelChunkNorth(state,save,face,baseZ,targetIndex)
+function travelChunkNorth(state,save,face,baseZ,targetIndex,origin)
     if state.recoveryLocked then return false,"Position recovery lock" end
     local current=tonumber(state.chunkIndex) or 0
     if current>=targetIndex then return true end
@@ -984,6 +1027,24 @@ function travelChunkNorth(state,save,face,baseZ,targetIndex)
     if state.z<baseZ or state.z>destination then
         return false,"Chunk move position outside expected corridor"
     end
+    local function verifyWorld()
+        if not origin then return true end
+        local ex,ey,ez=worldPose(state.x,state.y,state.z,state.chunkIndex,origin)
+        local ok,gx,gy,gz=pcall(gps.locate,2,false)
+        if not ok or not gx or not gy or not gz then
+            return false,"Waiting for GPS during chunk move"
+        end
+        if math.abs(gx-ex)>0.25 or math.abs(gy-ey)>0.25 or
+            math.abs(gz-ez)>0.25 then
+            state.recoveryLocked=true
+            state.recoveryReason="GPS disagrees with chunk travel pose"
+            save()
+            return false,state.recoveryReason
+        end
+        return true
+    end
+    local verified,reason=verifyWorld()
+    if not verified then return false,reason end
     while state.z<destination do
         if turtle.getFuelLevel()~="unlimited" and turtle.getFuelLevel()<destination-state.z then
             return false,"Not enough fuel for chunk move"
@@ -1003,6 +1064,8 @@ function travelChunkNorth(state,save,face,baseZ,targetIndex)
         state.chunkMoveIntent=nil
         save()
     end
+    verified,reason=verifyWorld()
+    if not verified then return false,reason end
     state.z=baseZ
     state.chunkIndex=targetIndex
     state.seq=(tonumber(state.seq) or 0)+1

@@ -1,0 +1,109 @@
+local RAW="https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
+local choices={
+    ["1"]={role="manager",regional="1",master="0",label="Regional Manager"},
+    ["2"]={role="foreman",regional="0",master="1",label="Foreman-1"}
+}
+
+if not turtle or not turtle.forward then
+    error("Run setup on an Advanced Wireless Turtle")
+end
+
+local function fetch(name)
+    local response=http.get(RAW..name)
+    if not response then error("Could not download "..name.."; nothing removed") end
+    local body=response.readAll()
+    response.close()
+    if not body or body=="" then error("Empty "..name.."; nothing removed") end
+    return body
+end
+
+local function compile(name,source)
+    local loader=loadstring or load
+    if loader then
+        local program,err=loader(source,name)
+        if not program then error("Invalid "..name..": "..tostring(err).."; nothing removed") end
+    end
+end
+
+local function erase()
+    for _,name in ipairs(fs.list("")) do
+        local drive=fs.getDrive and fs.getDrive(name) or "hdd"
+        if drive=="hdd" and not fs.isReadOnly(name) then fs.delete(name) end
+    end
+end
+
+local function write(name,source)
+    local file=fs.open(name,"w")
+    if not file then error("Could not write "..name) end
+    file.write(source)
+    file.close()
+    local verify=fs.open(name,"r")
+    if not verify then error("Could not verify "..name) end
+    local actual=verify.readAll()
+    verify.close()
+    if actual~=source then error("Verification failed for "..name) end
+end
+
+print("1. Install RM Software")
+print("2. Install MF Software")
+print("3. Reset Machine")
+local choice=read()
+
+if choice=="3" then
+    erase()
+    os.setComputerLabel(nil)
+    print("Machine reset. No startup or updater installed.")
+    return
+end
+
+local role=choices[choice]
+if not role then error("Select 1, 2, or 3; nothing removed") end
+
+local files={"version","startup","updater","common","prep","setup",role.role}
+if role.role=="foreman" then files[#files+1]="bootstrap" end
+local staged={}
+for _,name in ipairs(files) do staged[name]=fetch(name) end
+local version=staged.version:match("^%s*(%d+)%s*$")
+if not version or tonumber(version)<80 then error("Remote release must be version 80 or later; nothing removed") end
+if staged.common:match("^%s*VERSION%s*=%s*(%d+)")~=version then
+    error("Common/version mismatch; nothing removed")
+end
+local startup=staged.startup
+local regionalCount,masterCount
+startup,regionalCount=startup:gsub("local%s+REGIONAL_MANAGER%s*=%s*%d+","local REGIONAL_MANAGER = "..role.regional,1)
+startup,masterCount=startup:gsub("local%s+MASTER_FOREMAN%s*=%s*%d+","local MASTER_FOREMAN = "..role.master,1)
+if regionalCount~=1 or masterCount~=1 then error("Startup role flags missing; nothing removed") end
+staged.startup=startup
+for _,name in ipairs(files) do
+    if name~="version" then compile(name,staged[name]) end
+end
+if fetch("version"):match("^%s*(%d+)%s*$")~=version then
+    error("Remote release changed during download; nothing removed")
+end
+
+if role.role=="foreman" then
+    local anchor={}
+    print("Enter the Master Foreman's current Minecraft coordinates")
+    for _,axis in ipairs({"x","y","z"}) do
+        while true do
+            term.write(axis:upper()..": ")
+            local value=tonumber(read())
+            if value and value==math.floor(value) then
+                anchor[axis]=value
+                break
+            end
+            print("Enter a whole-number coordinate")
+        end
+    end
+    staged.world_anchor=textutils.serialize(anchor)
+    files[#files+1]="world_anchor"
+end
+
+print("Installing version "..version.." as "..role.label)
+erase()
+for _,name in ipairs(files) do write(name,staged[name]) end
+os.setComputerLabel(role.label)
+if not shell.run("updater") then
+    error("Updater failed. Local startup, role, and setup are available for retry")
+end
+os.reboot()
