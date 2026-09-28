@@ -1,5 +1,5 @@
 local RAW = "https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
-local MIN_VERSION = 93
+local MIN_VERSION = 94
 local CONFIG = "updater.cfg"
 local args = {...}
 
@@ -216,13 +216,14 @@ for _, name in ipairs(files) do
 end
 writeFile(fs.combine(stageDir, "version"), version)
 
-local managed = {
-    "startup", "common", "prep", "manager", "foreman", "bootstrap", "miner", "navigator",
-    "worker_disk_startup", "version", "active_release", "active_release.new", "active_release.bak", "releases"
-}
-for _, path in ipairs(managed) do
-    if fs.exists(path) then fs.delete(path) end
+local rootDrive=fs.getDrive("")
+for _, path in ipairs(fs.list("")) do
+    if path ~= "update" and path ~= stageDir and fs.getDrive(path)==rootDrive then
+        fs.delete(path)
+    end
 end
+
+saveConfig(role)
 
 for _, name in ipairs(files) do
     fs.move(fs.combine(stageDir, name), name)
