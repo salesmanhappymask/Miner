@@ -219,30 +219,30 @@ local function bootstrap()
                     end
 
                     if not state.orientationCalibrated then
-                        if cfg.placementMode=="SUPPORTED" then
-                            state.dir=DIR_N
-                        elseif cfg.placementMode=="AIR" then
-                            state.dir=DIR_S
-
-                            if not deployTurn(true) then
-                                error("Cannot perform air-placement orientation correction")
+                        local anchored=false
+                        for attempt=1,4 do
+                            local ok,behind=pcall(peripheral.call,"back","getID")
+                            if ok and tonumber(behind)==tonumber(cfg.masterForemanId) then
+                                anchored=true
+                                break
                             end
-                            if not deployTurn(true) then
-                                error("Cannot perform air-placement orientation correction")
-                            end
-
-                            if state.dir~=DIR_N then
+                            if attempt<4 and not deployTurn(true) then
                                 state.phase="RECOVERY_LOCK"
                                 saveDeploy()
-                                error("Air-placement orientation correction did not end north")
+                                error("Could not scan for Master Foreman behind new foreman")
                             end
-                        else
+                        end
+                        if not anchored then
                             state.phase="RECOVERY_LOCK"
                             saveDeploy()
-                            error("Unknown detected Foreman placement mode")
+                            error("Master Foreman not detected behind new foreman")
                         end
 
+                        state.dir=DIR_N
+                        state.orientationAnchor="MASTER_BACK"
                         state.orientationCalibrated=true
+                        cfg.orientationAnchor="MASTER_BACK"
+                        saveTable("node.cfg",cfg)
                         checkpointDeploy()
                         saveDeploy()
                     end

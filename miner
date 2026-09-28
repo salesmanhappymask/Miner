@@ -88,38 +88,40 @@ local function runMinerCommissioning(cfg)
 
     local function establishPlacedMinerNorth()
         if state.orientationCalibrated then
-            return state.dir==DIR_N
-        end
-
-        if cfg.placementMode=="SUPPORTED" then
-            state.dir=DIR_N
-            state.orientationTurns=0
-            state.orientationTurnIntent=nil
-            state.orientationCalibrated=true
-            save()
-            return true
-        end
-
-        if cfg.placementMode~="AIR" then
+            if state.dir==DIR_N and state.orientationAnchor=="FOREMAN_BACK" then
+                return true
+            end
             state.recoveryLocked=true
-            state.recoveryReason="Unknown miner placement mode"
+            state.recoveryReason="Miner orientation lacks a physical foreman anchor"
             state.phase="RECOVERY_LOCK"
             save()
             return false
         end
 
-        state.dir=tonumber(state.dir) or DIR_S
+        state.dir=tonumber(state.dir) or DIR_N
         state.orientationTurns=tonumber(state.orientationTurns) or 0
 
         if state.orientationTurnIntent then
             state.recoveryLocked=true
-            state.recoveryReason="Server restart interrupted air-placement orientation correction"
+            state.recoveryReason="Server restart interrupted miner orientation scan"
             state.phase="RECOVERY_LOCK"
             save()
             return false
         end
 
-        while state.orientationTurns<2 do
+        while state.orientationTurns<4 do
+            local ok,behind=pcall(peripheral.call,"back","getID")
+            if ok and tonumber(behind)==tonumber(cfg.foremanId) then
+                state.dir=DIR_N
+                state.orientationAnchor="FOREMAN_BACK"
+                state.orientationCalibrated=true
+                state.orientationTurnIntent=nil
+                save()
+                return true
+            end
+
+            if state.orientationTurns==3 then break end
+
             local intent={
                 from=state.dir,
                 to=(state.dir+1)%4,
@@ -132,7 +134,7 @@ local function runMinerCommissioning(cfg)
             if not turtle.turnRight() then
                 state.orientationTurnIntent=nil
                 state.recoveryLocked=true
-                state.recoveryReason="Could not turn air-placed miner toward north"
+                state.recoveryReason="Could not turn miner during foreman orientation scan"
                 state.phase="RECOVERY_LOCK"
                 save()
                 return false
@@ -144,17 +146,11 @@ local function runMinerCommissioning(cfg)
             save()
         end
 
-        if state.dir~=DIR_N then
-            state.recoveryLocked=true
-            state.recoveryReason="Air-placement orientation correction did not end north"
-            state.phase="RECOVERY_LOCK"
-            save()
-            return false
-        end
-
-        state.orientationCalibrated=true
+        state.recoveryLocked=true
+        state.recoveryReason="Foreman not detected behind miner during orientation scan"
+        state.phase="RECOVERY_LOCK"
         save()
-        return true
+        return false
     end
 
     local function faceCommissioning(target)
@@ -597,6 +593,7 @@ local function runMinerCommissioning(cfg)
                     state.orientationCalibrated=true
 
                     cfg.orientationCalibrated=true
+                    cfg.orientationAnchor=state.orientationAnchor
                     cfg.commissioned=true
 
                     saveTable("node.cfg",cfg)
@@ -718,6 +715,12 @@ local function runMiner(cfg)
     state.z=tonumber(state.z) or (tonumber(state.pos) or 0)
     state.dir=tonumber(state.dir) or DIR_N
     state.chunkIndex=tonumber(state.chunkIndex) or 0
+    if cfg.orientationAnchor~="FOREMAN_BACK" then
+        state.recoveryLocked=true
+        state.recoveryReason="Miner orientation was inferred from ground support; recommission before mining"
+        state.phase="RECOVERY_LOCK"
+        saveTableLight(path,state)
+    end
     resolveChunkMove(state,function()
         if not saveTableLight(path,state) then error("Miner chunk move recovery write failed") end
     end)
@@ -2781,7 +2784,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then
