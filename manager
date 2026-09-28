@@ -46,7 +46,7 @@ local function runRegionalManager()
         error("Regional Manager state unreadable; refusing to create a new session")
     end
 
-    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70 or data.version==71 or data.version==72 or data.version==73 or data.version==74 or data.version==75 or data.version==76 or data.version==77 or data.version==78 or data.version==79 or data.version==80) then
+    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70 or data.version==71 or data.version==72 or data.version==73 or data.version==74 or data.version==75 or data.version==76 or data.version==77 or data.version==78 or data.version==79 or data.version==80 or data.version==81) then
         data.version=VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end
@@ -1634,7 +1634,7 @@ local function runRegionalManager()
                 tonumber(m.x)~=row or tonumber(m.y)~=0 or tonumber(m.z)~=0 then
                 return blocked("Miner-"..row.." pose/chunk mismatch")
             end
-            local needed=(row-1)%4==0 and 24 or 16
+            local needed=isChestCollector(row) and 24 or 16
             if not enough(m.fuel,needed) then
                 return blocked("Miner-"..row.." needs "..needed.." fuel")
             end
@@ -1686,7 +1686,7 @@ local function runRegionalManager()
             for n=1,4 do fn("foreman",n,data.foremen[n]) end
         elseif stage=="COLLECT_M" then
             for n=1,4 do
-                local row=(n-1)*4+2
+                local row=chestCollectorRow(n)
                 fn("miner",row,data.miners[row])
             end
         elseif stage=="MOVE_G" then

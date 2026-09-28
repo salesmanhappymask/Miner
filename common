@@ -1,5 +1,5 @@
-VERSION = 81
-PROTOCOL = "miner_swarm_v81"
+VERSION = 82
+PROTOCOL = "miner_swarm_v82"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -28,6 +28,14 @@ FOREMAN_FUEL = {
     [4]={x=14,y=0,z=-2}
 }
 MANAGER_IDLE = {x=6,y=0,z=-3}
+function chestCollectorRow(number)
+    return (number-1)*4+2
+end
+
+function isChestCollector(row)
+    return row==chestCollectorRow(math.floor((row-1)/4)+1)
+end
+
 NAVIGATOR_RECALL = {
     [1]={x=1,y=1,z=-1},
     [2]={x=5,y=1,z=-1},
