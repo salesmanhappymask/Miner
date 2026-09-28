@@ -426,7 +426,6 @@ local function runMinerCommissioning(cfg)
                     end
                 end
                 local bucketCount=0
-                local bucketReturned=tonumber(state.commissionBucketReturned) or 0
                 if message.fuelKind=="lava_bucket" then
                     for slot=1,16 do
                         turtle.select(slot)
@@ -435,15 +434,6 @@ local function runMinerCommissioning(cfg)
                             if matchesItem(detail,"empty_bucket") or
                                 (not detail and burned[slot]) then
                                 bucketCount=bucketCount+turtle.getItemCount(slot)
-                                if faceCommissioning(DIR_S) then
-                                    turtle.select(slot)
-                                    if turtle.drop(1) then
-                                        bucketReturned=bucketReturned+1
-                                        state.commissionBucketReturned=bucketReturned
-                                        burned[slot]=nil
-                                        save()
-                                    end
-                                end
                             end
                         end
                     end
@@ -453,7 +443,6 @@ local function runMinerCommissioning(cfg)
                     type="commission_refueled",
                     bucketPresent=bucketCount>0,
                     bucketCount=bucketCount,
-                    bucketReturned=bucketReturned,
                     id=os.getComputerID(),
                     row=cfg.row,
                     fuel=turtle.getFuelLevel()
@@ -2831,7 +2820,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 or cfg.version==78 or cfg.version==79 or cfg.version==80 or cfg.version==81 or cfg.version==82 or cfg.version==83 or cfg.version==84 or cfg.version==85 or cfg.version==86 or cfg.version==87 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 or cfg.version==78 or cfg.version==79 or cfg.version==80 or cfg.version==81 or cfg.version==82 or cfg.version==83 or cfg.version==84 or cfg.version==85 or cfg.version==86 or cfg.version==87 or cfg.version==88 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then
