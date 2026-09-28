@@ -2795,7 +2795,9 @@ local function runForeman(cfg)
             return false
         end
 
-        if not refuelAtFrontTo(FOREMAN_FUEL_TARGET) then
+        if turtle.getFuelLevel()~="unlimited" and
+            turtle.getFuelLevel()<=FOREMAN_FUEL_LOW and
+            not refuelAtFrontTo(FOREMAN_FUEL_TARGET) then
             state.phase="WAITING_FUEL"
             saveState()
             sendState("Fuel chest cannot satisfy foreman fuel target; dock token retained")
@@ -3041,9 +3043,51 @@ local function runForeman(cfg)
         return true
     end
 
+    local function masterLoadMinerFuelPackage(n)
+        if not goTo(0,-1) or not faceTracked(DIR_N) then return false end
+        state.foremanMinerFuelPackages=state.foremanMinerFuelPackages or {}
+        if not state.foremanMinerFuelPackages[n] then
+            local reserved=state.foremanFuelPackages and state.foremanFuelPackages[n]
+            local selected,units
+            for _,kind in ipairs(FUEL_PRIORITY) do
+                local perMiner=math.ceil(MINER_FUEL_TARGET/FUEL_VALUE[kind])
+                local keep=reserved and reserved.kind==kind and reserved.units or 0
+                if selfCount(kind)+frontFuelCount(kind)>=perMiner*4+keep then
+                    selected,units=kind,perMiner
+                    break
+                end
+            end
+            if not selected then
+                state.setupBlockReason="Supply chest needs four miner fuel packets for Foreman-"..tostring(n)
+                state.phase="WAITING_SUPPLIES"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            local keep=reserved and reserved.kind==selected and reserved.units or 0
+            local needed=units*4+keep-selfCount(selected)
+            if needed>0 and takeNamedIntoSelf(selected,needed)<needed then
+                state.setupBlockReason="Cannot load miner fuel for Foreman-"..tostring(n)
+                state.phase="WAITING_SUPPLIES"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            state.foremanMinerFuelPackages[n]={kind=selected,units=units*4}
+            saveState()
+        end
+        return true
+    end
+
     local function masterLoadForemanPackage(n)
         if not goTo(0,-1) or not faceTracked(DIR_N) then return false end
-        compactEmptyBuckets()
+        if not returnBucketsAtFuel() then
+            state.setupBlockReason="Starting supply chest cannot accept empty buckets"
+            state.phase="WAITING_SUPPLIES"
+            saveState()
+            sendState(state.setupBlockReason)
+            return false
+        end
         local needs={
             {"advanced_wireless_narcissistic_turtle",1},
             {"disk_drive",1},
@@ -3084,6 +3128,7 @@ local function runForeman(cfg)
                 saveState()
             end
         end
+        if not masterLoadMinerFuelPackage(n) then return false end
         state.setupBlockReason=nil
         return true
     end
@@ -3493,6 +3538,7 @@ local function runForeman(cfg)
         local installed=progress.stage=="INSTALLED" or
             progress.stage=="PACKAGING" or progress.stage=="DEPLOY_SENT"
         local lastConfigure=0
+        local installDeadline=now()+20
         while not installed do
             if flags.recallMode then return nil end
             if now()-lastConfigure>=1 then
@@ -3508,6 +3554,12 @@ local function runForeman(cfg)
                 installed=true
                 progress.stage="INSTALLED"
                 saveState()
+            elseif now()>=installDeadline then
+                state.phase="WAITING_FOREMAN_INSTALL"
+                state.setupBlockReason="Foreman-"..tostring(n).." installer did not acknowledge; check its screen and Disk Drive"
+                saveState()
+                sendState(state.setupBlockReason)
+                return nil
             end
         end
 
@@ -3526,6 +3578,15 @@ local function runForeman(cfg)
             {kind="ender_dump",count=1},
             {kind="ender_fuel",count=1}
         }
+        if progress.stage~="DEPLOY_SENT" then
+            if not state.foremanMinerFuelPackages or
+                not state.foremanMinerFuelPackages[n] then
+                if not masterLoadMinerFuelPackage(n) or
+                    not goTo(1,-1) or not faceTracked(DIR_N) then return nil end
+            end
+            local minerFuel=state.foremanMinerFuelPackages[n]
+            items[#items+1]={kind=minerFuel.kind,count=minerFuel.units}
+        end
         local function probeInventory(kind,index)
             local probeId=tostring(n)..":"..tostring(index)..":"..
                 tostring(now())..":"..tostring(math.random(1,999999))
@@ -3610,6 +3671,7 @@ local function runForeman(cfg)
 
         local deployed=nil
         local lastDeploy=0
+        local deployDeadline=now()+30
         while not deployed do
             if flags.recallMode then return nil end
             if now()-lastDeploy>=1 then
@@ -3624,6 +3686,12 @@ local function runForeman(cfg)
                 deployed=reply
             elseif frontComputerId()~=newId and probeDeployed(newId) then
                 deployed=true
+            elseif now()>=deployDeadline then
+                state.phase="WAITING_FOREMAN_DEPLOY"
+                state.setupBlockReason="Foreman-"..tostring(n).." did not leave the dock; inspect its screen and path"
+                saveState()
+                sendState(state.setupBlockReason)
+                return nil
             end
         end
         return newId
@@ -3718,7 +3786,9 @@ local function runForeman(cfg)
                         state.setupBlockReason="Foreman-"..tostring(n).." "..
                             state.phase.." item "..
                             tostring(state.foremanProgress and state.foremanProgress.nextItem or "?")
-                    else
+                    elseif state.phase~="WAITING_SUPPLIES" and
+                        state.phase~="WAITING_FOREMAN_INSTALL" and
+                        state.phase~="WAITING_FOREMAN_DEPLOY" then
                         state.phase="WAITING_SETUP"
                         state.setupBlockReason="Foreman-"..tostring(n).." setup paused"
                     end
@@ -4612,8 +4682,8 @@ local function runMaster()
     local newMaster=false
     local id=os.getComputerID()
 
-    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 and cfg.version~=64 and cfg.version~=65 and cfg.version~=66 and cfg.version~=67 and cfg.version~=68 and cfg.version~=69 and cfg.version~=70 and cfg.version~=71 and cfg.version~=72 and cfg.version~=73 and cfg.version~=74 and cfg.version~=75 and cfg.version~=76 then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v77.")
+    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 and cfg.version~=64 and cfg.version~=65 and cfg.version~=66 and cfg.version~=67 and cfg.version~=68 and cfg.version~=69 and cfg.version~=70 and cfg.version~=71 and cfg.version~=72 and cfg.version~=73 and cfg.version~=74 and cfg.version~=75 and cfg.version~=76 and cfg.version~=77 then
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v78.")
     end
 
     if not cfg then
@@ -4720,7 +4790,7 @@ else
         error("Foreman role file requires foreman node.cfg")
     end
 
-    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 then
+    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 then
         cfg.version=VERSION
         saveTable("node.cfg",cfg)
     elseif cfg.version~=VERSION then

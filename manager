@@ -46,7 +46,7 @@ local function runRegionalManager()
         error("Regional Manager state unreadable; refusing to create a new session")
     end
 
-    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70 or data.version==71 or data.version==72 or data.version==73 or data.version==74 or data.version==75 or data.version==76) then
+    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70 or data.version==71 or data.version==72 or data.version==73 or data.version==74 or data.version==75 or data.version==76 or data.version==77) then
         data.version=VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end
@@ -607,8 +607,13 @@ local function runRegionalManager()
                 row=row+1
             end
         end
-        local f1=data.foremen[1]
-        if f1 and f1.setupMissing then line(row,"F1 NEEDS: "..tostring(f1.setupMissing),C_WARN);row=row+1 end
+        for n=1,4 do
+            local f=data.foremen[n]
+            if f and (f.setupMissing or (f.setupDone==false and f.message and f.message~="")) then
+                line(row,"F"..n..": "..tostring(f.setupMissing or f.message),C_WARN)
+                row=row+1
+            end
+        end
         local m16=data.miners[16]
         if m16 and m16.recovery then line(row,"PACK STOP: "..tostring(m16.recovery),C_FAULT);row=row+1 end
         if data.recall.packMissing and #data.recall.packMissing>0 then
