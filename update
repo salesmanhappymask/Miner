@@ -1,5 +1,5 @@
 local RAW = "https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
-local MIN_VERSION = 94
+local MIN_VERSION = 95
 local CONFIG = "updater.cfg"
 local args = {...}
 
@@ -167,7 +167,7 @@ if role == "master" then
     end
 end
 
-local files = {"startup", "common", "prep", role == "manager" and "manager" or "foreman"}
+local files = {"startup", "common", "prep", "push", "pushlogs", role == "manager" and "manager" or "foreman"}
 local staged = {}
 local updaterSource = fetch("update")
 local version = fetch("version"):match("^%s*(%d+)%s*$")

@@ -1946,7 +1946,10 @@ local function runRegionalManager()
             local message=event[3]
             local protocol=event[4]
 
-            if protocol==PROTOCOL and type(message)=="table" then
+            if protocol==DEBUG_PROTOCOL and type(message)=="table" then
+                debugIngest(sender,message)
+            elseif protocol==PROTOCOL and type(message)=="table" then
+                if debugLog then debugLog("RADIO","EVENT RX from="..tostring(sender).." payload="..tostring(message.type or "table"),"INFO") end
                 radioRxWindow=radioRxWindow+1
                 if message.type=="master_pair_seek" and message.version==VERSION then
                     pairStatus="Pair request from Master " .. tostring(sender)

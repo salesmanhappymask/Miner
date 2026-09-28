@@ -97,6 +97,8 @@ local function runFile(path,role)
         return
     end
 
+    if debugLog then pcall(debugLog,"CRASH",tostring(err),"ERROR") end
+    if debugFlush then pcall(debugFlush) end
     local f=fs.open(role .. "_error.log","w")
     if f then
         f.write(tostring(err))
@@ -158,5 +160,6 @@ else
     end
 end
 
+_G.SWARM_ROLE_NAME=roleName
 runFile(base .. "common","common")
 runFile(base .. roleFile,roleName)

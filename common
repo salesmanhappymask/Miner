@@ -1,5 +1,5 @@
-VERSION = 94
-PROTOCOL = "miner_swarm_v94"
+VERSION = 95
+PROTOCOL = "miner_swarm_v95"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -76,6 +76,8 @@ regionalManagerID = nil
 
 function setRegionalManager(id)
     regionalManagerID=tonumber(id)
+    if debugLog then debugLog("PAIR","Regional Manager set to " .. tostring(regionalManagerID),"INFO") end
+    if debugFlush then debugFlush() end
 end
 
 function getRegionalManager()
@@ -122,6 +124,214 @@ end
 
 function now()
     return os.clock()
+end
+
+DEBUG_PROTOCOL = "miner_swarm_debug_v95"
+DEBUG_LOG_DIR = "logs"
+DEBUG_LOG_MAX = 196608
+DEBUG_REMOTE_BATCH = 12
+
+local debugRawSend = rednet and rednet.send or nil
+local debugRawBroadcast = rednet and rednet.broadcast or nil
+local debugRawReceive = rednet and rednet.receive or nil
+local debugRawTurtle = {}
+local debugRemoteBuffer = {}
+local debugInitialized = false
+local debugRole = tostring(_G.SWARM_ROLE_NAME or os.getComputerLabel() or "unknown")
+
+if turtle then
+    for name,value in pairs(turtle) do
+        if type(value)=="function" then debugRawTurtle[name]=value end
+    end
+end
+
+local function debugRead(path)
+    local h=fs.open(path,"r")
+    if not h then return nil end
+    local data=h.readAll()
+    h.close()
+    return data
+end
+
+local function debugWrite(path,data,mode)
+    local h=fs.open(path,mode or "w")
+    if not h then return false end
+    h.write(data)
+    h.close()
+    return true
+end
+
+local function debugEnsureDir()
+    if not fs.exists(DEBUG_LOG_DIR) then fs.makeDir(DEBUG_LOG_DIR) end
+end
+
+local function debugRotate(path)
+    if fs.exists(path) and fs.getSize(path)>=DEBUG_LOG_MAX then
+        local old=path .. ".previous"
+        if fs.exists(old) then fs.delete(old) end
+        fs.move(path,old)
+    end
+end
+
+local function debugAppend(path,line)
+    debugEnsureDir()
+    debugRotate(path)
+    return debugWrite(path,line .. "\n","a")
+end
+
+local function debugScalar(value)
+    local t=type(value)
+    if t=="nil" then return "nil" end
+    if t=="string" then
+        local v=value:gsub("[\r\n\t]"," ")
+        if #v>240 then v=v:sub(1,240).."..." end
+        return v
+    end
+    if t=="number" or t=="boolean" then return tostring(value) end
+    if t=="table" then
+        local ok,out=pcall(textutils.serialize,value)
+        if ok and out then
+            out=out:gsub("[\r\n\t]"," ")
+            if #out>400 then out=out:sub(1,400).."..." end
+            return out
+        end
+    end
+    return tostring(value)
+end
+
+local function debugArgs(...)
+    local values={...}
+    local out={}
+    for i=1,#values do out[#out+1]=debugScalar(values[i]) end
+    return table.concat(out,",")
+end
+
+local function debugFuel()
+    if debugRawTurtle.getFuelLevel then
+        local ok,value=pcall(debugRawTurtle.getFuelLevel)
+        if ok then return tostring(value) end
+    end
+    return "n/a"
+end
+
+local function debugSelected()
+    if debugRawTurtle.getSelectedSlot then
+        local ok,value=pcall(debugRawTurtle.getSelectedSlot)
+        if ok then return tostring(value) end
+    end
+    return "n/a"
+end
+
+local function debugLine(category,message,severity)
+    return string.format("[%.3f] [v%d] [id=%d] [role=%s] [%s] [%s] [fuel=%s slot=%s] %s",
+        os.clock(),VERSION,os.getComputerID(),debugRole,tostring(severity or "INFO"),
+        tostring(category or "GENERAL"),debugFuel(),debugSelected(),tostring(message or ""))
+end
+
+local function debugSendBuffer(force)
+    if debugRole=="regional_manager" then return true end
+    if not debugRawSend or #debugRemoteBuffer==0 then return false end
+    local id=tonumber(regionalManagerID)
+    if not id or id==os.getComputerID() then return false end
+    if not force and #debugRemoteBuffer<DEBUG_REMOTE_BATCH then return false end
+    local packet={type="debug_log_batch",version=VERSION,node=os.getComputerID(),role=debugRole,lines=debugRemoteBuffer}
+    local ok,result=pcall(debugRawSend,id,packet,DEBUG_PROTOCOL)
+    if ok and result~=false then
+        debugRemoteBuffer={}
+        return true
+    end
+    return false
+end
+
+function debugLog(category,message,severity)
+    if not debugInitialized then return end
+    local line=debugLine(category,message,severity)
+    debugAppend(fs.combine(DEBUG_LOG_DIR,"current.log"),line)
+    if category=="RADIO" then debugAppend(fs.combine(DEBUG_LOG_DIR,"radio.log"),line) end
+    if severity=="WARN" or severity=="ERROR" or category=="RECOVERY" or category=="CRASH" then
+        debugAppend(fs.combine(DEBUG_LOG_DIR,"errors.log"),line)
+    end
+    if debugRole=="regional_manager" then
+        debugAppend(fs.combine(DEBUG_LOG_DIR,"swarm.log"),line)
+    else
+        debugRemoteBuffer[#debugRemoteBuffer+1]=line
+        if #debugRemoteBuffer>96 then table.remove(debugRemoteBuffer,1) end
+        debugSendBuffer(severity=="ERROR" or severity=="WARN")
+    end
+end
+
+function debugFlush()
+    return debugSendBuffer(true)
+end
+
+function debugStateSummary(path,value)
+    if type(value)~="table" then return tostring(path) end
+    local keys={"role","number","row","state","phase","stage","x","y","z","facing","recoveryLocked","recoveryReason","task","mode"}
+    local out={"path="..tostring(path)}
+    for _,key in ipairs(keys) do
+        if value[key]~=nil then out[#out+1]=key.."="..debugScalar(value[key]) end
+    end
+    return table.concat(out," ")
+end
+
+function debugIngest(sender,message)
+    if debugRole~="regional_manager" or type(message)~="table" or message.version~=VERSION or type(message.lines)~="table" then return end
+    for _,line in ipairs(message.lines) do
+        debugAppend(fs.combine(DEBUG_LOG_DIR,"swarm.log"),"[remote="..tostring(sender).."] "..tostring(line))
+    end
+end
+
+local function debugInit()
+    local marker=fs.combine(DEBUG_LOG_DIR,"version")
+    local old=debugRead(marker)
+    if old~=tostring(VERSION) then
+        if fs.exists(DEBUG_LOG_DIR) then fs.delete(DEBUG_LOG_DIR) end
+        fs.makeDir(DEBUG_LOG_DIR)
+        debugWrite(marker,tostring(VERSION),"w")
+    else
+        debugEnsureDir()
+    end
+    debugInitialized=true
+    debugLog("BOOT","VERSION_TEST_START label="..tostring(os.getComputerLabel() or "").." protocol="..PROTOCOL,"INFO")
+end
+
+debugInit()
+
+if rednet and debugRawSend then
+    rednet.send=function(id,message,protocol)
+        debugLog("RADIO","TX to="..tostring(id).." protocol="..tostring(protocol).." payload="..debugScalar(message),"INFO")
+        return debugRawSend(id,message,protocol)
+    end
+end
+
+if rednet and debugRawBroadcast then
+    rednet.broadcast=function(message,protocol)
+        debugLog("RADIO","BROADCAST protocol="..tostring(protocol).." payload="..debugScalar(message),"INFO")
+        return debugRawBroadcast(message,protocol)
+    end
+end
+
+if rednet and debugRawReceive then
+    rednet.receive=function(protocol,timeout)
+        local sender,message,rxProtocol=debugRawReceive(protocol,timeout)
+        if sender then debugLog("RADIO","RX from="..tostring(sender).." protocol="..tostring(rxProtocol).." payload="..debugScalar(message),"INFO") end
+        return sender,message,rxProtocol
+    end
+end
+
+if turtle then
+    local actions={"forward","back","up","down","turnLeft","turnRight","dig","digUp","digDown","place","placeUp","placeDown","attack","attackUp","attackDown","suck","suckUp","suckDown","drop","dropUp","dropDown","select","transferTo","refuel","equipLeft","equipRight","craft","inspect","inspectUp","inspectDown","detect","detectUp","detectDown","compare","compareUp","compareDown","compareTo"}
+    for _,name in ipairs(actions) do
+        local raw=debugRawTurtle[name]
+        if raw then
+            turtle[name]=function(...)
+                debugLog("TURTLE","CALL "..name.."("..debugArgs(...)..")","INFO")
+                local results={raw(...)}
+                debugLog("TURTLE","RETURN "..name.." -> "..debugArgs(unpack(results)),results[1]==false and "WARN" or "INFO")
+                return unpack(results)
+            end
+        end
+    end
 end
 
 function readFile(path)
@@ -183,6 +393,7 @@ function saveTable(path,value)
         return false
     end
 
+    if debugLog then debugLog("STATE",debugStateSummary(path,value),"INFO") end
     return true
 end
 
@@ -232,6 +443,7 @@ function saveTableLight(path,value)
         return false
     end
 
+    if debugLog then debugLog("STATE",debugStateSummary(path,value),"INFO") end
     return true
 end
 

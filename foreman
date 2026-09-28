@@ -4908,7 +4908,7 @@ local function runMaster()
     local id=os.getComputerID()
 
     if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 and cfg.version~=64 and cfg.version~=65 and cfg.version~=66 and cfg.version~=67 and cfg.version~=68 and cfg.version~=69 and cfg.version~=70 and cfg.version~=71 and cfg.version~=72 and cfg.version~=73 and cfg.version~=74 and cfg.version~=75 and cfg.version~=76 and cfg.version~=77 and cfg.version~=78 and cfg.version~=79 and cfg.version~=80 and cfg.version~=81 and cfg.version~=82 and cfg.version~=83 and cfg.version~=84 and cfg.version~=85 and cfg.version~=86 and cfg.version~=87 and cfg.version~=88 and cfg.version~=89 and cfg.version~=90 and cfg.version~=91 and cfg.version~=92 then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v94.")
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v95.")
     end
 
     if not cfg then
