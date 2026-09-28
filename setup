@@ -64,7 +64,7 @@ if role.role=="foreman" then files[#files+1]="bootstrap" end
 local staged={}
 for _,name in ipairs(files) do staged[name]=fetch(name) end
 local version=staged.version:match("^%s*(%d+)%s*$")
-if not version or tonumber(version)<80 then error("Remote release must be version 80 or later; nothing removed") end
+if not version or tonumber(version)<81 then error("Remote release must be version 81 or later; nothing removed") end
 if staged.common:match("^%s*VERSION%s*=%s*(%d+)")~=version then
     error("Common/version mismatch; nothing removed")
 end

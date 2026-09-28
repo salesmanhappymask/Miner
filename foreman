@@ -1087,6 +1087,12 @@ local function runForeman(cfg)
     end
 
     local function returnBucketsAtFuel()
+        if state.x~=cfg.homeX+1 or state.z~=cfg.homeZ or state.dir~=DIR_S then
+            state.setupBlockReason="Empty bucket return requires the Foreman fuel chest"
+            saveState()
+            sendState(state.setupBlockReason)
+            return false
+        end
         while selfCount("empty_bucket")>0 do
             local slot=selfFindSlot("empty_bucket")
             if not slot then return false end
@@ -2821,6 +2827,18 @@ local function runForeman(cfg)
         end
 
         if not atFuel() then
+            state.phase="WAITING_FUEL"
+            state.setupBlockReason="Cannot reach or read Foreman-"..tostring(number).." fuel chest"
+            saveState()
+            sendState(state.setupBlockReason)
+            return false
+        end
+
+        if not returnBucketsAtFuel() then
+            state.phase="WAITING_FUEL"
+            state.setupBlockReason="Foreman-"..tostring(number).." fuel chest cannot accept empty buckets"
+            saveState()
+            sendState(state.setupBlockReason)
             return false
         end
 
@@ -2828,22 +2846,24 @@ local function runForeman(cfg)
             turtle.getFuelLevel()<=FOREMAN_FUEL_LOW and
             not refuelAtFrontTo(FOREMAN_FUEL_TARGET) then
             state.phase="WAITING_FUEL"
+            state.setupBlockReason="Foreman-"..tostring(number).." fuel chest needs a usable lava bucket, blaze rod, charcoal, or coal for foreman refueling"
             saveState()
-            sendState("Fuel chest cannot satisfy foreman fuel target; dock token retained")
+            sendState(state.setupBlockReason)
             return false
         end
 
-        if not returnBucketsAtFuel() then return false end
         local kind,units=loadFuelPacket(MINER_FUEL_TARGET,1)
         if not kind then
             state.phase="WAITING_FUEL"
+            state.setupBlockReason="Foreman-"..tostring(number).." fuel chest needs a usable lava bucket, blaze rod, charcoal, or coal for its next miner"
             saveState()
-            sendState("Need fuel for the next assigned miner")
+            sendState(state.setupBlockReason)
             return false
         end
         state.commissionFuelKind=kind
         state.commissionFuelUnits=units
         state.commissionFuelLoaded=true
+        state.setupBlockReason=nil
         saveState()
 
         return leaveDockJunction()
@@ -3074,13 +3094,6 @@ local function runForeman(cfg)
 
     local function masterLoadForemanPackage(n)
         if not goTo(0,-1) or not faceTracked(DIR_N) then return false end
-        if not returnBucketsAtFuel() then
-            state.setupBlockReason="Starting supply chest cannot accept empty buckets"
-            state.phase="WAITING_SUPPLIES"
-            saveState()
-            sendState(state.setupBlockReason)
-            return false
-        end
         local needs={
             {"advanced_wireless_narcissistic_turtle",1},
             {"disk_drive",1},
@@ -4495,9 +4508,9 @@ local function runForeman(cfg)
 
                 while not commissionAssigned() do
                     if flags.recallMode then pauseForSetupRecall() end
-                    state.phase="WAITING_SETUP"
+                    if state.phase~="WAITING_FUEL" then state.phase="WAITING_SETUP" end
                     saveState()
-                    sendState("Foreman-1 commissioning paused, retrying")
+                    sendState(state.setupBlockReason or "Foreman-1 commissioning paused, retrying")
                     sleep(2)
                 end
 
@@ -4538,9 +4551,9 @@ local function runForeman(cfg)
                     if flags.recallMode then
                         pauseForSetupRecall()
                     else
-                        state.phase="WAITING_SETUP"
+                        if state.phase~="WAITING_FUEL" then state.phase="WAITING_SETUP" end
                         saveState()
-                        sendState("Commissioning paused, retrying")
+                        sendState(state.setupBlockReason or "Commissioning paused, retrying")
                         sleep(2)
                     end
                 end
@@ -4692,8 +4705,8 @@ local function runMaster()
     local newMaster=false
     local id=os.getComputerID()
 
-    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 and cfg.version~=64 and cfg.version~=65 and cfg.version~=66 and cfg.version~=67 and cfg.version~=68 and cfg.version~=69 and cfg.version~=70 and cfg.version~=71 and cfg.version~=72 and cfg.version~=73 and cfg.version~=74 and cfg.version~=75 and cfg.version~=76 and cfg.version~=77 and cfg.version~=78 and cfg.version~=79 then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v79.")
+    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 and cfg.version~=64 and cfg.version~=65 and cfg.version~=66 and cfg.version~=67 and cfg.version~=68 and cfg.version~=69 and cfg.version~=70 and cfg.version~=71 and cfg.version~=72 and cfg.version~=73 and cfg.version~=74 and cfg.version~=75 and cfg.version~=76 and cfg.version~=77 and cfg.version~=78 and cfg.version~=79 and cfg.version~=80 then
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v81.")
     end
 
     if not cfg then
@@ -4802,7 +4815,7 @@ else
         error("Foreman role file requires foreman node.cfg")
     end
 
-    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 or cfg.version==78 or cfg.version==79 then
+    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 or cfg.version==78 or cfg.version==79 or cfg.version==80 then
         cfg.version=VERSION
         saveTable("node.cfg",cfg)
     elseif cfg.version~=VERSION then
