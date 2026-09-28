@@ -356,17 +356,20 @@ local function runNavigator(cfg)
                 return false
             end
 
-            send(cfg.managerId,{
-                type="recall_shutdown_ready",
-                role="navigator",
-                number=cfg.number,
-                id=os.getComputerID(),
-                x=state.x,
-                y=state.y,
-                z=state.z,
-                dir=state.dir,
-                session=cfg.session
-            })
+            for shutdownAttempt=1,8 do
+                send(cfg.managerId,{
+                    type="recall_shutdown_ready",
+                    role="navigator",
+                    number=cfg.number,
+                    id=os.getComputerID(),
+                    x=state.x,
+                    y=state.y,
+                    z=state.z,
+                    dir=state.dir,
+                    session=cfg.session
+                })
+                sleep(0.1)
+            end
 
             os.shutdown()
         end
@@ -660,6 +663,8 @@ local function runNavigator(cfg)
     sendNavigatorStatus()
 
     local timer=os.startTimer(5)
+    local pendingRecallMode=nil
+    local advanceCancelled=false
 
     while true do
         local event={os.pullEvent()}
@@ -683,7 +688,13 @@ local function runNavigator(cfg)
             if sender==cfg.managerId and protocol==PROTOCOL and type(message)=="table" and message.session==cfg.session then
                 if message.type=="status_query" then
                     sendNavigatorStatus()
-                elseif message.type=="chunk_move" and not state.recalled then
+                elseif message.type=="cancel_advance" then
+                    advanceCancelled=true
+                    if message.mode=="NORMAL" or message.mode=="SHUTDOWN" then
+                        pendingRecallMode=message.mode
+                    end
+                elseif message.type=="chunk_move" and not state.recalled and
+                    not advanceCancelled and not pendingRecallMode then
                     local target=tonumber(message.chunkIndex)
                     if target and target==state.chunkIndex+1 then
                         state.chunkTravel=true
@@ -692,9 +703,13 @@ local function runNavigator(cfg)
                         local travelDone=false
                         local ok=false
                         local reason=nil
+                        advanceCancelled=false
+                        pendingRecallMode=nil
                         parallel.waitForAny(function()
                             ok,reason=travelChunkNorth(state,save,face,site.z,target,
-                                cfg.worldOrigin)
+                                cfg.worldOrigin,function()
+                                    return advanceCancelled or pendingRecallMode~=nil
+                                end)
                             travelDone=true
                         end,function()
                             while not travelDone do
@@ -712,10 +727,40 @@ local function runNavigator(cfg)
                                             modem.transmit(replyChannel,gps.CHANNEL_GPS,{x,y,z})
                                         end
                                     end
+                                elseif ev[1]=="rednet_message" then
+                                    local rsender=ev[2]
+                                    local rmessage=ev[3]
+                                    local rprotocol=ev[4]
+                                    if rsender==cfg.managerId and rprotocol==PROTOCOL and
+                                        type(rmessage)=="table" and rmessage.session==cfg.session then
+                                        if rmessage.type=="recall_command" then
+                                            pendingRecallMode=rmessage.mode or "NORMAL"
+                                            advanceCancelled=true
+                                        elseif rmessage.type=="cancel_advance" then
+                                            advanceCancelled=true
+                                            if rmessage.mode=="NORMAL" or rmessage.mode=="SHUTDOWN" then
+                                                pendingRecallMode=rmessage.mode
+                                            end
+                                        elseif rmessage.type=="status_query" then
+                                            sendNavigatorStatus()
+                                        end
+                                    end
                                 end
                             end
                         end)
-                        if ok then
+                        if pendingRecallMode then
+                            state.chunkTravel=nil
+                            save()
+                            if not recallNavigator(pendingRecallMode) then
+                                status("navigator","RECALL_BLOCKED",{
+                                    number=cfg.number,x=state.x,y=state.y,z=state.z,
+                                    message="Navigator recall route blocked after chunk cancellation",
+                                    session=cfg.session
+                                })
+                            end
+                            pendingRecallMode=nil
+                            advanceCancelled=false
+                        elseif ok then
                             state.chunkTravel=nil
                             save()
                             sendNavigatorStatus()
@@ -732,7 +777,9 @@ local function runNavigator(cfg)
                             session=cfg.session})
                     end
                 elseif message.type=="recall_command" then
-                    if not recallNavigator(message.mode or "NORMAL") then
+                    advanceCancelled=true
+                    pendingRecallMode=message.mode or "NORMAL"
+                    if not recallNavigator(pendingRecallMode) then
                         status("navigator","RECALL_BLOCKED",{
                             number=cfg.number,
                             x=state.x,

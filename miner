@@ -302,17 +302,20 @@ local function runMinerCommissioning(cfg)
                         dir=state.dir or cfg.homeDir,
                         session=cfg.session
                     })
-                    send(cfg.managerId,{
-                        type="recall_shutdown_ready",
-                        role="miner",
-                        row=cfg.row,
-                        id=os.getComputerID(),
-                        x=state.x or cfg.homeX,
-                        y=state.y or cfg.homeY,
-                        z=state.z or cfg.homeZ,
-                        dir=state.dir or cfg.homeDir,
-                        session=cfg.session
-                    })
+                    for shutdownAttempt=1,8 do
+                        send(cfg.managerId,{
+                            type="recall_shutdown_ready",
+                            role="miner",
+                            row=cfg.row,
+                            id=os.getComputerID(),
+                            x=state.x or cfg.homeX,
+                            y=state.y or cfg.homeY,
+                            z=state.z or cfg.homeZ,
+                            dir=state.dir or cfg.homeDir,
+                            session=cfg.session
+                        })
+                        sleep(0.1)
+                    end
                     os.shutdown()
                 elseif mode=="NORMAL" then
                     if not faceCommissioning(DIR_N) then
@@ -1027,6 +1030,7 @@ local function runMiner(cfg)
         start=false,
         recallMode=nil,
         resume=false,
+        advanceCancelled=false,
         serviceProbe=nil,
         refuelNow=false,
         serviceComplete=false,
@@ -1146,7 +1150,14 @@ local function runMiner(cfg)
                             session=cfg.session
                         })
                     elseif sender == cfg.managerId and message.session==cfg.session then
-                        if message.type=="chunk_command" and not state.recallMode then
+                        if message.type=="cancel_advance" then
+                            flags.advanceCancelled=true
+                            if message.mode=="NORMAL" or message.mode=="SHUTDOWN" then
+                                flags.start=false
+                                flags.resume=false
+                                flags.recallMode=message.mode
+                            end
+                        elseif message.type=="chunk_command" and not state.recallMode then
                             local target=tonumber(message.chunkIndex)
                             if target==state.chunkIndex+1 and message.stage=="COLLECT_M" and
                                 state.chestCollected then
@@ -1195,6 +1206,9 @@ local function runMiner(cfg)
                             })
                         elseif message.type == "recall_command" then
                             local incomingMode=message.mode or "NORMAL"
+                            if incomingMode=="NORMAL" or incomingMode=="SHUTDOWN" then
+                                flags.advanceCancelled=true
+                            end
                             if state.recallMode==incomingMode and (state.phase=="RECALLED_PAUSED" or state.phase=="WAITING_SERVICE" or state.phase=="RECALLING") then
                                 if state.phase=="WAITING_SERVICE" and state.request then
                                     requestPacket(true)
@@ -1577,8 +1591,21 @@ local function runMiner(cfg)
         state.advanceStage="MOVE"
         state.phase="ADVANCE_MOVE"
         save()
-        local ok,reason=travelChunkNorth(state,save,face,0,target,cfg.worldOrigin)
-        if not ok then sendState(reason);return false end
+        flags.advanceCancelled=false
+        local ok,reason=travelChunkNorth(state,save,face,0,target,cfg.worldOrigin,function()
+            return flags.advanceCancelled or flags.recallMode~=nil
+        end)
+        if not ok then
+            if flags.advanceCancelled or flags.recallMode then
+                state.advanceStage=nil
+                state.phase="RECALL_PENDING"
+                save()
+                sendState("Chunk travel cancelled for Regional Manager recall")
+                return false
+            end
+            sendState(reason)
+            return false
+        end
         state.advanceStage="WAIT"
         state.phase="ADVANCE_WAIT"
         state.resumeZ=0
@@ -1601,7 +1628,9 @@ local function runMiner(cfg)
             if state.chunkIndex>=command.target then
                 advanceAck("MOVE_M",command.target)
             elseif not runChunkMove(command.target) then
-                sendState("Chunk travel blocked")
+                if not flags.recallMode and not flags.advanceCancelled then
+                    sendState("Chunk travel blocked")
+                end
             end
         end
     end
@@ -2269,17 +2298,20 @@ local function runMiner(cfg)
                 return false
             end
 
-            send(cfg.managerId,{
-                type="recall_shutdown_ready",
-                role="miner",
-                row=state.row,
-                id=os.getComputerID(),
-                x=state.x,
-                y=state.y,
-                z=state.z,
-                dir=state.dir,
-                session=cfg.session
-            })
+            for shutdownAttempt=1,8 do
+                send(cfg.managerId,{
+                    type="recall_shutdown_ready",
+                    role="miner",
+                    row=state.row,
+                    id=os.getComputerID(),
+                    x=state.x,
+                    y=state.y,
+                    z=state.z,
+                    dir=state.dir,
+                    session=cfg.session
+                })
+                sleep(0.1)
+            end
             os.shutdown()
         end
 
@@ -2849,6 +2881,14 @@ local function runMiner(cfg)
         end
     end
 
+    local function heartbeatLoop()
+        while true do
+            sleep(5)
+            pcall(openNetwork)
+            pcall(sendState,"Heartbeat")
+        end
+    end
+
     local function runWorkLoop()
         while true do
             workLoop()
@@ -2856,7 +2896,7 @@ local function runMiner(cfg)
             sleep(2)
         end
     end
-    parallel.waitForAny(networkLoop, runWorkLoop)
+    parallel.waitForAny(networkLoop, heartbeatLoop, runWorkLoop)
 end
 
 

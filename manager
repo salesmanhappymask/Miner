@@ -9,6 +9,8 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
+    local OBSERVER_ID=1633
+    local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send
     local rawBroadcast=broadcast
@@ -533,6 +535,66 @@ local function runRegionalManager()
             end
         end
         return string.format("M%02d   %-18s %s",row,tostring(m.state or "?"):sub(1,18),task),c
+    end
+
+    local function observerSnapshot()
+        local pending,activeJobs,blocked=countRequests()
+        local gpsCount=refreshGpsReady()
+        local clusters={}
+        for n=1,4 do
+            local fs,gps,foremanPos,gpsPos,task=clusterInfo(n)
+            local miners={}
+            for k=1,4 do
+                local row=(n-1)*4+k
+                local m=data.miners[row]
+                miners[k]={
+                    row=row,
+                    state=m and tostring(m.state or "?") or "NO SIGNAL",
+                    online=m and online(m,20) or false,
+                    message=m and tostring(m.message or "") or "",
+                    recovery=m and tostring(m.recovery or "") or "",
+                    fuel=m and m.fuel or nil
+                }
+            end
+            local f=data.foremen[n]
+            clusters[n]={
+                foremanState=fs,
+                foremanOnline=f and online(f,20) or false,
+                foremanPos=foremanPos,
+                gpsState=gps,
+                gpsPos=gpsPos,
+                task=task,
+                detail=f and tostring(f.recovery or f.message or f.setupMissing or "") or "",
+                miners=miners
+            }
+        end
+        return {
+            type="monitor_snapshot",
+            version=VERSION,
+            managerId=managerId,
+            masterForemanId=data.masterForemanId,
+            paired=data.paired,
+            gpsCount=gpsCount,
+            nodeCount=countTable(data.nodes),
+            pending=pending,
+            active=activeJobs,
+            blocked=blocked,
+            radioRx=radioRxRate,
+            radioTx=radioTxRate,
+            statusLine=recallLine(),
+            chunkBlockReason=chunkBlockReason,
+            recallState=data.recall and data.recall.state or "NORMAL",
+            chunkIndex=data.chunkIndex,
+            clusters=clusters,
+            session=data.session
+        }
+    end
+
+    local function sendObserverSnapshot(force)
+        if not OBSERVER_ID or OBSERVER_ID==managerId then return end
+        if not force and now()-lastObserverSend<1 then return end
+        send(OBSERVER_ID,observerSnapshot())
+        lastObserverSend=now()
     end
 
     local function drawMonitor()
@@ -1193,12 +1255,26 @@ local function runRegionalManager()
     end
 
     local function beginRecall(mode)
-        local abortingAdvance=data.advance and
-            (data.advance.phase=="STAGE_F" or data.advance.phase=="COLLECT_M")
-        if data.advance and not abortingAdvance then return false end
+        local abortingAdvance=data.advance~=nil
+        local cancelledPhase=data.advance and data.advance.phase or nil
         if abortingAdvance and mode~="NORMAL" and mode~="SHUTDOWN" then
-            chunkBlockReason="Use NORMAL or SHUTDOWN to abort chest collection"
+            chunkBlockReason="Only NORMAL recall or SHUTDOWN can interrupt a chunk transition"
+            save()
             return false
+        end
+        if abortingAdvance then
+            local cancelledTarget=data.advance.target
+            sendControl({
+                type="cancel_advance",
+                mode=mode,
+                phase=cancelledPhase,
+                chunkIndex=cancelledTarget,
+                session=data.session
+            },nil,true)
+            data.advance=nil
+            chunkBlockReason=nil
+            debugLog("RECALL","Aborted chunk transition phase="..tostring(cancelledPhase)..
+                " target="..tostring(cancelledTarget).." for "..tostring(mode),"WARN")
         end
         if data.recall.mode=="PACK" and
             (data.recall.state=="PACK_CLEAR" or data.recall.state=="PACK_COLLECT") then
@@ -1258,7 +1334,7 @@ local function runRegionalManager()
             emptied={},
             shutdown={},
             packReady={},
-            waitCollectors=abortingAdvance and true or nil,
+            waitCollectors=cancelledPhase=="COLLECT_M" and true or nil,
             targets=targets
         }
 
@@ -1815,7 +1891,10 @@ local function runRegionalManager()
                 local function faceNorth(target) return target==DIR_N and
                     data.managerPose.dir==DIR_N end
                 local ok,reason=travelChunkNorth(data.managerPose,savePose,
-                    faceNorth,MANAGER_IDLE.z,advance.target,data.worldOrigin)
+                    faceNorth,MANAGER_IDLE.z,advance.target,data.worldOrigin,function()
+                        return data.recall and data.recall.active and
+                            (data.recall.mode=="NORMAL" or data.recall.mode=="SHUTDOWN")
+                    end)
                 if not ok then advance.error=reason;save();return end
                 data.chunkIndex=advance.target
                 save();flushManager(true)
@@ -2520,6 +2599,7 @@ local function runRegionalManager()
             flushManager(false)
             drawTerminal()
             drawMonitor()
+            sendObserverSnapshot(false)
             timer=os.startTimer(1)
         end
     end

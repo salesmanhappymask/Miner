@@ -1,5 +1,5 @@
-VERSION = 97
-PROTOCOL = "miner_swarm_v97"
+VERSION = 99
+PROTOCOL = "miner_swarm_v99"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -126,7 +126,7 @@ function now()
     return os.clock()
 end
 
-DEBUG_PROTOCOL = "miner_swarm_debug_v97"
+DEBUG_PROTOCOL = "miner_swarm_debug_v99"
 DEBUG_LOG_DIR = "logs"
 DEBUG_LOG_MAX = 196608
 DEBUG_REMOTE_BATCH = 12
@@ -1261,18 +1261,24 @@ function verifyBootWitness(state,origin,hadIntent)
     return true
 end
 
-function travelChunkNorth(state,save,face,baseZ,targetIndex,origin)
+function travelChunkNorth(state,save,face,baseZ,targetIndex,origin,abortCheck)
+    local function cancelled()
+        return type(abortCheck)=="function" and abortCheck() and true or false
+    end
+    if cancelled() then return false,"Chunk move cancelled" end
     if state.recoveryLocked then return false,"Position recovery lock" end
     local current=tonumber(state.chunkIndex) or 0
     if current>=targetIndex then return true end
     if targetIndex~=current+1 then return false,"Chunk epoch out of sequence" end
     if state.y~=nil and state.y<0 then return false,"Turtle still underground" end
+    if cancelled() then return false,"Chunk move cancelled" end
     if not face(DIR_N) then return false,"Could not face north" end
     local destination=baseZ+16
     if state.z<baseZ or state.z>destination then
         return false,"Chunk move position outside expected corridor"
     end
     local function verifyWorld()
+        if cancelled() then return false,"Chunk move cancelled" end
         if not origin then return true end
         local ex,ey,ez=worldPose(state.x,state.y,state.z,state.chunkIndex,origin)
         local ok,gx,gy,gz=pcall(gps.locate,2,false)
@@ -1291,6 +1297,7 @@ function travelChunkNorth(state,save,face,baseZ,targetIndex,origin)
     local verified,reason=verifyWorld()
     if not verified then return false,reason end
     while state.z<destination do
+        if cancelled() then return false,"Chunk move cancelled" end
         if turtle.getFuelLevel()~="unlimited" and turtle.getFuelLevel()<destination-state.z then
             return false,"Not enough fuel for chunk move"
         end
@@ -1308,6 +1315,7 @@ function travelChunkNorth(state,save,face,baseZ,targetIndex,origin)
         state.seq=(tonumber(state.seq) or 0)+1
         state.chunkMoveIntent=nil
         save()
+        if cancelled() then return false,"Chunk move cancelled" end
     end
     verified,reason=verifyWorld()
     if not verified then return false,reason end
