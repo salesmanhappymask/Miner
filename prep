@@ -1,79 +1,92 @@
 local RAW="https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
 
 local function fetch(name)
-    local response=http.get(RAW .. name)
-    if not response then return nil end
+    local response=http.get(RAW..name)
+    if not response then error("Could not download "..name) end
     local data=response.readAll()
     response.close()
+    if not data or data=="" then error("Empty download: "..name) end
     return data
 end
 
-local function writeFile(path,data)
-    local f=fs.open(path,"w")
-    if not f then return false end
-    f.write(data)
-    f.close()
-    return true
+local function write(path,data)
+    local file=fs.open(path,"w")
+    if not file then error("Could not write "..path) end
+    file.write(data)
+    file.close()
+    local check=fs.open(path,"r")
+    if not check then error("Could not verify "..path) end
+    local actual=check.readAll()
+    check.close()
+    if actual~=data then error("Disk verification failed: "..path) end
 end
 
-local driveSide
+local side
 if peripheral.getType("top")=="drive" then
-    driveSide="top"
+    side="top"
 elseif peripheral.getType("bottom")=="drive" then
-    driveSide="bottom"
+    side="bottom"
 else
-    error("Disk Drive must be directly above or below turtle")
+    error("Disk Drive must be directly above or below the turtle")
 end
 
-local startup=fetch("startup")
-local common=fetch("common")
-local bootstrap=fetch("bootstrap")
-local setup=fetch("setup")
+print("1. Initial Setup: RM and Master Foreman updater")
+print("2. Standard: worker installation")
+local mode=read()
+if mode~="1" and mode~="2" then error("Select 1 or 2") end
 
-if not startup or not common or not bootstrap or not setup then
-    error("Could not download modular installer files")
+local contents={}
+local label
+if mode=="1" then
+    contents.update=fetch("update")
+    label="quarry setup"
+else
+    local version=fetch("version"):match("^%s*(%d+)%s*$")
+    if not version then error("Invalid remote version") end
+    contents.worker_startup=fetch("startup")
+    contents.common=fetch("common")
+    contents.bootstrap=fetch("bootstrap")
+    if contents.common:match("^%s*VERSION%s*=%s*(%d+)")~=version then
+        error("Worker disk files disagree on version")
+    end
+    contents.startup=[[
+if fs.exists("node.cfg") and fs.exists("/startup") then
+    if not shell.run("/startup") then error("Local startup failed") end
+else
+    if not shell.run("/disk/worker_startup") then error("Worker installer failed") end
+end
+]]
+    label="quarry worker"
 end
 
-local prepared=0
-
-for slot=1,16 do
-    if turtle.getItemCount(slot)>0 then
-        turtle.select(slot)
-
-        local deposited=driveSide=="top" and turtle.dropUp(1) or turtle.dropDown(1)
-        if deposited then
-            sleep(0.2)
-
-            if disk.isPresent(driveSide) then
-                local files=fs.list("disk")
-
-                for i=1,#files do
-                    fs.delete(fs.combine("disk",files[i]))
-                end
-
-                if not writeFile("disk/startup",startup) then
-                    error("Could not write disk/startup")
-                end
-
-                if not writeFile("disk/common",common) then
-                    error("Could not write disk/common")
-                end
-
-                if not writeFile("disk/bootstrap",bootstrap) then
-                    error("Could not write disk/bootstrap")
-                end
-
-                if not writeFile("disk/setup",setup) then
-                    error("Could not write disk/setup")
-                end
-
-                disk.setLabel(driveSide,"miner")
-                prepared=prepared+1
-            end
-
-            if driveSide=="top" then turtle.suckUp(1) else turtle.suckDown(1) end
-        end
+local compile=loadstring or load
+if compile then
+    for name,data in pairs(contents) do
+        if not compile(data,name) then error("Invalid downloaded "..name) end
     end
 end
 
-print("Prepared " .. tostring(prepared) .. " modular miner disks.")
+local prepared=0
+for slot=1,16 do
+    if turtle.getItemCount(slot)>0 then
+        turtle.select(slot)
+        local inserted=side=="top" and turtle.dropUp(1) or turtle.dropDown(1)
+        if inserted then
+            sleep(0.2)
+            if not disk.isPresent(side) then
+                error("Disk was not detected after insertion")
+            end
+            for _,name in ipairs(fs.list("disk")) do
+                fs.delete(fs.combine("disk",name))
+            end
+            for name,data in pairs(contents) do
+                write("disk/"..name,data)
+            end
+            disk.setLabel(side,label)
+            local returned=side=="top" and turtle.suckUp(1) or turtle.suckDown(1)
+            if not returned then error("Could not retrieve prepared disk") end
+            prepared=prepared+1
+        end
+    end
+end
+print("Prepared "..tostring(prepared).." "..(mode=="1" and "initial setup" or "worker").." disks")

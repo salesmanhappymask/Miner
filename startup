@@ -139,10 +139,6 @@ else
     roleName="bootstrap"
 end
 
-if REGIONAL_MANAGER==1 or MASTER_FOREMAN==1 then
-    ensureLocal("setup")
-end
-
 if runningFromDisk() and not cfg then
     base="/disk/"
 

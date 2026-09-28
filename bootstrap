@@ -34,7 +34,8 @@ local function bootstrap()
         if not valid then error("Cannot commission turtle: "..tostring(reason)) end
     end
 
-    local source=readFile("/disk/startup") or readFile("disk/startup")
+    local source=readFile("/disk/worker_startup") or readFile("disk/worker_startup") or
+        readFile("/disk/startup") or readFile("disk/startup")
     local commonSource=readFile("/disk/common") or readFile("disk/common")
 
     if not source or not commonSource then
