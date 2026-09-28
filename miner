@@ -109,66 +109,66 @@ local function runMinerCommissioning(cfg)
             if state.dir==DIR_N and state.orientationAnchor=="FOREMAN_BACK" then
                 return true
             end
-            state.recoveryLocked=true
-            state.recoveryReason="Miner orientation lacks a physical foreman anchor"
-            state.phase="RECOVERY_LOCK"
-            save()
-            return false
+            state.orientationCalibrated=false
+            state.orientationAnchor=nil
         end
-
-        state.dir=tonumber(state.dir) or DIR_N
-        state.orientationTurns=tonumber(state.orientationTurns) or 0
 
         if state.orientationTurnIntent then
-            state.recoveryLocked=true
-            state.recoveryReason="Server restart interrupted miner orientation scan"
-            state.phase="RECOVERY_LOCK"
+            state.orientationTurnIntent=nil
+            state.orientationCalibrated=false
+            state.orientationAnchor=nil
+        end
+
+        local foremanSide=nil
+        for _,side in ipairs({"back","left","front","right"}) do
+            local ok,adjacent=pcall(peripheral.call,side,"getID")
+            if ok and tonumber(adjacent)==tonumber(cfg.foremanId) then
+                foremanSide=side
+                break
+            end
+        end
+
+        if not foremanSide then
+            state.orientationTurns=0
+            state.recoveryReason="Foreman-"..tostring(cfg.foremanNumber)..
+                " is not detectable beside Miner-"..tostring(cfg.row).." during deployment"
             save()
             return false
         end
 
-        while state.orientationTurns<4 do
-            local ok,behind=pcall(peripheral.call,"back","getID")
-            if ok and tonumber(behind)==tonumber(cfg.foremanId) then
-                state.dir=DIR_N
-                state.orientationAnchor="FOREMAN_BACK"
-                state.orientationCalibrated=true
-                state.orientationTurnIntent=nil
-                save()
-                return true
-            end
+        local turns={back=0,left=1,front=2,right=3}
+        local needed=turns[foremanSide] or 0
+        state.orientationTurns=0
 
-            if state.orientationTurns==3 then break end
-
+        for i=1,needed do
             local intent={
                 from=state.dir,
                 to=(state.dir+1)%4,
-                turnNumber=state.orientationTurns+1
+                turnNumber=i
             }
-
             state.orientationTurnIntent=intent
             save()
-
             if not turtle.turnRight() then
                 state.orientationTurnIntent=nil
-                state.recoveryLocked=true
-                state.recoveryReason="Could not turn miner during foreman orientation scan"
-                state.phase="RECOVERY_LOCK"
+                state.recoveryReason="Could not turn Miner-"..tostring(cfg.row)..
+                    " while aligning north"
                 save()
                 return false
             end
-
             state.dir=intent.to
-            state.orientationTurns=intent.turnNumber
+            state.orientationTurns=i
             state.orientationTurnIntent=nil
             save()
         end
 
-        state.recoveryLocked=true
-        state.recoveryReason="Foreman not detected behind miner during orientation scan"
-        state.phase="RECOVERY_LOCK"
+        state.dir=DIR_N
+        state.orientationTurns=needed
+        state.orientationAnchor="FOREMAN_BACK"
+        state.orientationCalibrated=true
+        state.recoveryLocked=false
+        state.recoveryReason=nil
         save()
-        return false
+        return true
     end
 
     local function faceCommissioning(target)
@@ -519,17 +519,28 @@ local function runMinerCommissioning(cfg)
                 save()
 
                 if not faceCommissioning(DIR_N) then
+                    local reason=state.recoveryReason or "Miner could not physically face north"
                     ack({
                         type="miner_deploy_blocked",
                         id=os.getComputerID(),
                         row=cfg.row,
-                        reason=state.recoveryReason or "Miner could not physically face north"
+                        reason=reason
                     })
-                    state.recoveryLocked=true
-                    state.recoveryReason=state.recoveryReason or
-                        "Miner could not physically face north for deployment"
-                    state.phase="RECOVERY_LOCK"
+                    state.recoveryLocked=false
+                    state.orientationCalibrated=false
+                    state.orientationAnchor=nil
+                    state.orientationTurns=0
+                    state.orientationTurnIntent=nil
+                    state.phase="COMMISSIONING"
+                    state.recoveryReason=reason
                     save()
+                    status("miner","COMMISSIONING",{
+                        row=cfg.row,
+                        foreman=cfg.foremanNumber,
+                        recovery=reason,
+                        message="Deployment orientation retry pending",
+                        session=cfg.session
+                    })
                 end
 
                 if state.recoveryLocked then

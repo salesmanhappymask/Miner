@@ -581,9 +581,23 @@ local function runRegionalManager()
                 end
                 if hh>=12 then
                     local f=data.foremen[n]
-                    local message=f and (f.recovery or f.message or f.setupMissing)
+                    local message=nil
+                    local detailColor=C_WARN
+                    for k=1,4 do
+                        local minerRow=(n-1)*4+k
+                        local m=data.miners[minerRow]
+                        if m and (m.recovery or m.state=="RECOVERY_LOCK") then
+                            message="M"..string.format("%02d",minerRow)..": "..
+                                tostring(m.recovery or m.message or "Recovery lock")
+                            detailColor=C_FAULT
+                            break
+                        end
+                    end
+                    if not message then
+                        message=f and (f.recovery or f.message or f.setupMissing)
+                    end
                     if message and message~="" then
-                        ui.field("detail"..n,x+3,y+hh-3,ww-5,tostring(message),C_WARN,C_INSET)
+                        ui.field("detail"..n,x+3,y+hh-3,ww-5,tostring(message),detailColor,C_INSET)
                     end
                 end
             end
