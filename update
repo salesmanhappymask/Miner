@@ -110,6 +110,63 @@ end
 if not turtle or not turtle.forward then error("Update requires a turtle") end
 
 local role = config.role
+
+local function validAnchor(value)
+    return type(value) == "table" and type(value.x) == "number" and
+        type(value.y) == "number" and type(value.z) == "number"
+end
+
+local function loadSerialized(path)
+    local raw = readFile(path)
+    if not raw then return nil end
+    local ok, value = pcall(textutils.unserialize, raw)
+    if not ok then return nil end
+    return value
+end
+
+local anchor
+if role == "master" then
+    local existing = loadSerialized("world_anchor")
+    if validAnchor(existing) then
+        anchor = existing
+    else
+        local node = loadSerialized("node.cfg")
+        if type(node) == "table" and validAnchor(node.worldOrigin) then
+            anchor = {
+                x = node.worldOrigin.x,
+                y = node.worldOrigin.y,
+                z = node.worldOrigin.z + 1
+            }
+            print("Recovered Master Foreman world anchor from node.cfg.")
+        end
+    end
+
+    if not anchor and gps and gps.locate then
+        local ok, x, y, z = pcall(gps.locate, 2, false)
+        if ok and type(x) == "number" and type(y) == "number" and type(z) == "number" then
+            anchor = {x = x, y = y, z = z}
+            print("Recovered Master Foreman world anchor from GPS.")
+        end
+    end
+
+    if not anchor then
+        anchor = {}
+        print("Master Foreman world anchor is missing.")
+        print("Enter this turtle's current Minecraft coordinates once.")
+        for _, axis in ipairs({"x", "y", "z"}) do
+            while true do
+                term.write(axis:upper() .. ": ")
+                local value = tonumber(read())
+                if value and value == math.floor(value) then
+                    anchor[axis] = value
+                    break
+                end
+                print("Enter a whole-number coordinate.")
+            end
+        end
+    end
+end
+
 local files = {"startup", "common", "prep", role == "manager" and "manager" or "foreman"}
 local staged = {}
 local updaterSource = fetch("update")
@@ -177,6 +234,10 @@ for _, name in ipairs(files) do
     if readFile(name) ~= staged[name] then error("Final verification failed: " .. name) end
 end
 if readFile("version") ~= version then error("Final verification failed: version") end
+
+if anchor then
+    writeFile("world_anchor", textutils.serialize(anchor))
+end
 
 writeFile("update.new", updaterSource)
 if fs.exists("update.old") then fs.delete("update.old") end

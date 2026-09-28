@@ -4852,10 +4852,30 @@ local function runMaster()
 
     local cfg=loadTable("node.cfg")
     local anchor=loadTable("world_anchor")
-    if not anchor or type(anchor.x)~="number" or
-        type(anchor.y)~="number" or type(anchor.z)~="number" then
-        error("Master world anchor missing; run setup at the starting square")
+    local validAnchor=anchor and type(anchor.x)=="number" and
+        type(anchor.y)=="number" and type(anchor.z)=="number"
+
+    if not validAnchor and cfg and cfg.worldOrigin and
+        type(cfg.worldOrigin.x)=="number" and type(cfg.worldOrigin.y)=="number" and
+        type(cfg.worldOrigin.z)=="number" then
+        anchor={x=cfg.worldOrigin.x,y=cfg.worldOrigin.y,z=cfg.worldOrigin.z+1}
+        saveTable("world_anchor",anchor)
+        validAnchor=true
     end
+
+    if not validAnchor and gps and gps.locate then
+        local ok,x,y,z=pcall(gps.locate,2,false)
+        if ok and type(x)=="number" and type(y)=="number" and type(z)=="number" then
+            anchor={x=x,y=y,z=z}
+            saveTable("world_anchor",anchor)
+            validAnchor=true
+        end
+    end
+
+    if not validAnchor then
+        error("Master world anchor missing; run update once and enter this turtle's coordinates")
+    end
+
     local worldOrigin={x=anchor.x,y=anchor.y,z=anchor.z-1}
     local newMaster=false
     local id=os.getComputerID()
