@@ -157,7 +157,7 @@ fs.makeDir(stageDir)
 for _, name in ipairs(files) do
     writeFile(fs.combine(stageDir, name), staged[name])
 end
-writeFile(fs.combine(stageDir, "version"), version .. "\n")
+writeFile(fs.combine(stageDir, "version"), version)
 
 local managed = {
     "startup", "common", "prep", "manager", "foreman", "bootstrap", "miner", "navigator",
@@ -176,7 +176,7 @@ if fs.exists(stageDir) then fs.delete(stageDir) end
 for _, name in ipairs(files) do
     if readFile(name) ~= staged[name] then error("Final verification failed: " .. name) end
 end
-if readFile("version") ~= version .. "\n" then error("Final verification failed: version") end
+if readFile("version") ~= version then error("Final verification failed: version") end
 
 writeFile("update.new", updaterSource)
 if fs.exists("update.old") then fs.delete("update.old") end
