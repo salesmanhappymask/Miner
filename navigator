@@ -24,7 +24,10 @@ local function runNavigator(cfg)
         if not saveTableLight(statePath,state) then error("Navigator state write failed") end
     end
 
+    local bootHadIntent=state.motionIntent or state.turnIntent or state.chunkMoveIntent
+
     local function save()
+        state.fuelWitness=turtle.getFuelLevel()
         if not saveTableLight(statePath,state) then
             error("Navigator state write failed; movement halted")
         end
@@ -39,9 +42,10 @@ local function runNavigator(cfg)
         local intent=state.motionIntent
         local before=intent.fuelBefore
         local current=turtle.getFuelLevel()
-        if type(before)=="number" and type(current)=="number" and
+        local moved=movementFromFuel(before,current)
+        if moved~=nil and
             type(intent.from)=="table" and type(intent.to)=="table" then
-            local pose=current<before and intent.to or intent.from
+            local pose=moved and intent.to or intent.from
             state.x=pose.x
             state.y=pose.y
             state.z=pose.z
@@ -65,6 +69,15 @@ local function runNavigator(cfg)
         state.recoveryLocked=true
         state.recoveryReason="Navigator saved pose is outside its operating area"
         save()
+    end
+
+    if not state.recoveryLocked then
+        local verified,reason=verifyBootWitness(state,cfg.worldOrigin,bootHadIntent)
+        if not verified then
+            state.recoveryLocked=true
+            state.recoveryReason=reason
+            save()
+        end
     end
 
     local function turnRight()
@@ -750,7 +763,7 @@ if not cfg or cfg.role~="navigator" then
     error("Navigator role file requires navigator node.cfg")
 end
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 or cfg.version==78 or cfg.version==79 or cfg.version==80 or cfg.version==81 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 or cfg.version==78 or cfg.version==79 or cfg.version==80 or cfg.version==81 or cfg.version==82 or cfg.version==83 or cfg.version==84 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then

@@ -35,6 +35,9 @@ local function runForeman(cfg)
         saveTableLight(statePath,state)
     end
 
+    local bootHadIntent=state.motionIntent or state.verticalIntent or
+        state.turnIntent or state.chunkMoveIntent
+
     state.session=cfg.session
     state.y=tonumber(state.y) or 0
     state.seq=tonumber(state.seq) or 0
@@ -76,7 +79,18 @@ local function runForeman(cfg)
             monitorState,monitorSeq=requestPoseBackup("foreman",5,cfg.session)
         end
 
-        if monitorState and tonumber(monitorSeq or monitorState.seq or 0)>=intentSeq then
+        local expectedMove=state.motionIntent and state.motionIntent.to
+        local monitorFits=monitorState and
+            ((expectedMove and monitorState.x==expectedMove.x and
+                monitorState.y==expectedMove.y and monitorState.z==expectedMove.z and
+                monitorState.dir==expectedMove.dir) or
+             (state.verticalIntent and monitorState.x==state.x and
+                monitorState.z==state.z and monitorState.y==state.verticalIntent.to and
+                monitorState.dir==state.dir))
+
+        if monitorFits and not state.turnIntent and
+            tonumber(monitorSeq or monitorState.seq or 0)==intentSeq and
+            movementFromFuel(intent.fuelBefore,turtle.getFuelLevel())==true then
             state=monitorState
             state.motionIntent=nil
             state.verticalIntent=nil
@@ -93,11 +107,7 @@ local function runForeman(cfg)
             local fuelBefore=moveIntent.fuelBefore
             local moved=nil
 
-            if type(fuelNow)=="number" and type(fuelBefore)=="number" then
-                moved=fuelNow<fuelBefore
-            elseif type(fuelBefore)=="number" and fuelBefore<=0 then
-                moved=false
-            end
+            moved=movementFromFuel(fuelBefore,fuelNow)
 
             if moved==nil then
                 state.recoveryLocked=true
@@ -125,6 +135,22 @@ local function runForeman(cfg)
         state.recoveryReason="Saved foreman pose is outside the operating area"
         state.phase="RECOVERY_LOCK"
         saveTableLight(statePath,state)
+    end
+
+    if bootHadIntent and not state.recoveryLocked and
+        not state.motionIntent and not state.verticalIntent and
+        not state.turnIntent and not state.chunkMoveIntent then
+        state.fuelWitness=turtle.getFuelLevel()
+        saveTableLight(statePath,state)
+    end
+    if not state.recoveryLocked then
+        local verified,reason=verifyBootWitness(state,cfg.worldOrigin,bootHadIntent)
+        if not verified then
+            state.recoveryLocked=true
+            state.recoveryReason=reason
+            state.phase="RECOVERY_LOCK"
+            saveTableLight(statePath,state)
+        end
     end
 
     local qdata=loadTableLight(queuePath)
@@ -169,6 +195,7 @@ local function runForeman(cfg)
     local lastPeer = 0
 
     local function saveState()
+        state.fuelWitness=turtle.getFuelLevel()
         if not saveTableLight(statePath,state) then
             error("Foreman state write failed; movement halted")
         end
@@ -4705,8 +4732,8 @@ local function runMaster()
     local newMaster=false
     local id=os.getComputerID()
 
-    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 and cfg.version~=64 and cfg.version~=65 and cfg.version~=66 and cfg.version~=67 and cfg.version~=68 and cfg.version~=69 and cfg.version~=70 and cfg.version~=71 and cfg.version~=72 and cfg.version~=73 and cfg.version~=74 and cfg.version~=75 and cfg.version~=76 and cfg.version~=77 and cfg.version~=78 and cfg.version~=79 and cfg.version~=80 and cfg.version~=81 then
-        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v82.")
+    if cfg and cfg.version~=VERSION and cfg.version~=55 and cfg.version~=56 and cfg.version~=57 and cfg.version~=58 and cfg.version~=59 and cfg.version~=60 and cfg.version~=61 and cfg.version~=62 and cfg.version~=63 and cfg.version~=64 and cfg.version~=65 and cfg.version~=66 and cfg.version~=67 and cfg.version~=68 and cfg.version~=69 and cfg.version~=70 and cfg.version~=71 and cfg.version~=72 and cfg.version~=73 and cfg.version~=74 and cfg.version~=75 and cfg.version~=76 and cfg.version~=77 and cfg.version~=78 and cfg.version~=79 and cfg.version~=80 and cfg.version~=81 and cfg.version~=82 and cfg.version~=83 and cfg.version~=84 then
+        error("Old Master Foreman state detected. Clear node.cfg and foreman state before using v85.")
     end
 
     if not cfg then
@@ -4815,7 +4842,7 @@ else
         error("Foreman role file requires foreman node.cfg")
     end
 
-    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 or cfg.version==78 or cfg.version==79 or cfg.version==80 or cfg.version==81 then
+    if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 or cfg.version==78 or cfg.version==79 or cfg.version==80 or cfg.version==81 or cfg.version==82 or cfg.version==83 or cfg.version==84 then
         cfg.version=VERSION
         saveTable("node.cfg",cfg)
     elseif cfg.version~=VERSION then

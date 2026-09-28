@@ -26,6 +26,8 @@ local function runMinerCommissioning(cfg)
         orientationCalibrated=false
     }
 
+    local bootHadIntent=state.motionIntent or state.orientationTurnIntent
+
     state.row=cfg.row
     state.phase="COMMISSIONING"
     state.seq=tonumber(state.seq) or 0
@@ -42,8 +44,9 @@ local function runMinerCommissioning(cfg)
         else
             local fuelNow=turtle.getFuelLevel()
             local fuelBefore=state.motionIntent.fuelBefore
-            if type(fuelNow)=="number" and type(fuelBefore)=="number" then
-                if fuelNow<fuelBefore then
+            local moved=movementFromFuel(fuelBefore,fuelNow)
+            if moved~=nil then
+                if moved then
                     state.tempSteps=state.motionIntent.toStep
                     state.seq=intentSeq
                 else
@@ -57,9 +60,24 @@ local function runMinerCommissioning(cfg)
         end
     end
 
+    if bootHadIntent and not state.recoveryLocked and
+        not state.motionIntent and not state.orientationTurnIntent then
+        state.fuelWitness=turtle.getFuelLevel()
+    end
     if not saveTableLight("miner.tmp",state) then error("Miner commissioning state write failed") end
 
+    if not state.recoveryLocked then
+        local verified,reason=verifyBootWitness(state,cfg.worldOrigin,bootHadIntent)
+        if not verified then
+            state.recoveryLocked=true
+            state.recoveryReason=reason
+            state.phase="RECOVERY_LOCK"
+            saveTableLight("miner.tmp",state)
+        end
+    end
+
     local function save()
+        state.fuelWitness=turtle.getFuelLevel()
         if not saveTableLight("miner.tmp",state) then
             error("Miner commissioning state write failed; movement halted")
         end
@@ -698,6 +716,9 @@ local function runMiner(cfg)
         saveTableLight(path,state)
     end
 
+    local bootHadIntent=state.motionIntent or state.turnIntent or
+        state.chunkMoveIntent or state.packStepIntent
+
     cfg.homeX=tonumber(cfg.homeX) or cfg.row
     cfg.homeY=tonumber(cfg.homeY) or 0
     cfg.homeZ=tonumber(cfg.homeZ) or 0
@@ -775,8 +796,9 @@ local function runMiner(cfg)
     if state.phase=="PACK_COLLECT" and state.packStepIntent and
         state.packStepIntent.stage=="MOVING" then
         local fuel=turtle.getFuelLevel()
-        if type(fuel)=="number" and type(state.packStepIntent.fuelBefore)=="number" then
-            if fuel<state.packStepIntent.fuelBefore then
+        local moved=movementFromFuel(state.packStepIntent.fuelBefore,fuel)
+        if moved~=nil then
+            if moved then
                 state.x=state.x-1
                 state.seq=state.seq+1
                 state.packStepIntent=nil
@@ -884,8 +906,15 @@ local function runMiner(cfg)
             monitorState,monitorSeq=requestPoseBackup("miner",5,cfg.session)
         end
 
-        if monitorState and snapshotHasExactPose(monitorState) and
-            tonumber(monitorSeq or monitorState.seq or 0)>=intentSeq then
+        local expectedMove=state.motionIntent and state.motionIntent.to
+        local monitorFits=expectedMove and snapshotHasExactPose(monitorState) and
+            monitorState.x==expectedMove.x and monitorState.y==expectedMove.y and
+            monitorState.z==expectedMove.z and monitorState.dir==expectedMove.dir
+
+        if monitorFits and
+            not state.turnIntent and
+            tonumber(monitorSeq or monitorState.seq or 0)==intentSeq and
+            movementFromFuel(intent.fuelBefore,turtle.getFuelLevel())==true then
             applySnapshot(monitorState)
             state.motionIntent=nil
             state.turnIntent=nil
@@ -895,11 +924,7 @@ local function runMiner(cfg)
             local fuelBefore=state.motionIntent.fuelBefore
             local moved=nil
 
-            if type(fuelNow)=="number" and type(fuelBefore)=="number" then
-                moved=fuelNow<fuelBefore
-            elseif type(fuelBefore)=="number" and fuelBefore<=0 then
-                moved=false
-            end
+            moved=movementFromFuel(fuelBefore,fuelNow)
 
             if moved==nil then
                 state.recoveryLocked=true
@@ -946,6 +971,22 @@ local function runMiner(cfg)
         saveTableLight(path,state)
     end
 
+    if bootHadIntent and not state.recoveryLocked and
+        not state.motionIntent and not state.turnIntent and
+        not state.chunkMoveIntent and not state.packStepIntent then
+        state.fuelWitness=turtle.getFuelLevel()
+        saveTableLight(path,state)
+    end
+    if not state.recoveryLocked then
+        local verified,reason=verifyBootWitness(state,cfg.worldOrigin,bootHadIntent)
+        if not verified then
+            state.recoveryLocked=true
+            state.recoveryReason=reason
+            state.phase="RECOVERY_LOCK"
+            saveTableLight(path,state)
+        end
+    end
+
     local flags = {
         start=false,
         recallMode=nil,
@@ -964,6 +1005,7 @@ local function runMiner(cfg)
     local function save()
         state.depth=-state.y
         state.pos=state.z
+        state.fuelWitness=turtle.getFuelLevel()
         if not saveTableLight(path,state) then
             error("Miner state write failed; movement halted")
         end
@@ -2789,7 +2831,7 @@ end
 
 setRegionalManager(cfg.managerId)
 
-if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 or cfg.version==78 or cfg.version==79 or cfg.version==80 or cfg.version==81 then
+if cfg.version==56 or cfg.version==57 or cfg.version==58 or cfg.version==59 or cfg.version==60 or cfg.version==61 or cfg.version==62 or cfg.version==63 or cfg.version==64 or cfg.version==65 or cfg.version==66 or cfg.version==67 or cfg.version==68 or cfg.version==69 or cfg.version==70 or cfg.version==71 or cfg.version==72 or cfg.version==73 or cfg.version==74 or cfg.version==75 or cfg.version==76 or cfg.version==77 or cfg.version==78 or cfg.version==79 or cfg.version==80 or cfg.version==81 or cfg.version==82 or cfg.version==83 or cfg.version==84 then
     cfg.version=VERSION
     saveTable("node.cfg",cfg)
 elseif cfg.version~=VERSION then

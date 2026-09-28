@@ -1,5 +1,5 @@
-VERSION = 82
-PROTOCOL = "miner_swarm_v82"
+VERSION = 85
+PROTOCOL = "miner_swarm_v85"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -1003,9 +1003,7 @@ function resolveChunkMove(state,save,origin)
     end
     if moved==nil and not origin then
         local fuel=turtle.getFuelLevel()
-        if type(fuel)=="number" and type(intent.fuelBefore)=="number" then
-            moved=fuel<intent.fuelBefore
-        end
+        moved=movementFromFuel(intent.fuelBefore,fuel)
     end
     if moved==nil then
         state.recoveryLocked=true
@@ -1021,6 +1019,33 @@ function resolveChunkMove(state,save,origin)
     if moved then state.seq=(tonumber(state.seq) or 0)+1 end
     state.chunkMoveIntent=nil
     save()
+    return true
+end
+
+function movementFromFuel(before,after)
+    if type(before)~="number" or type(after)~="number" then return nil end
+    if after==before-1 then return true end
+    if after==before then return false end
+    return nil
+end
+
+function verifyBootWitness(state,origin,hadIntent)
+    local fuel=turtle.getFuelLevel()
+    if not hadIntent and type(state.fuelWitness)=="number" and
+        type(fuel)=="number" and fuel~=state.fuelWitness then
+        return false,"Fuel differs from saved pose after reboot; possible world rollback"
+    end
+    if not origin or type(state.x)~="number" or
+        type(state.y)~="number" or type(state.z)~="number" or
+        not gps or not gps.locate then return true end
+    local ok,x,y,z=pcall(gps.locate,2,false)
+    if not ok or type(x)~="number" or type(y)~="number" or
+        type(z)~="number" then return true end
+    local ex,ey,ez=worldPose(state.x,state.y,state.z,state.chunkIndex,origin)
+    if ex and (math.abs(x-ex)>0.25 or math.abs(y-ey)>0.25 or
+        math.abs(z-ez)>0.25) then
+        return false,"GPS differs from saved pose after reboot; possible world rollback"
+    end
     return true
 end
 

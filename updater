@@ -49,6 +49,27 @@ local function activeVersion()
     return (read("version") or ""):match("^%s*(%d+)%s*$")
 end
 
+local function pruneReleases()
+    if not fs.exists("releases") or not fs.isDir("releases") then return end
+    local protected={}
+    local valid=false
+    for _,name in ipairs({"active_release.new","active_release","active_release.bak"}) do
+        local saved=(read(name) or ""):match("^%s*(%d+)%s*$")
+        if saved then
+            protected[saved]=true
+            if read("releases/"..saved.."/ready")==saved and
+                read("releases/"..saved.."/common") then valid=true end
+        end
+    end
+    if not valid then return end
+    for _,saved in ipairs(fs.list("releases")) do
+        local path="releases/"..saved
+        if saved:match("^%d+$") and not protected[saved] and fs.isDir(path) then
+            fs.delete(path)
+        end
+    end
+end
+
 local currentStartup=read("startup") or ""
 local regional=currentStartup:match("local%s+REGIONAL_MANAGER%s*=%s*(%d+)") or "0"
 local master=currentStartup:match("local%s+MASTER_FOREMAN%s*=%s*(%d+)") or "0"
@@ -70,13 +91,16 @@ if not version then error("Invalid remote version") end
 if activeVersion()==version and
     read("releases/"..version.."/common") and
     read("releases/"..version.."/"..role) and
+    read("space") and
     (not admin or (read("setup") and read("movement_controller") and
     read("enter_foreman_origin"))) then
+    local cleaned,reason=pcall(pruneReleases)
+    if not cleaned then print("Storage cleanup failed: "..tostring(reason)) end
     print("Already current: "..version)
     return
 end
 
-local files={"common",role,"prep"}
+local files={"common",role,"prep","diagnose_reboot","space"}
 if admin then
     files[#files+1]="setup"
     files[#files+1]="movement_controller"
@@ -114,6 +138,8 @@ write(base.."/ready",version)
 
 write("startup.next",startup)
 write("updater.next",updater)
+write("diagnose_reboot.next",contents.diagnose_reboot)
+write("space.next",contents.space)
 if admin then
     for _,name in ipairs({"setup","movement_controller","enter_foreman_origin"}) do
         write(name..".next",contents[name])
@@ -131,6 +157,10 @@ if fs.exists("startup") then fs.delete("startup") end
 fs.move("startup.next","startup")
 if fs.exists("updater") then fs.delete("updater") end
 fs.move("updater.next","updater")
+if fs.exists("diagnose_reboot") then fs.delete("diagnose_reboot") end
+fs.move("diagnose_reboot.next","diagnose_reboot")
+if fs.exists("space") then fs.delete("space") end
+fs.move("space.next","space")
 if admin then
     for _,name in ipairs({"setup","movement_controller","enter_foreman_origin"}) do
         if fs.exists(name) then fs.delete(name) end
@@ -145,6 +175,8 @@ if fs.exists("active_release") then
 end
 fs.move("active_release.new","active_release")
 write("version",version)
+local cleaned,reason=pcall(pruneReleases)
+if not cleaned then print("Storage cleanup failed: "..tostring(reason)) end
 print("Updated to version "..version)
 print("Installed role: "..role)
 print("Reboot to run the new release")

@@ -1,7 +1,8 @@
 local RAW="https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
 local choices={
     ["1"]={role="manager",regional="1",master="0",label="Regional Manager"},
-    ["2"]={role="foreman",regional="0",master="1",label="Foreman-1"}
+    ["2"]={role="foreman",regional="0",master="1",label="Foreman-1"},
+    ["4"]={role="bootstrap",regional="0",master="0",label="Unconfigured Worker"}
 }
 
 if not turtle or not turtle.forward then
@@ -44,45 +45,59 @@ local function write(name,source)
     if actual~=source then error("Verification failed for "..name) end
 end
 
-print("1. Install RM Software")
-print("2. Install MF Software")
-print("3. Reset Machine")
+print("1. Reinstall Regional Manager")
+print("2. Reinstall Master Foreman")
+print("3. Erase without reinstalling")
+print("4. Reinstall unconfigured worker")
 local choice=read()
 
 if choice=="3" then
     erase()
     os.setComputerLabel(nil)
-    print("Machine reset. No startup or updater installed.")
+    print("Machine erased")
     return
 end
 
 local role=choices[choice]
-if not role then error("Select 1, 2, or 3; nothing removed") end
+if not role then error("Select 1, 2, 3, or 4; nothing removed") end
 
-local files={"version","startup","updater","common","prep","setup",role.role}
-if role.role=="foreman" then files[#files+1]="bootstrap" end
+local releaseFiles={"common",role.role,"prep","diagnose_reboot","space"}
+local rootFiles={"startup","updater","setup","version","space","diagnose_reboot"}
+if choice=="1" or choice=="2" then
+    rootFiles[#rootFiles+1]="movement_controller"
+    rootFiles[#rootFiles+1]="enter_foreman_origin"
+end
+if choice=="2" then releaseFiles[#releaseFiles+1]="bootstrap" end
 local staged={}
-for _,name in ipairs(files) do staged[name]=fetch(name) end
+for _,name in ipairs(rootFiles) do staged[name]=fetch(name) end
+for _,name in ipairs(releaseFiles) do
+    if not staged[name] then staged[name]=fetch(name) end
+end
 local version=staged.version:match("^%s*(%d+)%s*$")
-if not version or tonumber(version)<82 then error("Remote release must be version 82 or later; nothing removed") end
+if not version or tonumber(version)<85 then
+    error("Remote release must be version 85 or later; nothing removed")
+end
 if staged.common:match("^%s*VERSION%s*=%s*(%d+)")~=version then
     error("Common/version mismatch; nothing removed")
 end
-local startup=staged.startup
 local regionalCount,masterCount
-startup,regionalCount=startup:gsub("local%s+REGIONAL_MANAGER%s*=%s*%d+","local REGIONAL_MANAGER = "..role.regional,1)
-startup,masterCount=startup:gsub("local%s+MASTER_FOREMAN%s*=%s*%d+","local MASTER_FOREMAN = "..role.master,1)
-if regionalCount~=1 or masterCount~=1 then error("Startup role flags missing; nothing removed") end
-staged.startup=startup
-for _,name in ipairs(files) do
-    if name~="version" then compile(name,staged[name]) end
+staged.startup,regionalCount=staged.startup:gsub(
+    "local%s+REGIONAL_MANAGER%s*=%s*%d+","local REGIONAL_MANAGER = "..role.regional,1)
+staged.startup,masterCount=staged.startup:gsub(
+    "local%s+MASTER_FOREMAN%s*=%s*%d+","local MASTER_FOREMAN = "..role.master,1)
+if regionalCount~=1 or masterCount~=1 then
+    error("Startup role flags missing; nothing removed")
+end
+for name,source in pairs(staged) do
+    if name~="version" then compile(name,source) end
 end
 if fetch("version"):match("^%s*(%d+)%s*$")~=version then
     error("Remote release changed during download; nothing removed")
 end
 
-if role.role=="foreman" then
-    local anchor={}
+local anchor
+if choice=="2" then
+    anchor={}
     print("Enter the Master Foreman's current Minecraft coordinates")
     for _,axis in ipairs({"x","y","z"}) do
         while true do
@@ -95,15 +110,24 @@ if role.role=="foreman" then
             print("Enter a whole-number coordinate")
         end
     end
-    staged.world_anchor=textutils.serialize(anchor)
-    files[#files+1]="world_anchor"
 end
 
-print("Installing version "..version.." as "..role.label)
+print("Erasing all writable files and installing version "..version)
 erase()
-for _,name in ipairs(files) do write(name,staged[name]) end
-os.setComputerLabel(role.label)
-if not shell.run("updater") then
-    error("Updater failed. Local startup, role, and setup are available for retry")
+if choice=="4" then
+    for _,name in ipairs(releaseFiles) do write(name,staged[name]) end
+    for _,name in ipairs(rootFiles) do write(name,staged[name]) end
+else
+    fs.makeDir("releases")
+    local base="releases/"..version
+    fs.makeDir(base)
+    for _,name in ipairs(releaseFiles) do write(base.."/"..name,staged[name]) end
+    for _,name in ipairs(rootFiles) do write(name,staged[name]) end
+    if anchor then write("world_anchor",textutils.serialize(anchor)) end
+    write(base.."/ready",version)
+    write("active_release",version)
 end
+os.setComputerLabel(role.label)
+print("Installed "..role.label.." with clean state")
+if choice=="4" then print("Worker must be commissioned by the Master Foreman") end
 os.reboot()
