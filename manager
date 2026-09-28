@@ -1583,7 +1583,7 @@ local function runRegionalManager()
             local slot=tonumber(data.managerBucketSlot)
             if not slot then return true end
             turtle.select(slot)
-            if turtle.getItemCount(slot)>0 and not turtle.refuel(0) then
+            if turtle.getItemCount(slot)>0 then
                 if not turtle.drop(1) then turtle.select(previous);return false end
             end
             data.managerBucketSlot=nil

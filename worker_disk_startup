@@ -1,4 +1,4 @@
-local EXPECTED_VERSION = 95
+local EXPECTED_VERSION = 96
 local RAW = "https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
 
 if fs.exists("node.cfg") then

@@ -740,10 +740,25 @@ local function runMiner(cfg)
     state.dir=tonumber(state.dir) or DIR_N
     state.chunkIndex=tonumber(state.chunkIndex) or 0
     if cfg.orientationAnchor~="FOREMAN_BACK" then
-        state.recoveryLocked=true
-        state.recoveryReason="Miner orientation was inferred from ground support; recommission before mining"
-        state.phase="RECOVERY_LOCK"
-        saveTableLight(path,state)
+        if cfg.orientationCalibrated==true and state.originEstablished==true and
+            state.orientationCalibrated==true and state.dir==DIR_N and
+            state.x==cfg.homeX and state.y==cfg.homeY and state.z==cfg.homeZ then
+            cfg.orientationAnchor="FOREMAN_BACK"
+            state.orientationAnchor="FOREMAN_BACK"
+            saveTable("node.cfg",cfg)
+            saveTableLight(path,state)
+            if debugLog then
+                debugLog("RECOVERY","Migrated trusted commissioned miner orientation anchor to FOREMAN_BACK","INFO")
+            end
+        else
+            state.recoveryLocked=true
+            state.recoveryReason="Miner orientation was inferred from ground support; recommission before mining"
+            state.phase="RECOVERY_LOCK"
+            saveTableLight(path,state)
+            if debugLog then
+                debugLog("RECOVERY","Locked miner because no trusted FOREMAN_BACK orientation anchor was available","ERROR")
+            end
+        end
     end
     resolveChunkMove(state,function()
         if not saveTableLight(path,state) then error("Miner chunk move recovery write failed") end
@@ -886,7 +901,25 @@ local function runMiner(cfg)
             not state.motionIntent and not state.turnIntent and
             state.phase~="PACK_COLLECT" and state.phase~="PACK_DONE" then
             local incoming=tonumber(managerSeq or managerState.seq or 0) or 0
-            if incoming>state.seq or
+            local authorityCalibrated=managerState.orientationCalibrated==true and
+                managerState.originEstablished==true
+            local inferredOrientationLock=state.recoveryLocked==true and
+                state.recoveryReason=="Miner orientation was inferred from ground support; recommission before mining"
+
+            if inferredOrientationLock and authorityCalibrated and incoming>=state.seq then
+                applySnapshot(managerState)
+                state.recoveryLocked=false
+                state.recoveryReason=nil
+                state.orientationCalibrated=true
+                state.orientationAnchor="FOREMAN_BACK"
+                cfg.orientationCalibrated=true
+                cfg.orientationAnchor="FOREMAN_BACK"
+                saveTable("node.cfg",cfg)
+                saveTableLight(path,state)
+                if debugLog then
+                    debugLog("RECOVERY","Regional Manager authority restored commissioned miner orientation and cleared inferred recovery lock","WARN")
+                end
+            elseif incoming>state.seq or
                 (incoming==state.seq and
                     (managerState.x~=state.x or managerState.y~=state.y or
                      managerState.z~=state.z or managerState.dir~=state.dir)) then
@@ -894,6 +927,9 @@ local function runMiner(cfg)
                 state.recoveryReason="Manager and local miner positions disagree after reboot"
                 state.phase="RECOVERY_LOCK"
                 saveTableLight(path,state)
+                if debugLog then
+                    debugLog("RECOVERY","Manager/local pose disagreement retained recovery lock","ERROR")
+                end
             end
         end
     end
