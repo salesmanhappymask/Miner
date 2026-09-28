@@ -689,8 +689,32 @@ local function runNavigator(cfg)
                         state.chunkTravel=true
                         save()
                         local site=NAVIGATOR_SITES[cfg.number]
-                        local ok,reason=travelChunkNorth(state,save,face,site.z,target,
-                            cfg.worldOrigin)
+                        local travelDone=false
+                        local ok=false
+                        local reason=nil
+                        parallel.waitForAny(function()
+                            ok,reason=travelChunkNorth(state,save,face,site.z,target,
+                                cfg.worldOrigin)
+                            travelDone=true
+                        end,function()
+                            while not travelDone do
+                                local ev={os.pullEvent()}
+                                if ev[1]=="modem_message" then
+                                    local side=ev[2]
+                                    local channel=ev[3]
+                                    local replyChannel=ev[4]
+                                    local payload=ev[5]
+                                    if side==modemSide and channel==gps.CHANNEL_GPS and
+                                        payload=="PING" and not state.recalled then
+                                        local x,y,z=worldPose(state.x,state.y,state.z,
+                                            state.chunkIndex,cfg.worldOrigin)
+                                        if x then
+                                            modem.transmit(replyChannel,gps.CHANNEL_GPS,{x,y,z})
+                                        end
+                                    end
+                                end
+                            end
+                        end)
                         if ok then
                             state.chunkTravel=nil
                             save()

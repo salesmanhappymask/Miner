@@ -316,6 +316,24 @@ local function runRegionalManager()
         return entry and now()-(entry.lastSeen or 0)<(limit or 15)
     end
 
+    local livenessProbeAt={}
+
+    local function checkOnline(role,index,entry,limit)
+        if online(entry,limit) then
+            livenessProbeAt[role..":"..tostring(index)]=nil
+            return true
+        end
+        if entry and entry.id then
+            local key=role..":"..tostring(index)
+            local last=livenessProbeAt[key] or -1000000
+            if now()-last>=3 then
+                send(entry.id,{type="status_query",session=data.session})
+                livenessProbeAt[key]=now()
+            end
+        end
+        return false
+    end
+
     local function countTable(t)
         local n=0
         for _ in pairs(t or {}) do n=n+1 end
@@ -1663,8 +1681,11 @@ local function runRegionalManager()
         end
         for row=1,16 do
             local m=data.miners[row]
-            if not m or not m.id or not online(m,20) then
-                return blocked("Miner-"..row.." offline")
+            if not m or not m.id then
+                return blocked("Miner-"..row.." missing")
+            end
+            if not checkOnline("miner",row,m,20) then
+                return blocked("Miner-"..row.." awaiting check-in")
             end
             if m.state~="COMPLETE" then
                 return blocked("Miner-"..row.." "..tostring(m.state))
@@ -1685,8 +1706,11 @@ local function runRegionalManager()
             local f=data.foremen[n]
             local nav=data.navigators[n]
             local site=NAVIGATOR_SITES[n]
-            if not f or not f.id or not online(f,20) then
-                return blocked("Foreman-"..n.." offline")
+            if not f or not f.id then
+                return blocked("Foreman-"..n.." missing")
+            end
+            if not checkOnline("foreman",n,f,20) then
+                return blocked("Foreman-"..n.." awaiting check-in")
             end
             if f.state~="IDLE" then
                 return blocked("Foreman-"..n.." "..tostring(f.state))
@@ -1698,8 +1722,11 @@ local function runRegionalManager()
             if not enough(f.fuel,24) then
                 return blocked("Foreman-"..n.." needs 24 fuel")
             end
-            if not nav or not nav.id or not online(nav,20) then
-                return blocked("GPS-"..n.." offline")
+            if not nav or not nav.id then
+                return blocked("GPS-"..n.." missing")
+            end
+            if not checkOnline("navigator",n,nav,20) then
+                return blocked("GPS-"..n.." awaiting check-in")
             end
             if not nav.gpsHost then return blocked("GPS-"..n.." not hosting") end
             if tonumber(nav.chunkIndex or 0)~=data.chunkIndex or
@@ -1859,15 +1886,26 @@ local function runRegionalManager()
         local reason="Waiting for "..tostring(waiting or stage)
         if advance.error~=reason then advance.error=reason;save() end
         if now()-(advance.lastSend or -10)<3 then return end
-        advanceTargets(stage,function(role,index,node)
-            if node and node.id and
-                (stage=="RELEASE" or not advance.acks[chunkKey(role,index)]) then
-                send(node.id,{type=stage=="RELEASE" and "chunk_release" or
-                    stage=="MOVE_G" and "chunk_move" or "chunk_command",
-                    stage=stage,chunkIndex=advance.target,
-                    session=data.session})
-            end
-        end)
+        if stage=="MOVE_G" then
+            local sent=false
+            advanceTargets(stage,function(role,index,node)
+                if not sent and node and node.id and
+                    not advance.acks[chunkKey(role,index)] then
+                    send(node.id,{type="chunk_move",stage=stage,
+                        chunkIndex=advance.target,session=data.session})
+                    sent=true
+                end
+            end)
+        else
+            advanceTargets(stage,function(role,index,node)
+                if node and node.id and
+                    (stage=="RELEASE" or not advance.acks[chunkKey(role,index)]) then
+                    send(node.id,{type=stage=="RELEASE" and "chunk_release" or
+                        "chunk_command",stage=stage,chunkIndex=advance.target,
+                        session=data.session})
+                end
+            end)
+        end
         if stage=="COLLECT_M" then
             advanceTargets("VERIFY_F",function(role,index,node)
                 if node and node.id and not advance.acks[chunkKey(role,index)] then
