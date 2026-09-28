@@ -18,7 +18,10 @@ local function write(path,data)
     if not check then error("Could not verify "..path) end
     local actual=check.readAll()
     check.close()
-    if actual~=data then error("Disk verification failed: "..path) end
+    if actual~=data then
+        error("Disk verification failed: "..path.."; free "..
+            tostring(fs.getFreeSpace and fs.getFreeSpace("disk") or "unknown").." bytes")
+    end
 end
 
 local side
@@ -43,19 +46,10 @@ if mode=="1" then
 else
     local version=fetch("version"):match("^%s*(%d+)%s*$")
     if not version then error("Invalid remote version") end
-    contents.worker_startup=fetch("startup")
-    contents.common=fetch("common")
-    contents.bootstrap=fetch("bootstrap")
-    if contents.common:match("^%s*VERSION%s*=%s*(%d+)")~=version then
-        error("Worker disk files disagree on version")
+    contents.startup=fetch("worker_disk_startup")
+    if contents.startup:match("local%s+EXPECTED_VERSION%s*=%s*(%d+)")~=version then
+        error("Worker installer/version mismatch")
     end
-    contents.startup=[[
-if fs.exists("node.cfg") and fs.exists("/startup") then
-    if not shell.run("/startup") then error("Local startup failed") end
-else
-    if not shell.run("/disk/worker_startup") then error("Worker installer failed") end
-end
-]]
     label="quarry worker"
 end
 
@@ -78,6 +72,11 @@ for slot=1,16 do
             end
             for _,name in ipairs(fs.list("disk")) do
                 fs.delete(fs.combine("disk",name))
+            end
+            local bytes=0
+            for _,data in pairs(contents) do bytes=bytes+#data end
+            if fs.getFreeSpace and fs.getFreeSpace("disk")<bytes then
+                error("Disk needs "..bytes.." bytes; has "..fs.getFreeSpace("disk"))
             end
             for name,data in pairs(contents) do
                 write("disk/"..name,data)

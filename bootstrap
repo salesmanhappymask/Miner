@@ -34,9 +34,11 @@ local function bootstrap()
         if not valid then error("Cannot commission turtle: "..tostring(reason)) end
     end
 
-    local source=readFile("/disk/worker_startup") or readFile("disk/worker_startup") or
+    local source=_G.WORKER_INSTALL_STARTUP or
+        readFile("/disk/worker_startup") or readFile("disk/worker_startup") or
         readFile("/disk/startup") or readFile("disk/startup")
-    local commonSource=readFile("/disk/common") or readFile("disk/common")
+    local commonSource=_G.WORKER_INSTALL_COMMON or
+        readFile("/disk/common") or readFile("disk/common")
 
     if not source or not commonSource then
         error("Installer disk is missing startup/common")

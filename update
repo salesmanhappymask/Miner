@@ -1,5 +1,5 @@
 local ROLE = "ask"
-local MIN_VERSION = 92
+local MIN_VERSION = 93
 local RAW = "https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
 local args={...}
 
