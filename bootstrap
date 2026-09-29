@@ -351,6 +351,7 @@ local function bootstrap()
             deployed=false,
             managerId=configured.managerId,
             masterForemanId=configured.masterForemanId,
+            loaderExpected=tonumber(configured.number)==1 or tonumber(configured.number)==3,
             session=configured.session
         }
 

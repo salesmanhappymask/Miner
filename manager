@@ -9,7 +9,7 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
-    local OBSERVER_PROTOCOL="miner_swarm_monitor_v107"
+    local OBSERVER_PROTOCOL="miner_swarm_monitor_v108"
     local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send
@@ -378,6 +378,14 @@ local function runRegionalManager()
         return ready
     end
 
+    local function chunkLoadersReady()
+        local n1=data.navigators[1]
+        local n3=data.navigators[3]
+        return n1 and n3 and n1.loaderExpected==true and n3.loaderExpected==true and
+            n1.loaderPlaced==true and n3.loaderPlaced==true and
+            n1.loaderOwned==true and n3.loaderOwned==true
+    end
+
     local function foremenReadyForMinerSetup()
         if not data.gpsReady or not data.minerSetupGateRequested or data.minerSetupApproved then
             return false
@@ -451,6 +459,7 @@ local function runRegionalManager()
         if not data.recall.mode then
             if not data.swarmStarted then
                 if not data.gpsReady then return "START WAIT: GPS hosts not ready" end
+                if not chunkLoadersReady() then return "START WAIT: Navigator Chunk Loaders not ready" end
                 if not data.minerSetupApproved then return "START WAIT: miner setup approval" end
                 for n=1,4 do
                     local f=data.foremen[n]
@@ -518,6 +527,9 @@ local function runRegionalManager()
         local gps=nav and (online(nav,20) and
             (nav.gpsHost==true and "HOSTING" or tostring(nav.state or "ONLINE")) or
             "OFFLINE") or "NO SIGNAL"
+        if nav and (n==1 or n==3) then
+            gps=gps..(nav.loaderPlaced==true and " LDR:ON" or " LDR:OFF")
+        end
         local foremanPos=f and string.format("%s,%s,%s",tostring(f.x or "?"),
             tostring(f.y or "?"),tostring(f.z or "?")) or "?"
         local gpsPos=nav and string.format("%s,%s,%s",tostring(nav.x or "?"),
@@ -568,6 +580,8 @@ local function runRegionalManager()
                 foremanPos=foremanPos,
                 gpsState=gps,
                 gpsPos=gpsPos,
+                loaderPlaced=nav and nav.loaderPlaced==true or false,
+                loaderOwned=nav and nav.loaderOwned==true or false,
                 task=task,
                 detail=f and tostring(f.recovery or f.message or f.setupMissing or "") or "",
                 miners=miners
@@ -1593,7 +1607,8 @@ local function runRegionalManager()
 
     local function releaseSwarm()
         if data.advance then return false end
-        if data.recall.state~="NORMAL" or not data.gpsReady or not data.minerSetupApproved then
+        if data.recall.state~="NORMAL" or not data.gpsReady or not data.minerSetupApproved or
+            not chunkLoadersReady() then
             return false
         end
 
@@ -1901,6 +1916,10 @@ local function runRegionalManager()
             if not enough(nav.fuel,16) then
                 return blocked("GPS-"..n.." needs 16 fuel")
             end
+            if (n==1 or n==3) and
+                (nav.loaderExpected~=true or nav.loaderPlaced~=true or nav.loaderOwned~=true) then
+                return blocked("Navigator-"..n.." Chunk Loader item 781 not confirmed")
+            end
         end
         if data.managerPose.chunkIndex~=data.chunkIndex or
             data.managerPose.x~=MANAGER_IDLE.x or data.managerPose.y~=0 or
@@ -1923,8 +1942,13 @@ local function runRegionalManager()
                 local row=chestCollectorRow(n)
                 fn("miner",row,data.miners[row])
             end
+        elseif stage=="N3_PICKUP" or stage=="N3_MOVE" or stage=="N3_PLACE" then
+            fn("navigator",3,data.navigators[3])
         elseif stage=="MOVE_G" then
-            for n=1,4 do fn("navigator",n,data.navigators[n]) end
+            fn("navigator",2,data.navigators[2])
+            fn("navigator",4,data.navigators[4])
+        elseif stage=="N1_PICKUP" or stage=="N1_MOVE" or stage=="N1_PLACE" then
+            fn("navigator",1,data.navigators[1])
         elseif stage=="MOVE_M" or stage=="RELEASE" then
             for row=1,16 do fn("miner",row,data.miners[row]) end
         end
@@ -1953,6 +1977,19 @@ local function runRegionalManager()
         return all
     end
 
+    local function navigatorMoveOrder(stage)
+        if stage=="N3_MOVE" then return {3} end
+        if stage=="MOVE_G" then return {2,4} end
+        if stage=="N1_MOVE" then return {1} end
+        return nil
+    end
+
+    local function loaderStageNavigator(stage)
+        if stage=="N3_PICKUP" or stage=="N3_PLACE" then return 3 end
+        if stage=="N1_PICKUP" or stage=="N1_PLACE" then return 1 end
+        return nil
+    end
+
     local function runChunkAdvance()
         if not data.advance then
             beginChunkAdvance()
@@ -1960,9 +1997,10 @@ local function runRegionalManager()
         end
         local advance=data.advance
         local stage=advance.phase
-        if stage=="MOVE_G" then
+        local moveOrder=navigatorMoveOrder(stage)
+        if moveOrder then
             local current=nil
-            for n=1,4 do
+            for _,n in ipairs(moveOrder) do
                 if not advance.acks[chunkKey("navigator",n)] then
                     current=n
                     break
@@ -1971,12 +2009,12 @@ local function runRegionalManager()
             if current then
                 local nav=data.navigators[current]
                 advance.navMove=advance.navMove or {}
-                if advance.navMove.number~=current then
-                    advance.navMove={number=current,started=now(),lastProbe=0,retries=0}
+                if advance.navMove.number~=current or advance.navMove.stage~=stage then
+                    advance.navMove={number=current,stage=stage,started=now(),lastProbe=0,retries=0}
                     save()
                 end
                 if not nav or not nav.id then
-                    advance.error="Navigator-"..current.." missing during chunk transition"
+                    advance.error="Navigator-"..current.." missing during "..stage
                     save()
                     return
                 end
@@ -1986,12 +2024,28 @@ local function runRegionalManager()
                         advance.navMove.lastProbe=now()
                         save()
                     end
-                    advance.error="Navigator-"..current.." lost during chunk transition"
+                    advance.error="Navigator-"..current.." lost during "..stage
                     return
                 end
                 if nav.state=="CHUNK_BLOCKED" and nav.message and nav.message~="" then
                     advance.error="Navigator-"..current.." chunk move blocked: "..tostring(nav.message)
                 end
+            end
+        end
+        local loaderNavigator=loaderStageNavigator(stage)
+        if loaderNavigator then
+            local nav=data.navigators[loaderNavigator]
+            if not nav or not nav.id then
+                advance.error="Navigator-"..loaderNavigator.." missing during "..stage
+                save()
+                return
+            end
+            if not online(nav,12) then
+                advance.error="Navigator-"..loaderNavigator.." lost during "..stage
+                return
+            end
+            if nav.state=="CHUNK_LOADER_BLOCKED" and nav.message and nav.message~="" then
+                advance.error="Navigator-"..loaderNavigator.." Chunk Loader blocked: "..tostring(nav.message)
             end
         end
         if stage=="COLLECT_M" then
@@ -2038,7 +2092,7 @@ local function runRegionalManager()
             end
             data.chunkIndex=advance.target
             save();flushManager(true)
-            advance.phase="RELEASE"
+            advance.phase="N1_PICKUP"
             advance.acks={}
             advance.lastSend=0
             advance.error=nil
@@ -2054,9 +2108,16 @@ local function runRegionalManager()
             end
         elseif advanceStageDone(stage) then
             local nextStage=stage=="STAGE_F" and "COLLECT_M" or
-                stage=="COLLECT_M" and "MOVE_G" or
+                stage=="COLLECT_M" and "N3_PICKUP" or
+                stage=="N3_PICKUP" and "N3_MOVE" or
+                stage=="N3_MOVE" and "N3_PLACE" or
+                stage=="N3_PLACE" and "MOVE_G" or
                 stage=="MOVE_G" and "MOVE_M" or
-                stage=="MOVE_M" and "MOVE_F" or "MOVE_RM"
+                stage=="MOVE_M" and "MOVE_F" or
+                stage=="MOVE_F" and "MOVE_RM" or
+                stage=="N1_PICKUP" and "N1_MOVE" or
+                stage=="N1_MOVE" and "N1_PLACE" or
+                stage=="N1_PLACE" and "RELEASE" or "MOVE_RM"
             advance.phase=nextStage
             advance.acks={}
             advance.lastSend=0
@@ -2087,13 +2148,15 @@ local function runRegionalManager()
             end)
         end
         local reason="Waiting for "..tostring(waiting or stage)
-        local keepNavigatorError=stage=="MOVE_G" and type(advance.error)=="string" and
-            (string.find(advance.error,"lost during chunk transition",1,true) or
+        local keepNavigatorError=(navigatorMoveOrder(stage) or loaderStageNavigator(stage)) and
+            type(advance.error)=="string" and
+            (string.find(advance.error,"lost during",1,true) or
              string.find(advance.error,"chunk move blocked:",1,true) or
-             string.find(advance.error,"missing during chunk transition",1,true))
+             string.find(advance.error,"Chunk Loader blocked:",1,true) or
+             string.find(advance.error,"missing during",1,true))
         if not keepNavigatorError and advance.error~=reason then advance.error=reason;save() end
         if now()-(advance.lastSend or -10)<3 then return end
-        if stage=="MOVE_G" then
+        if navigatorMoveOrder(stage) then
             local sent=false
             advanceTargets(stage,function(role,index,node)
                 if not sent and node and node.id and
@@ -2105,6 +2168,14 @@ local function runRegionalManager()
                         advance.navMove.lastSend=now()
                     end
                     sent=true
+                end
+            end)
+        elseif loaderStageNavigator(stage) then
+            local action=(stage=="N3_PICKUP" or stage=="N1_PICKUP") and "PICKUP" or "PLACE"
+            advanceTargets(stage,function(role,index,node)
+                if node and node.id and not advance.acks[chunkKey(role,index)] then
+                    send(node.id,{type="chunk_loader_command",action=action,stage=stage,
+                        chunkIndex=advance.target,session=data.session})
                 end
             end)
         else
@@ -2585,6 +2656,19 @@ local function runRegionalManager()
                                 tonumber(message.x)==FOREMAN_IDLE[n].x and
                                 tonumber(message.y)==0 and tonumber(message.z)==-1 and
                                 tonumber(message.dir)==DIR_N
+                        elseif message.role=="navigator" then
+                            local n=tonumber(index)
+                            local site=n and NAVIGATOR_SITES[n]
+                            local nodeChunk=tonumber(message.nodeChunkIndex)
+                            valid=site and tonumber(message.x)==site.x and
+                                tonumber(message.y)==site.y and tonumber(message.z)==site.z
+                            if valid and (message.stage=="N3_PICKUP" or message.stage=="N1_PICKUP") then
+                                valid=nodeChunk==data.advance.target-1 and message.loaderPlaced==false
+                            elseif valid and (message.stage=="N3_PLACE" or message.stage=="N1_PLACE") then
+                                valid=nodeChunk==data.advance.target and message.loaderPlaced==true
+                            elseif valid and (message.stage=="N3_MOVE" or message.stage=="N1_MOVE" or message.stage=="MOVE_G") then
+                                valid=nodeChunk==data.advance.target
+                            end
                         end
                         if valid then
                             if message.role=="foreman" and message.stage=="STAGE_F" then

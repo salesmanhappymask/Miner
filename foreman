@@ -3063,15 +3063,21 @@ local function runForeman(cfg)
             return false
         end
 
-        local needNavigators = 4 - selfCount("advanced_wireless_turtle")
-        if needNavigators > 0 and takeNamedIntoSelf("advanced_wireless_turtle",needNavigators) < needNavigators then
-            state.setupBlockReason="Cannot pull four Advanced Wireless Turtles from the supply chest"
+        local needNavigators = 4 - selfCount("advanced_wireless_mining_turtle")
+        if needNavigators > 0 and takeNamedIntoSelf("advanced_wireless_mining_turtle",needNavigators) < needNavigators then
+            state.setupBlockReason="Cannot pull four Advanced Wireless Mining Turtles from the supply chest"
             return false
         end
 
         local needFloppies = 1 - selfCount("floppy")
         if needFloppies > 0 and takeNamedIntoSelf("floppy",needFloppies) < needFloppies then
             state.setupBlockReason="Cannot pull a floppy from the supply chest"
+            return false
+        end
+
+        local needLoaders = 2 - selfCount("chunk_loader")
+        if needLoaders > 0 and takeNamedIntoSelf("chunk_loader",needLoaders) < needLoaders then
+            state.setupBlockReason="Cannot pull two Chunk Loaders (item 781) from the supply chest"
             return false
         end
 
@@ -3250,7 +3256,7 @@ local function runForeman(cfg)
             return progress.id
         end
         if not progress then
-            if selfCount("advanced_wireless_turtle")<1 or
+            if selfCount("advanced_wireless_mining_turtle")<1 or
                 selfCount(state.navigatorFuelKind or "lava_bucket")<(state.navigatorFuelUnits or 1) then
                 return nil
             end
@@ -3295,7 +3301,7 @@ local function runForeman(cfg)
         end
         if not newId then
             if progress.stage~="PLACEMENT_PENDING" or
-                not selfSelectKind("advanced_wireless_turtle") or not turtle.place() then
+                not selfSelectKind("advanced_wireless_mining_turtle") or not turtle.place() then
                 state.phase="WAITING_NAVIGATOR_RECOVERY"
                 saveState()
                 sendState("Navigator-"..tostring(n).." placement must be inspected")
@@ -3323,6 +3329,7 @@ local function runForeman(cfg)
             number=n,
             managerId=cfg.managerId,
             masterForemanId=cfg.masterForemanId,
+            loaderExpected=n==1 or n==3,
             session=cfg.session
         }
 
@@ -3400,6 +3407,8 @@ local function runForeman(cfg)
             local _,reply=waitInbox(function(sender,m)
                 return sender==newId and type(m)=="table" and
                     (m.type=="navigator_fuel_ready" or
+                     m.type=="navigator_loader_ready" or
+                     m.type=="navigator_loader_received" or
                      m.type=="navigator_traveling") and tonumber(m.number)==n
             end,0.5)
 
@@ -3411,7 +3420,45 @@ local function runForeman(cfg)
                     saveState()
                     sendState("Navigator-" .. tostring(n) .. " must return its empty bucket")
                 end
-            elseif reply then
+            elseif reply and reply.type=="navigator_loader_ready" and (n==1 or n==3) then
+                if progress.loaderTransferPending and frontComputerId()==newId then
+                    progress.loaderTransferPending=nil
+                    saveState()
+                end
+                if not progress.loaderGiven and not progress.loaderTransferPending then
+                    if selfCount("chunk_loader")<1 then
+                        state.phase="WAITING_SUPPLIES"
+                        state.setupBlockReason="Chunk Loader item 781 missing for Navigator-"..tostring(n)
+                        saveState()
+                        sendState(state.setupBlockReason)
+                        return nil
+                    end
+                    progress.loaderTransferPending=true
+                    saveState()
+                    if not selfDropKind("chunk_loader",1) then
+                        progress.loaderTransferPending=nil
+                        state.phase="WAITING_SUPPLIES"
+                        state.setupBlockReason="Chunk Loader handoff failed for Navigator-"..tostring(n)
+                        saveState()
+                        sendState(state.setupBlockReason)
+                        return nil
+                    end
+                    progress.loaderGiven=true
+                    progress.loaderTransferPending=nil
+                    saveState()
+                end
+            elseif reply and reply.type=="navigator_loader_received" and (n==1 or n==3) then
+                progress.loaderGiven=true
+                progress.loaderTransferPending=nil
+                progress.loaderConfirmed=true
+                saveState()
+            elseif reply and reply.type=="navigator_traveling" then
+                if n==1 or n==3 then
+                    progress.loaderGiven=true
+                    progress.loaderTransferPending=nil
+                    progress.loaderConfirmed=true
+                    saveState()
+                end
                 traveling=reply
             end
         end
@@ -3727,7 +3774,7 @@ local function runForeman(cfg)
             if not masterLoadSupplies() then
                 state.phase="WAITING_SUPPLIES"
                 saveState()
-                sendState(state.setupBlockReason or "Need bootstrap drive, floppy, and four Advanced Wireless Turtles")
+                sendState(state.setupBlockReason or "Need bootstrap drive, floppy, four Advanced Wireless Mining Turtles, and two Chunk Loaders")
                 return false
             end
             state.initialSuppliesLoaded=true

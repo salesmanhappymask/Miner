@@ -24,7 +24,7 @@ local function runNavigator(cfg)
         if not saveTableLight(statePath,state) then error("Navigator state write failed") end
     end
 
-    local bootHadIntent=state.motionIntent or state.turnIntent or state.chunkMoveIntent
+    local bootHadIntent=state.motionIntent or state.turnIntent or state.chunkMoveIntent or state.loaderIntent
 
     local function save()
         state.fuelWitness=turtle.getFuelLevel()
@@ -34,6 +34,67 @@ local function runNavigator(cfg)
     end
 
     state.chunkIndex=tonumber(state.chunkIndex) or 0
+    cfg.loaderExpected=tonumber(cfg.number)==1 or tonumber(cfg.number)==3
+    state.loaderExpected=cfg.loaderExpected and true or false
+    state.loaderPlaced=state.loaderPlaced and true or false
+    state.loaderSlot=tonumber(state.loaderSlot)
+    if state.awaitingLoader and state.loaderExpected and not state.loaderPlaced and not state.loaderSlot then
+        local found=nil
+        local multiple=false
+        for slot=1,16 do
+            if turtle.getItemCount(slot)>0 then
+                if found then multiple=true else found=slot end
+            end
+        end
+        if found and not multiple then
+            state.loaderSlot=found
+            state.awaitingLoader=nil
+            saveTableLight(statePath,state)
+        elseif multiple then
+            state.recoveryLocked=true
+            state.recoveryReason="Chunk Loader handoff recovery found multiple untracked inventory items"
+            saveTableLight(statePath,state)
+        end
+    end
+    if type(state.loaderIntent)=="table" then
+        local intent=state.loaderIntent
+        if intent.action=="PLACE" and tonumber(intent.slot) then
+            local slot=tonumber(intent.slot)
+            local before=tonumber(intent.countBefore) or 0
+            if turtle.getItemCount(slot)<before then
+                state.loaderPlaced=true
+                state.loaderSlot=nil
+                state.loaderChunk=state.chunkIndex
+            end
+            state.loaderIntent=nil
+            saveTableLight(statePath,state)
+        elseif intent.action=="PICKUP" then
+            local before=tonumber(intent.totalBefore) or 0
+            local total=0
+            local found=nil
+            local multiple=false
+            for slot=1,16 do
+                local count=turtle.getItemCount(slot)
+                total=total+count
+                if count>0 then
+                    if found then multiple=true else found=slot end
+                end
+            end
+            if total>before and found and not multiple then
+                state.loaderPlaced=false
+                state.loaderSlot=found
+                state.loaderChunk=nil
+            elseif total>before then
+                state.recoveryLocked=true
+                state.recoveryReason="Interrupted Chunk Loader recovery left an ambiguous inventory"
+            end
+            state.loaderIntent=nil
+            saveTableLight(statePath,state)
+        else
+            state.loaderIntent=nil
+            saveTableLight(statePath,state)
+        end
+    end
     resolveChunkMove(state,function()
         if not saveTableLight(statePath,state) then error("Navigator move recovery write failed") end
     end,cfg.worldOrigin)
@@ -103,32 +164,103 @@ local function runNavigator(cfg)
         return true
     end
 
+    local function inventoryTotal()
+        local total=0
+        for slot=1,16 do total=total+turtle.getItemCount(slot) end
+        return total
+    end
+
+    local function inventoryFreeSlots()
+        local free=0
+        for slot=1,16 do if turtle.getItemCount(slot)==0 then free=free+1 end end
+        return free
+    end
+
+    local function dumpOrdinaryItems()
+        local selected=turtle.getSelectedSlot()
+        for slot=1,16 do
+            if slot~=state.loaderSlot and turtle.getItemCount(slot)>0 then
+                turtle.select(slot)
+                if not turtle.dropUp() then
+                    if not turtle.dropDown() then turtle.drop() end
+                end
+            end
+        end
+        turtle.select(selected)
+        return inventoryFreeSlots()>0 or
+            (state.loaderSlot and turtle.getItemCount(state.loaderSlot)==0)
+    end
+
+    local function clearObstacle(kind)
+        if inventoryFreeSlots()==0 then dumpOrdinaryItems() end
+        local detected=false
+        local dug=false
+        local attacked=false
+        local digReason=nil
+        local attackReason=nil
+        if kind=="forward" then
+            detected=turtle.detect()
+            if detected then dug,digReason=turtle.dig() else attacked,attackReason=turtle.attack() end
+        elseif kind=="up" then
+            detected=turtle.detectUp()
+            if detected then dug,digReason=turtle.digUp() else attacked,attackReason=turtle.attackUp() end
+        else
+            detected=turtle.detectDown()
+            if detected then dug,digReason=turtle.digDown() else attacked,attackReason=turtle.attackDown() end
+        end
+        if inventoryFreeSlots()==0 then dumpOrdinaryItems() end
+        if detected and not dug then
+            state.navigationError="Cannot clear "..kind.." obstruction: "..tostring(digReason or "dig failed")
+            save()
+            return false,state.navigationError
+        end
+        if not detected and not attacked and attackReason then
+            state.navigationError="Cannot clear "..kind.." movement: "..tostring(attackReason)
+            save()
+        end
+        return true,state.navigationError
+    end
+
     local function moveTracked(kind,tx,ty,tz)
-        if state.recoveryLocked or deploymentRecall or tx< -2 or tx>19 or tz< -2 or tz>16 or
+        if state.recoveryLocked or deploymentRecall or tx< -2 or tx>19 or tz< -2 or tz>31 or
             ty<0 or ty>18 then return false end
-        local intent={
-            kind=kind,
-            fuelBefore=turtle.getFuelLevel(),
-            from={x=state.x,y=state.y,z=state.z},
-            to={x=tx,y=ty,z=tz}
-        }
-        state.motionIntent=intent
-        save()
-        local moved
-        if kind=="forward" then moved=turtle.forward()
-        elseif kind=="up" then moved=turtle.up()
-        else moved=turtle.down() end
-        if not moved then
+        local attempts=0
+        while attempts<20 do
+            local intent={
+                kind=kind,
+                fuelBefore=turtle.getFuelLevel(),
+                from={x=state.x,y=state.y,z=state.z},
+                to={x=tx,y=ty,z=tz}
+            }
+            state.motionIntent=intent
+            save()
+            local moved,reason
+            if kind=="forward" then moved,reason=turtle.forward()
+            elseif kind=="up" then moved,reason=turtle.up()
+            else moved,reason=turtle.down() end
+            if moved then
+                state.x=tx
+                state.y=ty
+                state.z=tz
+                state.motionIntent=nil
+                state.navigationError=nil
+                save()
+                return true
+            end
             state.motionIntent=nil
             save()
-            return false
+            attempts=attempts+1
+            local cleared,clearReason=clearObstacle(kind)
+            if not cleared then
+                state.navigationError=clearReason or reason or ("Navigator "..kind.." blocked")
+                save()
+                return false
+            end
+            sleep(0.1)
         end
-        state.x=tx
-        state.y=ty
-        state.z=tz
-        state.motionIntent=nil
+        state.navigationError="Navigator "..kind.." remained blocked after 20 clear attempts"
         save()
-        return true
+        return false
     end
 
     local function step(dir)
@@ -175,6 +307,94 @@ local function runNavigator(cfg)
         end
         turtle.select(selected)
         return turtle.getFuelLevel()>=800
+    end
+
+    local function loaderInInventory()
+        return state.loaderExpected and state.loaderSlot and
+            turtle.getItemCount(state.loaderSlot)>0
+    end
+
+    local function findLoaderReceiptSlot()
+        local found=nil
+        for slot=1,16 do
+            if turtle.getItemCount(slot)>0 then
+                if found then return nil end
+                found=slot
+            end
+        end
+        return found
+    end
+
+    local function placeChunkLoader()
+        if not state.loaderExpected then return true end
+        if state.loaderPlaced then return true end
+        if not loaderInInventory() then
+            return false,"Chunk Loader item 781 is not in Navigator inventory"
+        end
+        if not face(DIR_S) then return false,"Cannot face south to place Chunk Loader" end
+        local slot=state.loaderSlot
+        local before=turtle.getItemCount(slot)
+        state.loaderIntent={action="PLACE",slot=slot,countBefore=before,
+            chunkIndex=state.chunkIndex,x=state.x,y=state.y,z=state.z}
+        save()
+        turtle.select(slot)
+        local ok,reason=turtle.place()
+        if not ok or turtle.getItemCount(slot)>=before then
+            state.loaderIntent=nil
+            save()
+            face(DIR_N)
+            return false,"Chunk Loader placement failed: "..tostring(reason or "target blocked")
+        end
+        state.loaderPlaced=true
+        state.loaderSlot=nil
+        state.loaderChunk=state.chunkIndex
+        state.loaderIntent=nil
+        save()
+        face(DIR_N)
+        return true
+    end
+
+    local function retrieveChunkLoader()
+        if not state.loaderExpected then return true end
+        if loaderInInventory() and not state.loaderPlaced then return true end
+        if not state.loaderPlaced then
+            return false,"Chunk Loader ownership state is uncertain"
+        end
+        dumpOrdinaryItems()
+        if inventoryFreeSlots()==0 then return false,"No free slot to recover Chunk Loader" end
+        if not face(DIR_S) then return false,"Cannot face south to recover Chunk Loader" end
+        local before=inventoryTotal()
+        state.loaderIntent={action="PICKUP",totalBefore=before,
+            chunkIndex=state.chunkIndex,x=state.x,y=state.y,z=state.z}
+        save()
+        local ok,reason=turtle.dig()
+        if not ok then
+            state.loaderIntent=nil
+            save()
+            face(DIR_N)
+            return false,"Chunk Loader recovery failed: "..tostring(reason or "dig failed")
+        end
+        sleep(0.1)
+        local slot=findLoaderReceiptSlot()
+        if inventoryTotal()<=before or not slot then
+            state.loaderIntent=nil
+            save()
+            face(DIR_N)
+            return false,"Chunk Loader recovery did not produce a single protected item"
+        end
+        state.loaderPlaced=false
+        state.loaderSlot=slot
+        state.loaderChunk=nil
+        state.loaderIntent=nil
+        save()
+        face(DIR_N)
+        return true
+    end
+
+    local function clearForwardForChunk(moveReason)
+        local ok,reason=clearObstacle("forward")
+        if not ok then return false,reason or moveReason end
+        return true,reason
     end
 
     local function calibrateOrientation()
@@ -262,6 +482,15 @@ local function runNavigator(cfg)
 
         if not vertical(site.y) then return false end
 
+        if state.loaderExpected then
+            local placed,reason=placeChunkLoader()
+            if not placed then
+                state.navigationError=reason
+                save()
+                return false
+            end
+        end
+
         state.deployed=true
         state.deploying=false
         cfg.deployed=true
@@ -286,6 +515,21 @@ local function runNavigator(cfg)
 
     local function recallNavigator(mode)
         mode=mode or "NORMAL"
+
+        if state.loaderExpected and state.loaderPlaced then
+            local site=NAVIGATOR_SITES[tonumber(cfg.number)]
+            if not site or state.x~=site.x or state.y~=site.y or state.z~=site.z then
+                state.navigationError="Chunk Loader is deployed but Navigator is not at its loader site"
+                save()
+                return false
+            end
+            local recovered,reason=retrieveChunkLoader()
+            if not recovered then
+                state.navigationError=reason
+                save()
+                return false
+            end
+        end
 
         local target=NAVIGATOR_RECALL[tonumber(cfg.number)]
         if not target then return false end
@@ -529,6 +773,36 @@ local function runNavigator(cfg)
                                 receipt=true
                             end
                         end
+                        if receipt and state.loaderExpected and not state.loaderPlaced and
+                            not loaderInInventory() and not deploymentRecall then
+                            dumpOrdinaryItems()
+                            state.awaitingLoader=true
+                            save()
+                            local lastLoaderReady=-10
+                            while not loaderInInventory() and not deploymentRecall do
+                                if now()-lastLoaderReady>=1 then
+                                    send(cfg.controller,{type="navigator_loader_ready",
+                                        number=cfg.number,id=os.getComputerID()})
+                                    status("navigator","WAITING_CHUNK_LOADER",{
+                                        number=cfg.number,x=state.x,y=state.y,z=state.z,
+                                        gpsHost=false,message="Waiting for Chunk Loader item 781",
+                                        session=cfg.session
+                                    })
+                                    lastLoaderReady=now()
+                                end
+                                local slot=findLoaderReceiptSlot()
+                                if slot then
+                                    state.loaderSlot=slot
+                                    state.awaitingLoader=nil
+                                    save()
+                                    send(cfg.controller,{type="navigator_loader_received",
+                                        number=cfg.number,id=os.getComputerID(),slot=slot})
+                                    break
+                                end
+                                local sender,message=rednet.receive(PROTOCOL,0.5)
+                                setupMessage(sender,message)
+                            end
+                        end
                     end
                 end
 
@@ -561,7 +835,7 @@ local function runNavigator(cfg)
                     if not travelDone and not deploymentRecall then
                         status("navigator","DEPLOY_BLOCKED",{
                             number=cfg.number,x=state.x,y=state.y,z=state.z,
-                            message="Navigator travel blocked; retrying and listening for recall",
+                            message=state.navigationError or "Navigator travel blocked; retrying and listening for recall",
                             session=cfg.session
                         })
                         sleep(1)
@@ -596,6 +870,8 @@ local function runNavigator(cfg)
     modem.open(gps.CHANNEL_GPS)
 
     local function sendNavigatorStatus()
+        local message=state.recalled and "Navigator recalled" or "GPS host active"
+        if state.navigationError then message=state.navigationError end
         status("navigator",state.chunkTravel and "CHUNK_MOVING" or
             (state.recalled and "RECALLED_PAUSED" or "GPS_HOST"),{
             number=cfg.number,
@@ -606,7 +882,10 @@ local function runNavigator(cfg)
             fuel=turtle.getFuelLevel(),
             gpsHost=not state.recalled and not state.chunkTravel,
             modemSide=modemSide,
-            message=state.recalled and "Navigator recalled" or "GPS host active",
+            loaderExpected=state.loaderExpected and true or false,
+            loaderPlaced=state.loaderPlaced and true or false,
+            loaderOwned=state.loaderExpected and (state.loaderPlaced or loaderInInventory()) or false,
+            message=message,
             session=cfg.session
         })
     end
@@ -654,6 +933,15 @@ local function runNavigator(cfg)
             return false
         end
 
+        if state.loaderExpected and not state.loaderPlaced then
+            local placed,reason=placeChunkLoader()
+            if not placed then
+                state.navigationError=reason
+                save()
+                return false
+            end
+        end
+
         state.recalled=false
         state.recallMode=nil
         save()
@@ -699,11 +987,52 @@ local function runNavigator(cfg)
                     if message.mode=="NORMAL" or message.mode=="SHUTDOWN" then
                         pendingRecallMode=message.mode
                     end
+                elseif message.type=="chunk_loader_command" and not state.recalled and
+                    not advanceCancelled and not pendingRecallMode then
+                    local target=tonumber(message.chunkIndex)
+                    local stage=tostring(message.stage or "")
+                    local action=tostring(message.action or "")
+                    local expected=(cfg.number==3 and (stage=="N3_PICKUP" or stage=="N3_PLACE")) or
+                        (cfg.number==1 and (stage=="N1_PICKUP" or stage=="N1_PLACE"))
+                    local ok=false
+                    local reason="Unexpected Chunk Loader command for Navigator-"..tostring(cfg.number)
+                    if expected and target then
+                        if action=="PICKUP" and state.chunkIndex==target-1 then
+                            ok,reason=retrieveChunkLoader()
+                        elseif action=="PLACE" and state.chunkIndex==target then
+                            ok,reason=placeChunkLoader()
+                        else
+                            reason="Chunk Loader command does not match Navigator chunk position"
+                        end
+                    end
+                    if ok then
+                        state.navigationError=nil
+                        save()
+                        send(cfg.managerId,{type="chunk_ack",role="navigator",
+                            number=cfg.number,stage=stage,chunkIndex=target,
+                            nodeChunkIndex=state.chunkIndex,x=state.x,y=state.y,z=state.z,
+                            loaderPlaced=state.loaderPlaced and true or false,
+                            session=cfg.session})
+                        sendNavigatorStatus()
+                    else
+                        state.navigationError=reason
+                        save()
+                        status("navigator","CHUNK_LOADER_BLOCKED",{
+                            number=cfg.number,x=state.x,y=state.y,z=state.z,
+                            chunkIndex=state.chunkIndex,loaderPlaced=state.loaderPlaced and true or false,
+                            message=reason,session=cfg.session
+                        })
+                    end
                 elseif message.type=="chunk_move" and not state.recalled and
                     not advanceCancelled and not pendingRecallMode then
                     local target=tonumber(message.chunkIndex)
-                    if target and target==state.chunkIndex+1 then
+                    local requestedStage=tostring(message.stage or "MOVE_G")
+                    local allowed=(requestedStage=="N3_MOVE" and cfg.number==3) or
+                        (requestedStage=="N1_MOVE" and cfg.number==1) or
+                        (requestedStage=="MOVE_G" and (cfg.number==2 or cfg.number==4))
+                    if allowed and target and target==state.chunkIndex+1 then
                         state.chunkTravel=true
+                        state.navigationError=nil
                         save()
                         local site=NAVIGATOR_SITES[cfg.number]
                         local travelDone=false
@@ -715,7 +1044,7 @@ local function runNavigator(cfg)
                             ok,reason=travelChunkNorth(state,save,face,site.z,target,
                                 nil,function()
                                     return advanceCancelled or pendingRecallMode~=nil
-                                end)
+                                end,clearForwardForChunk)
                             travelDone=true
                         end,function()
                             while not travelDone do
@@ -768,11 +1097,13 @@ local function runNavigator(cfg)
                             advanceCancelled=false
                         elseif ok then
                             state.chunkTravel=nil
+                            state.navigationError=nil
                             advanceCancelled=false
                             save()
                             sendNavigatorStatus()
                         else
                             state.chunkTravel=nil
+                            state.navigationError=reason
                             advanceCancelled=false
                             save()
                             status("navigator","CHUNK_BLOCKED",{
@@ -781,10 +1112,19 @@ local function runNavigator(cfg)
                             })
                             sendNavigatorStatus()
                         end
+                    elseif not allowed then
+                        status("navigator","CHUNK_BLOCKED",{
+                            number=cfg.number,x=state.x,y=state.y,z=state.z,
+                            chunkIndex=state.chunkIndex,gpsHost=true,
+                            message="Unexpected Navigator move stage "..requestedStage,
+                            session=cfg.session
+                        })
                     end
-                    if target==state.chunkIndex and not state.chunkTravel then
+                    if allowed and target==state.chunkIndex and not state.chunkTravel then
                         send(cfg.managerId,{type="chunk_ack",role="navigator",
-                            number=cfg.number,stage="MOVE_G",chunkIndex=target,
+                            number=cfg.number,stage=requestedStage,chunkIndex=target,
+                            nodeChunkIndex=state.chunkIndex,x=state.x,y=state.y,z=state.z,
+                            loaderPlaced=state.loaderPlaced and true or false,
                             session=cfg.session})
                     end
                 elseif message.type=="recall_command" then
