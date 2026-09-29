@@ -204,6 +204,13 @@ local function runNavigator(cfg)
 
     local function clearObstacle(kind)
         if inventoryFreeSlots()==0 then dumpOrdinaryItems() end
+        local side=kind=="forward" and "front" or (kind=="up" and "top" or "bottom")
+        local peripheralType=peripheral.getType(side)
+        if peripheralType then
+            state.navigationError="Navigator path occupied by peripheral "..tostring(peripheralType).." on "..side
+            save()
+            return false,state.navigationError
+        end
         local detected=false
         local dug=false
         local attacked=false
@@ -461,25 +468,29 @@ local function runNavigator(cfg)
 
     local function travelToSite()
         local site=NAVIGATOR_SITES[cfg.number]
+        local launch=NAVIGATOR_LAUNCH[cfg.number]
         local cruise=NAVIGATOR_CRUISE[cfg.number]
-        if not site then return false end
+        if not site or not launch then return false end
 
         if not calibrateOrientation() then
             return false
         end
 
-        if state.x==cfg.startX and state.y==cfg.startY and state.z==cfg.startZ then
+        while state.x<launch.x do
+            if not step(DIR_E) then return false end
+        end
+        while state.x>launch.x do
+            if not step(DIR_W) then return false end
+        end
+        while state.z<launch.z do
             if not step(DIR_N) then return false end
+        end
+        while state.z>launch.z do
+            if not step(DIR_S) then return false end
         end
 
         if not vertical(cruise) then
             return false
-        end
-
-        if state.x<site.x then
-            if not step(DIR_E) then return false end
-        elseif state.x>site.x then
-            if not step(DIR_W) then return false end
         end
 
         announceTraveling()

@@ -9,7 +9,7 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
-    local OBSERVER_PROTOCOL="miner_swarm_monitor_v109"
+    local OBSERVER_PROTOCOL="miner_swarm_monitor_v110"
     local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send

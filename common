@@ -1,5 +1,5 @@
-VERSION = 109
-PROTOCOL = "miner_swarm_v109"
+VERSION = 110
+PROTOCOL = "miner_swarm_v110"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -8,6 +8,12 @@ NAVIGATOR_SITES = {
     [2]={x=16,y=10,z=0},
     [3]={x=16,y=10,z=15},
     [4]={x=1,y=14,z=15}
+}
+NAVIGATOR_LAUNCH = {
+    [1]={x=1,z=1},
+    [2]={x=16,z=0},
+    [3]={x=16,z=2},
+    [4]={x=1,z=3}
 }
 FOREMAN_IDLE = {
     [1]={x=1,y=0,z=-1},
@@ -126,7 +132,7 @@ function now()
     return os.clock()
 end
 
-DEBUG_PROTOCOL = "miner_swarm_debug_v109"
+DEBUG_PROTOCOL = "miner_swarm_debug_v110"
 DEBUG_LOG_DIR = "logs"
 DEBUG_LOG_MAX = 65536
 DEBUG_ERROR_LOG_MAX = 16384
