@@ -34,7 +34,7 @@ for _,name in ipairs(root) do
     if not fs.isDir(name) then entries[#entries+1]=name..":"..tostring(fs.getSize(name)) end
 end
 h.write("root_files="..table.concat(entries,",").."\n")
-local stateFiles={"version","updater.cfg","node.cfg","world_anchor","regional_manager.tmp","regional_manager.tmp.bak","foreman1.tmp","foreman2.tmp","foreman3.tmp","foreman4.tmp","miner.tmp","navigator.tmp"}
+local stateFiles={"version","updater.cfg","node.cfg","world_anchor","manager_seed.cfg","manager_seed.cfg.bak","regional_manager.tmp","regional_manager.tmp.bak","foreman1.tmp","foreman2.tmp","foreman3.tmp","foreman4.tmp","miner.tmp","navigator.tmp"}
 for _,path in ipairs(stateFiles) do
     if fs.exists(path) and not fs.isDir(path) then append(h,path,readFile(path)) end
 end

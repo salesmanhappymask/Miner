@@ -1,4 +1,4 @@
-local SEED_PROTOCOL="miner_swarm_seed_v112"
+local SEED_PROTOCOL="miner_swarm_seed_v113"
 
 local function runManagerSeedBootstrap()
     local seed=loadTable("manager_seed.cfg")
@@ -65,6 +65,15 @@ local function runManagerSeedBootstrap()
         if not slot then return nil end
         if takeNamedFromFront(kind,1,slot)<1 then return nil end
         return slot
+    end
+
+    local function runLocalProgram(path,...)
+        local chunk,loadErr=loadfile(path)
+        if not chunk then return false,tostring(loadErr or "load failed") end
+        local ok,result=pcall(chunk,...)
+        if not ok then return false,tostring(result or "runtime failed") end
+        if result==false then return false,"program returned false" end
+        return true,result
     end
 
     local function openSeedNetwork()
@@ -228,7 +237,8 @@ local function runManagerSeedBootstrap()
 
     if seed.phase=="DRIVE_PLACED" then
         show("Preparing four worker disks")
-        if not shell.run("prep","2","4","quarry worker") then error("Worker disk preparation failed") end
+        local ok,reason=runLocalProgram("prep","2","4","quarry worker")
+        if not ok then error("Worker disk preparation failed: "..tostring(reason)) end
         seed.phase="WORKER_DISKS_PREPPED"
         saveSeed()
     end
@@ -248,7 +258,8 @@ local function runManagerSeedBootstrap()
 
     if seed.phase=="WORKER_DISKS_RETURNED" then
         show("Preparing Master Foreman setup disk")
-        if not shell.run("prep","1","1","setup") then error("Master Foreman setup disk preparation failed") end
+        local ok,reason=runLocalProgram("prep","1","1","setup")
+        if not ok then error("Master Foreman setup disk preparation failed: "..tostring(reason)) end
         seed.phase="SETUP_DISK_PREPPED"
         saveSeed()
     end
@@ -389,7 +400,7 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
-    local OBSERVER_PROTOCOL="miner_swarm_monitor_v112"
+    local OBSERVER_PROTOCOL="miner_swarm_monitor_v113"
     local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send
