@@ -707,7 +707,7 @@ local function runNavigator(cfg)
                         pendingRecallMode=nil
                         parallel.waitForAny(function()
                             ok,reason=travelChunkNorth(state,save,face,site.z,target,
-                                cfg.worldOrigin,function()
+                                nil,function()
                                     return advanceCancelled or pendingRecallMode~=nil
                                 end)
                             travelDone=true
@@ -762,13 +762,18 @@ local function runNavigator(cfg)
                             advanceCancelled=false
                         elseif ok then
                             state.chunkTravel=nil
+                            advanceCancelled=false
                             save()
                             sendNavigatorStatus()
                         else
+                            state.chunkTravel=nil
+                            advanceCancelled=false
+                            save()
                             status("navigator","CHUNK_BLOCKED",{
                                 number=cfg.number,x=state.x,y=state.y,z=state.z,
-                                chunkIndex=state.chunkIndex,message=reason,session=cfg.session
+                                chunkIndex=state.chunkIndex,gpsHost=true,message=reason,session=cfg.session
                             })
+                            sendNavigatorStatus()
                         end
                     end
                     if target==state.chunkIndex and not state.chunkTravel then

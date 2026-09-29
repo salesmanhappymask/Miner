@@ -9,7 +9,7 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
-    local OBSERVER_PROTOCOL="miner_swarm_monitor_v103"
+    local OBSERVER_PROTOCOL="miner_swarm_monitor_v104"
     local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send
@@ -1903,6 +1903,40 @@ local function runRegionalManager()
         end
         local advance=data.advance
         local stage=advance.phase
+        if stage=="MOVE_G" then
+            local current=nil
+            for n=1,4 do
+                if not advance.acks[chunkKey("navigator",n)] then
+                    current=n
+                    break
+                end
+            end
+            if current then
+                local nav=data.navigators[current]
+                advance.navMove=advance.navMove or {}
+                if advance.navMove.number~=current then
+                    advance.navMove={number=current,started=now(),lastProbe=0,retries=0}
+                    save()
+                end
+                if not nav or not nav.id then
+                    advance.error="Navigator-"..current.." missing during chunk transition"
+                    save()
+                    return
+                end
+                if not online(nav,12) then
+                    if now()-(advance.navMove.lastProbe or 0)>=3 then
+                        send(nav.id,{type="status_query",session=data.session})
+                        advance.navMove.lastProbe=now()
+                        save()
+                    end
+                    advance.error="Navigator-"..current.." lost during chunk transition"
+                    return
+                end
+                if nav.state=="CHUNK_BLOCKED" and nav.message and nav.message~="" then
+                    advance.error="Navigator-"..current.." chunk move blocked: "..tostring(nav.message)
+                end
+            end
+        end
         if stage=="COLLECT_M" then
             for n=1,4 do
                 local foreman=data.foremen[n]
@@ -1969,6 +2003,7 @@ local function runRegionalManager()
             advance.phase=nextStage
             advance.acks={}
             advance.lastSend=0
+            advance.navMove=nil
             advance.error=nil
             save();flushManager(true)
             return
@@ -1995,7 +2030,11 @@ local function runRegionalManager()
             end)
         end
         local reason="Waiting for "..tostring(waiting or stage)
-        if advance.error~=reason then advance.error=reason;save() end
+        local keepNavigatorError=stage=="MOVE_G" and type(advance.error)=="string" and
+            (string.find(advance.error,"lost during chunk transition",1,true) or
+             string.find(advance.error,"chunk move blocked:",1,true) or
+             string.find(advance.error,"missing during chunk transition",1,true))
+        if not keepNavigatorError and advance.error~=reason then advance.error=reason;save() end
         if now()-(advance.lastSend or -10)<3 then return end
         if stage=="MOVE_G" then
             local sent=false
@@ -2004,6 +2043,10 @@ local function runRegionalManager()
                     not advance.acks[chunkKey(role,index)] then
                     send(node.id,{type="chunk_move",stage=stage,
                         chunkIndex=advance.target,session=data.session})
+                    if advance.navMove and advance.navMove.number==index then
+                        advance.navMove.retries=(tonumber(advance.navMove.retries) or 0)+1
+                        advance.navMove.lastSend=now()
+                    end
                     sent=true
                 end
             end)
