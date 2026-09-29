@@ -1,4 +1,4 @@
-local SEED_PROTOCOL="miner_swarm_seed_v113"
+local SEED_PROTOCOL="miner_swarm_seed_v114"
 
 local function runManagerSeedBootstrap()
     local seed=loadTable("manager_seed.cfg")
@@ -237,7 +237,9 @@ local function runManagerSeedBootstrap()
 
     if seed.phase=="DRIVE_PLACED" then
         show("Preparing four worker disks")
-        local ok,reason=runLocalProgram("prep","2","4","quarry worker")
+        local workerSlots={}
+        for i=1,4 do workerSlots[i]=tostring(seed.workerDiskSlots[i]) end
+        local ok,reason=runLocalProgram("prep","2","4","quarry worker",table.concat(workerSlots,","))
         if not ok then error("Worker disk preparation failed: "..tostring(reason)) end
         seed.phase="WORKER_DISKS_PREPPED"
         saveSeed()
@@ -258,7 +260,7 @@ local function runManagerSeedBootstrap()
 
     if seed.phase=="WORKER_DISKS_RETURNED" then
         show("Preparing Master Foreman setup disk")
-        local ok,reason=runLocalProgram("prep","1","1","setup")
+        local ok,reason=runLocalProgram("prep","1","1","setup",tostring(seed.setupDiskSlot))
         if not ok then error("Master Foreman setup disk preparation failed: "..tostring(reason)) end
         seed.phase="SETUP_DISK_PREPPED"
         saveSeed()
@@ -400,7 +402,7 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
-    local OBSERVER_PROTOCOL="miner_swarm_monitor_v113"
+    local OBSERVER_PROTOCOL="miner_swarm_monitor_v114"
     local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send

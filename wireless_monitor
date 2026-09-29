@@ -1,4 +1,4 @@
-local PROTOCOL="miner_swarm_monitor_v113"
+local PROTOCOL="miner_swarm_monitor_v114"
 
 local function openNetwork()
     local opened=false

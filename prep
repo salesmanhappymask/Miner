@@ -72,32 +72,49 @@ if compile then
     end
 end
 
+local slots={}
+local slotSpec=tostring(args[4] or "")
+if slotSpec~="" then
+    for token in string.gmatch(slotSpec,"[^,]+") do
+        local slot=tonumber(token)
+        if not slot or slot<1 or slot>16 or slot~=math.floor(slot) then
+            error("Invalid disk slot list: "..slotSpec)
+        end
+        slots[#slots+1]=slot
+    end
+    if #slots==0 then error("Disk slot list is empty") end
+else
+    for slot=1,16 do slots[#slots+1]=slot end
+end
+
 local prepared=0
-for slot=1,16 do
+for _,slot in ipairs(slots) do
     if not limit or prepared<limit then
         if turtle.getItemCount(slot)>0 then
             turtle.select(slot)
             local inserted=side=="top" and turtle.dropUp(1) or turtle.dropDown(1)
             if inserted then
                 sleep(0.2)
-                if not disk.isPresent(side) then
-                    error("Disk was not detected after insertion")
+                if not fs.exists("disk") or not fs.isDir("disk") then
+                    local returned=side=="top" and turtle.suckUp(1) or turtle.suckDown(1)
+                    if not returned then error("Inserted item was not a writable disk and could not be recovered") end
+                else
+                    for _,name in ipairs(fs.list("disk")) do
+                        fs.delete(fs.combine("disk",name))
+                    end
+                    local bytes=0
+                    for _,data in pairs(contents) do bytes=bytes+#data end
+                    if fs.getFreeSpace and fs.getFreeSpace("disk")<bytes then
+                        error("Disk needs "..bytes.." bytes; has "..fs.getFreeSpace("disk"))
+                    end
+                    for name,data in pairs(contents) do
+                        write("disk/"..name,data)
+                    end
+                    disk.setLabel(side,label)
+                    local returned=side=="top" and turtle.suckUp(1) or turtle.suckDown(1)
+                    if not returned then error("Could not retrieve prepared disk") end
+                    prepared=prepared+1
                 end
-                for _,name in ipairs(fs.list("disk")) do
-                    fs.delete(fs.combine("disk",name))
-                end
-                local bytes=0
-                for _,data in pairs(contents) do bytes=bytes+#data end
-                if fs.getFreeSpace and fs.getFreeSpace("disk")<bytes then
-                    error("Disk needs "..bytes.." bytes; has "..fs.getFreeSpace("disk"))
-                end
-                for name,data in pairs(contents) do
-                    write("disk/"..name,data)
-                end
-                disk.setLabel(side,label)
-                local returned=side=="top" and turtle.suckUp(1) or turtle.suckDown(1)
-                if not returned then error("Could not retrieve prepared disk") end
-                prepared=prepared+1
             end
         end
     end

@@ -1,5 +1,5 @@
-local VERSION=113
-local SEED_PROTOCOL="miner_swarm_seed_v113"
+local VERSION=114
+local SEED_PROTOCOL="miner_swarm_seed_v114"
 
 local function writeFile(path,data)
     local f=fs.open(path,"w")

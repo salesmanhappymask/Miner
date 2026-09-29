@@ -1,5 +1,5 @@
 local RAW = "https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
-local MIN_VERSION = 113
+local MIN_VERSION = 114
 local CONFIG = "updater.cfg"
 local args = {...}
 
@@ -130,8 +130,6 @@ end
 if not turtle or not turtle.forward then error("Update requires a turtle") end
 
 local role = config.role
-local managerSeedRaw=role=="manager" and readFile("manager_seed.cfg") or nil
-
 local function validAnchor(value)
     return type(value) == "table" and type(value.x) == "number" and
         type(value.y) == "number" and type(value.z) == "number"
@@ -260,10 +258,6 @@ if readFile("version") ~= version then error("Final verification failed: version
 if anchor then
     writeFile("world_anchor", textutils.serialize(anchor))
 end
-if managerSeedRaw then
-    writeFile("manager_seed.cfg",managerSeedRaw)
-end
-
 writeFile("update.new", updaterSource)
 if fs.exists("update.old") then fs.delete("update.old") end
 if fs.exists("update") then fs.move("update", "update.old") end
