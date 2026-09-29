@@ -6,13 +6,19 @@ local function readFile(path)
     h.close()
     return data
 end
+local function tail(path,limit)
+    local data=readFile(path) or ""
+    if #data>limit then data=data:sub(#data-limit+1) end
+    return data
+end
 local function append(h,title,body)
     h.write("\n===== "..title.." =====\n")
     h.write(body or "<missing>")
     h.write("\n")
 end
 if debugFlush then pcall(debugFlush) end
-sleep(1)
+sleep(0.5)
+if fs.exists(out) then fs.delete(out) end
 local h=fs.open(out,"w")
 if not h then error("Cannot create diagnostics.txt") end
 h.write("QUARRY SWARM DIAGNOSTIC BUNDLE\n")
@@ -23,23 +29,22 @@ h.write("clock="..tostring(os.clock()).."\n")
 h.write("free_space="..tostring(fs.getFreeSpace("")).."\n")
 local root=fs.list("")
 table.sort(root)
-h.write("root_files="..table.concat(root,",").."\n")
-local stateFiles={"version","updater.cfg","node.cfg","world_anchor","regional_manager.tmp","regional_manager.tmp.bak","regional_manager.tmp.new","foreman1.tmp","foreman2.tmp","foreman3.tmp","foreman4.tmp","miner.tmp","navigator.tmp","dock.tmp"}
+local entries={}
+for _,name in ipairs(root) do
+    if not fs.isDir(name) then entries[#entries+1]=name..":"..tostring(fs.getSize(name)) end
+end
+h.write("root_files="..table.concat(entries,",").."\n")
+local stateFiles={"version","updater.cfg","node.cfg","world_anchor","regional_manager.tmp","regional_manager.tmp.bak","foreman1.tmp","foreman2.tmp","foreman3.tmp","foreman4.tmp","miner.tmp","navigator.tmp"}
 for _,path in ipairs(stateFiles) do
     if fs.exists(path) and not fs.isDir(path) then append(h,path,readFile(path)) end
 end
-if fs.exists("logs") and fs.isDir("logs") then
-    local logs=fs.list("logs")
-    table.sort(logs)
-    for _,name in ipairs(logs) do
-        local path=fs.combine("logs",name)
-        if not fs.isDir(path) then append(h,path,readFile(path)) end
-    end
-end
+if fs.exists("logs/current.log") then append(h,"logs/current.log.tail",tail("logs/current.log",32768)) end
+if fs.exists("logs/errors.log") then append(h,"logs/errors.log.tail",tail("logs/errors.log",16384)) end
 h.close()
 print("Diagnostic bundle created: "..out)
 if fs.exists("push") then
-    shell.run("push",out)
+    local ok=shell.run("push",out)
+    if ok and fs.exists(out) then fs.delete(out) end
 else
     print("push is not installed; upload diagnostics.txt manually")
 end

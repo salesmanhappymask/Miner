@@ -9,7 +9,7 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
-    local OBSERVER_PROTOCOL="miner_swarm_monitor_v102"
+    local OBSERVER_PROTOCOL="miner_swarm_monitor_v103"
     local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send
@@ -467,7 +467,7 @@ local function runRegionalManager()
             end
             local completed=0
             for row=1,16 do
-                if data.miners[row] and data.miners[row].state=="COMPLETE" then
+                if data.miners[row] and (data.miners[row].state=="COMPLETE" or data.miners[row].complete==true) then
                     completed=completed+1
                 end
             end
@@ -1204,10 +1204,20 @@ local function runRegionalManager()
             session=data.session
         }
         local count=0
+        local packForemanTarget=nil
+        if mode=="PACK" and not minersOnly then
+            for n=FOREMAN_COUNT,1,-1 do
+                if data.recall.targets.foremen[n] and not data.recall.homeForemen[n] then
+                    packForemanTarget=n
+                    break
+                end
+            end
+        end
         forEachKnownNode(minersOnly and "miner" or nil,function(id,role,entry)
             if (role=="foreman" or role=="navigator") and
                 data.recall.waitCollectors then return end
             local index=tonumber(role=="miner" and entry.row or entry.number)
+            if mode=="PACK" and role=="foreman" and index~=packForemanTarget then return end
             local home=role=="miner" and data.recall.homeMiners or
                 (role=="foreman" and data.recall.homeForemen or data.recall.homeNavigators)
             local acknowledged
@@ -1785,7 +1795,7 @@ local function runRegionalManager()
             if not checkOnline("miner",row,m,20) then
                 return blocked("Miner-"..row.." awaiting check-in")
             end
-            if m.state~="COMPLETE" then
+            if m.state~="COMPLETE" and m.complete~=true then
                 return blocked("Miner-"..row.." "..tostring(m.state))
             end
             if m.fuel~="unlimited" and (tonumber(m.fuel) or 0)<MINER_FUEL_TARGET then
@@ -2478,6 +2488,7 @@ local function runRegionalManager()
                     local m=registeredNodeSender("miner",message.row,sender) and data.miners[tonumber(message.row)]
                     if m then
                         m.state="COMPLETE"
+                        m.complete=true
                         m.lastSeen=now()
                     end
                     save()
@@ -2600,7 +2611,7 @@ local function runRegionalManager()
                     request.lastCompletionSend=now()
                 end
                 if request.status=="COMPLETE" and request.minerAcknowledged and
-                    now()-(request.completed or now())>300 then
+                    now()-(request.completed or now())>30 then
                     expiredRequests[#expiredRequests+1]=requestId
                 end
             end

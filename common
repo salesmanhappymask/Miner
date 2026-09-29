@@ -1,5 +1,5 @@
-VERSION = 102
-PROTOCOL = "miner_swarm_v102"
+VERSION = 103
+PROTOCOL = "miner_swarm_v103"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -126,9 +126,10 @@ function now()
     return os.clock()
 end
 
-DEBUG_PROTOCOL = "miner_swarm_debug_v102"
+DEBUG_PROTOCOL = "miner_swarm_debug_v103"
 DEBUG_LOG_DIR = "logs"
-DEBUG_LOG_MAX = 196608
+DEBUG_LOG_MAX = 65536
+DEBUG_ERROR_LOG_MAX = 16384
 DEBUG_REMOTE_BATCH = 12
 
 local debugRawSend = rednet and rednet.send or nil
@@ -165,17 +166,16 @@ local function debugEnsureDir()
     if not fs.exists(DEBUG_LOG_DIR) then fs.makeDir(DEBUG_LOG_DIR) end
 end
 
-local function debugRotate(path)
-    if fs.exists(path) and fs.getSize(path)>=DEBUG_LOG_MAX then
-        local old=path .. ".previous"
-        if fs.exists(old) then fs.delete(old) end
-        fs.move(path,old)
+local function debugRotate(path,maxSize)
+    maxSize=maxSize or DEBUG_LOG_MAX
+    if fs.exists(path) and fs.getSize(path)>=maxSize then
+        fs.delete(path)
     end
 end
 
-local function debugAppend(path,line)
+local function debugAppend(path,line,maxSize)
     debugEnsureDir()
-    debugRotate(path)
+    debugRotate(path,maxSize)
     return debugWrite(path,line .. "\n","a")
 end
 
@@ -245,17 +245,16 @@ end
 
 function debugLog(category,message,severity)
     if not debugInitialized then return end
+    severity=severity or "INFO"
+    if category=="TURTLE" and severity=="INFO" then return end
     local line=debugLine(category,message,severity)
-    debugAppend(fs.combine(DEBUG_LOG_DIR,"current.log"),line)
-    if category=="RADIO" then debugAppend(fs.combine(DEBUG_LOG_DIR,"radio.log"),line) end
+    debugAppend(fs.combine(DEBUG_LOG_DIR,"current.log"),line,DEBUG_LOG_MAX)
     if severity=="WARN" or severity=="ERROR" or category=="RECOVERY" or category=="CRASH" then
-        debugAppend(fs.combine(DEBUG_LOG_DIR,"errors.log"),line)
+        debugAppend(fs.combine(DEBUG_LOG_DIR,"errors.log"),line,DEBUG_ERROR_LOG_MAX)
     end
-    if debugRole=="regional_manager" then
-        debugAppend(fs.combine(DEBUG_LOG_DIR,"swarm.log"),line)
-    else
+    if debugRole~="regional_manager" then
         debugRemoteBuffer[#debugRemoteBuffer+1]=line
-        if #debugRemoteBuffer>96 then table.remove(debugRemoteBuffer,1) end
+        if #debugRemoteBuffer>48 then table.remove(debugRemoteBuffer,1) end
         debugSendBuffer(severity=="ERROR" or severity=="WARN")
     end
 end
@@ -277,7 +276,7 @@ end
 function debugIngest(sender,message)
     if debugRole~="regional_manager" or type(message)~="table" or message.version~=VERSION or type(message.lines)~="table" then return end
     for _,line in ipairs(message.lines) do
-        debugAppend(fs.combine(DEBUG_LOG_DIR,"swarm.log"),"[remote="..tostring(sender).."] "..tostring(line))
+        debugAppend(fs.combine(DEBUG_LOG_DIR,"current.log"),"[remote="..tostring(sender).."] "..tostring(line),DEBUG_LOG_MAX)
     end
 end
 
@@ -297,16 +296,39 @@ end
 
 debugInit()
 
+local function debugPacketSummary(message)
+    if type(message)~="table" then return debugScalar(message) end
+    local out={"type="..tostring(message.type or "?")}
+    local keys={"role","row","number","stage","mode","chunkIndex","requestId","state"}
+    for _,key in ipairs(keys) do
+        if message[key]~=nil then out[#out+1]=key.."="..debugScalar(message[key]) end
+    end
+    return table.concat(out," ")
+end
+
+local function debugRoutinePacket(message,protocol)
+    if protocol and string.find(tostring(protocol),"miner_swarm_monitor_",1,true) then return true end
+    if type(message)~="table" then return false end
+    local t=message.type
+    return t=="status" or t=="pose_checkpoint" or t=="foreman_position" or
+        t=="move_intent" or t=="manager_presence" or t=="manager_online" or
+        t=="debug_log_batch"
+end
+
 if rednet and debugRawSend then
     rednet.send=function(id,message,protocol)
-        debugLog("RADIO","TX to="..tostring(id).." protocol="..tostring(protocol).." payload="..debugScalar(message),"INFO")
+        if not debugRoutinePacket(message,protocol) then
+            debugLog("RADIO","TX to="..tostring(id).." "..debugPacketSummary(message),"INFO")
+        end
         return debugRawSend(id,message,protocol)
     end
 end
 
 if rednet and debugRawBroadcast then
     rednet.broadcast=function(message,protocol)
-        debugLog("RADIO","BROADCAST protocol="..tostring(protocol).." payload="..debugScalar(message),"INFO")
+        if not debugRoutinePacket(message,protocol) then
+            debugLog("RADIO","BROADCAST "..debugPacketSummary(message),"INFO")
+        end
         return debugRawBroadcast(message,protocol)
     end
 end
@@ -314,7 +336,9 @@ end
 if rednet and debugRawReceive then
     rednet.receive=function(protocol,timeout)
         local sender,message,rxProtocol=debugRawReceive(protocol,timeout)
-        if sender then debugLog("RADIO","RX from="..tostring(sender).." protocol="..tostring(rxProtocol).." payload="..debugScalar(message),"INFO") end
+        if sender and not debugRoutinePacket(message,rxProtocol) then
+            debugLog("RADIO","RX from="..tostring(sender).." "..debugPacketSummary(message),"INFO")
+        end
         return sender,message,rxProtocol
     end
 end

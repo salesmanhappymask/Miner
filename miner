@@ -1079,6 +1079,7 @@ local function runMiner(cfg)
             chunkIndex=state.chunkIndex,
             advanceStage=state.advanceStage,
             packMissing=state.packMissing,
+            complete=state.complete and true or false,
             recovery=state.recoveryReason,
             message=message or "",
             session=cfg.session
