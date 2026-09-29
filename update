@@ -1,5 +1,5 @@
 local RAW = "https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
-local MIN_VERSION = 111
+local MIN_VERSION = 112
 local CONFIG = "updater.cfg"
 local args = {...}
 
@@ -85,12 +85,24 @@ end
 
 local running = shell.getRunningProgram() or ""
 local fromDisk = running:match("^/?disk/") ~= nil
+local autoReboot=false
+local explicitRole=nil
+for _,arg in ipairs(args) do
+    if arg=="--reboot" or arg=="--auto-reboot" then
+        autoReboot=true
+    elseif not explicitRole then
+        explicitRole=normalize(arg)
+    end
+end
 
 if fromDisk then
-    print("Install permanent updater for:")
-    print("1. Regional Manager")
-    print("2. Master Foreman")
-    local role = normalize(read())
+    local role=explicitRole
+    if not role then
+        print("Install permanent updater for:")
+        print("1. Regional Manager")
+        print("2. Master Foreman")
+        role=normalize(read())
+    end
     if not role then error("Select Regional Manager or Master Foreman") end
     local source = readFile(running)
     if not source then error("Cannot read updater from disk") end
@@ -110,8 +122,7 @@ if not config then
     error("Updater role is not configured. Install it once with disk/update")
 end
 
-local requestedRole = normalize(args[1])
-if args[1] and not requestedRole then error("Role must be manager or master") end
+local requestedRole=explicitRole
 if requestedRole and requestedRole ~= config.role then
     error("This updater is permanently configured for " .. roleName(config.role))
 end
@@ -119,6 +130,7 @@ end
 if not turtle or not turtle.forward then error("Update requires a turtle") end
 
 local role = config.role
+local managerSeedRaw=role=="manager" and readFile("manager_seed.cfg") or nil
 
 local function validAnchor(value)
     return type(value) == "table" and type(value.x) == "number" and
@@ -248,6 +260,9 @@ if readFile("version") ~= version then error("Final verification failed: version
 if anchor then
     writeFile("world_anchor", textutils.serialize(anchor))
 end
+if managerSeedRaw then
+    writeFile("manager_seed.cfg",managerSeedRaw)
+end
 
 writeFile("update.new", updaterSource)
 if fs.exists("update.old") then fs.delete("update.old") end
@@ -270,5 +285,10 @@ print("")
 print("Update complete.")
 print("Installed version " .. version .. " for " .. roleName(role) .. ".")
 print("The permanent updater was refreshed and the saved role was preserved.")
+if autoReboot then
+    print("Rebooting into the updated release...")
+    sleep(1)
+    os.reboot()
+end
 print("No program was launched and the turtle was not rebooted.")
 print("Run startup or reboot when you are ready to start the quarry software.")

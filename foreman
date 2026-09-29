@@ -3018,66 +3018,100 @@ local function runForeman(cfg)
         return true
     end
 
-    local function masterFuelAndLoadCoal()
-        if not goTo(0,-1) then
-            state.setupBlockReason="Cannot reach starting supply chest"
+    local function masterInitialChests()
+        if state.chestsReady then return true end
+        if not goTo(0,-1) or not faceTracked(DIR_N) then
+            state.setupBlockReason="Cannot reach the Black Blue Blue supply chest"
             return false
         end
-        faceTracked(DIR_N)
         if not wrapInventory("front") then
-            state.setupBlockReason="Supply chest is not readable directly north of Master Foreman"
+            state.setupBlockReason="Black Blue Blue supply chest is not readable directly north of Master Foreman"
+            return false
+        end
+        if not state.dumpChestPlaced and selfCount("ender_dump")<1 and
+            takeNamedIntoSelf("ender_dump",1)<1 then
+            state.setupBlockReason="Initial supply chest needs the White White White dump Ender Chest"
+            return false
+        end
+        if not state.fuelChestPlaced and selfCount("ender_fuel")<1 and
+            takeNamedIntoSelf("ender_fuel",1)<1 then
+            state.setupBlockReason="Initial supply chest needs the White White Blue fuel Ender Chest"
+            return false
+        end
+        if not ensureEnderPair() then
+            state.setupBlockReason=state.setupBlockReason or "Master Foreman could not deploy its dump and fuel chests"
+            return false
+        end
+        if not atFuel() or not returnBucketsAtFuel() then
+            state.setupBlockReason="Master Foreman could not return bootstrap buckets to its fuel chest"
+            return false
+        end
+        if not goPrivateHome() or not faceTracked(DIR_N) then return false end
+        state.setupBlockReason=nil
+        saveState()
+        return true
+    end
+
+    local function masterFuelAndLoadCoal()
+        if not atFuel() then
+            state.setupBlockReason="Master Foreman fuel chest is unavailable"
+            return false
+        end
+        if not returnBucketsAtFuel() then
+            state.setupBlockReason="Master Foreman could not return empty buckets to the fuel chest"
             return false
         end
         if turtle.getFuelLevel()~="unlimited" and
             turtle.getFuelLevel()<=FOREMAN_FUEL_LOW and
-            not refuelAtFrontTo(FOREMAN_FUEL_TARGET,false) then
-            state.setupBlockReason="Supply chest needs fuel for Master Foreman"
+            not refuelAtFrontTo(FOREMAN_FUEL_TARGET,true) then
+            state.setupBlockReason="Fuel chest needs fuel for Master Foreman"
             return false
         end
         local kind,units=loadFuelPacket(800,4)
         if not kind then
-            state.setupBlockReason="Supply chest needs four GPS fuel packets"
+            state.setupBlockReason="Fuel chest needs four Navigator fuel packets"
             return false
         end
         state.navigatorFuelKind=kind
         state.navigatorFuelUnits=units
+        if not goPrivateHome() or not faceTracked(DIR_N) then return false end
         return true
     end
 
     local function masterLoadSupplies()
         if not goTo(0,-1) then
-            state.setupBlockReason="Cannot reach starting supply chest"
+            state.setupBlockReason="Cannot reach the Black Blue Blue supply chest"
             return false
         end
 
         faceTracked(DIR_N)
 
         if not wrapInventory("front") then
-            state.setupBlockReason="Supply chest is not readable directly north of Master Foreman"
+            state.setupBlockReason="Black Blue Blue supply chest is not readable directly north of Master Foreman"
             return false
         end
 
         local needDrives = 1 - selfCount("disk_drive")
         if needDrives > 0 and takeNamedIntoSelf("disk_drive",needDrives) < needDrives then
-            state.setupBlockReason="Cannot pull a Disk Drive from the supply chest"
+            state.setupBlockReason="Cannot pull a Disk Drive from the Black Blue Blue supply chest"
             return false
         end
 
         local needNavigators = 4 - selfCount("advanced_wireless_mining_turtle")
         if needNavigators > 0 and takeNamedIntoSelf("advanced_wireless_mining_turtle",needNavigators) < needNavigators then
-            state.setupBlockReason="Cannot pull four Advanced Wireless Mining Turtles from the supply chest"
+            state.setupBlockReason="Cannot pull four Advanced Wireless Mining Turtles from the Black Blue Blue supply chest"
             return false
         end
 
         local needFloppies = 1 - selfCount("floppy")
         if needFloppies > 0 and takeNamedIntoSelf("floppy",needFloppies) < needFloppies then
-            state.setupBlockReason="Cannot pull a floppy from the supply chest"
+            state.setupBlockReason="Cannot pull a floppy from the Black Blue Blue supply chest"
             return false
         end
 
         local needLoaders = 2 - selfCount("chunk_loader")
         if needLoaders > 0 and takeNamedIntoSelf("chunk_loader",needLoaders) < needLoaders then
-            state.setupBlockReason="Cannot pull two Chunk Loaders (item 781) from the supply chest"
+            state.setupBlockReason="Cannot pull two Chunk Loaders (item 781) from the Black Blue Blue supply chest"
             return false
         end
 
@@ -3098,8 +3132,8 @@ local function runForeman(cfg)
             needs[1]={"advanced_wireless_mining_turtle",0}
             needs[2]={"disk_drive",0}
             needs[3]={"floppy",0}
-            needs[5]={"ender_dump",1}
-            needs[6]={"ender_fuel",1}
+            needs[5]={"ender_dump",0}
+            needs[6]={"ender_fuel",0}
         end
         for _,entry in ipairs(needs) do
             local remaining=entry[2]-selfCount(entry[1])
@@ -3114,9 +3148,16 @@ local function runForeman(cfg)
         if n~=1 then
             state.foremanFuelPackages=state.foremanFuelPackages or {}
             if not state.foremanFuelPackages[n] then
+                if not atFuel() or not returnBucketsAtFuel() then
+                    state.setupBlockReason="Fuel chest is unavailable for Foreman-" .. tostring(n)
+                    state.phase="WAITING_SUPPLIES"
+                    saveState()
+                    sendState(state.setupBlockReason)
+                    return false
+                end
                 local kind,units=loadFuelPacket(800)
                 if not kind then
-                    state.setupBlockReason="Supply chest needs fuel for Foreman-" .. tostring(n)
+                    state.setupBlockReason="Fuel chest needs fuel for Foreman-" .. tostring(n)
                     state.phase="WAITING_SUPPLIES"
                     saveState()
                     sendState(state.setupBlockReason)
@@ -3801,6 +3842,13 @@ local function runForeman(cfg)
         sendState("Setting up Navigators and foremen")
 
         if not ensureMasterSeedFuel() then
+            return false
+        end
+
+        if not masterInitialChests() then
+            state.phase="WAITING_SUPPLIES"
+            saveState()
+            sendState(state.setupBlockReason or "Need Master Foreman dump and fuel Ender Chests")
             return false
         end
 

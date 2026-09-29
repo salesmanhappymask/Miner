@@ -1,4 +1,5 @@
 local RAW="https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
+local args={...}
 
 local function fetch(name)
     local response=http.get(RAW..name)
@@ -6,6 +7,7 @@ local function fetch(name)
     local data=response.readAll()
     response.close()
     if not data or data=="" then error("Empty download: "..name) end
+    data=tostring(data):gsub("\r\n","\n"):gsub("\r","\n"):gsub("\n+$","")
     return data
 end
 
@@ -33,16 +35,26 @@ else
     error("Disk Drive must be directly above or below the turtle")
 end
 
-print("1. Initial Setup: RM and Master Foreman updater")
-print("2. Standard: worker installation")
-local mode=read()
+local mode=tostring(args[1] or "")
+if mode~="1" and mode~="2" then
+    print("1. Initial Setup: Master Foreman setup")
+    print("2. Standard: worker installation")
+    mode=read()
+end
 if mode~="1" and mode~="2" then error("Select 1 or 2") end
+
+local limit=tonumber(args[2])
+if limit then
+    limit=math.floor(limit)
+    if limit<1 then error("Disk count must be at least 1") end
+end
 
 local contents={}
 local label
 if mode=="1" then
     contents.update=fetch("update")
-    label="quarry setup"
+    contents.startup=fetch("master_setup_startup")
+    label=tostring(args[3] or "setup")
 else
     local version=fetch("version"):match("^%s*(%d+)%s*$")
     if not version then error("Invalid remote version") end
@@ -50,7 +62,7 @@ else
     if contents.startup:match("local%s+EXPECTED_VERSION%s*=%s*(%d+)")~=version then
         error("Worker installer/version mismatch")
     end
-    label="quarry worker"
+    label=tostring(args[3] or "quarry worker")
 end
 
 local compile=loadstring or load
@@ -62,30 +74,35 @@ end
 
 local prepared=0
 for slot=1,16 do
-    if turtle.getItemCount(slot)>0 then
-        turtle.select(slot)
-        local inserted=side=="top" and turtle.dropUp(1) or turtle.dropDown(1)
-        if inserted then
-            sleep(0.2)
-            if not disk.isPresent(side) then
-                error("Disk was not detected after insertion")
+    if not limit or prepared<limit then
+        if turtle.getItemCount(slot)>0 then
+            turtle.select(slot)
+            local inserted=side=="top" and turtle.dropUp(1) or turtle.dropDown(1)
+            if inserted then
+                sleep(0.2)
+                if not disk.isPresent(side) then
+                    error("Disk was not detected after insertion")
+                end
+                for _,name in ipairs(fs.list("disk")) do
+                    fs.delete(fs.combine("disk",name))
+                end
+                local bytes=0
+                for _,data in pairs(contents) do bytes=bytes+#data end
+                if fs.getFreeSpace and fs.getFreeSpace("disk")<bytes then
+                    error("Disk needs "..bytes.." bytes; has "..fs.getFreeSpace("disk"))
+                end
+                for name,data in pairs(contents) do
+                    write("disk/"..name,data)
+                end
+                disk.setLabel(side,label)
+                local returned=side=="top" and turtle.suckUp(1) or turtle.suckDown(1)
+                if not returned then error("Could not retrieve prepared disk") end
+                prepared=prepared+1
             end
-            for _,name in ipairs(fs.list("disk")) do
-                fs.delete(fs.combine("disk",name))
-            end
-            local bytes=0
-            for _,data in pairs(contents) do bytes=bytes+#data end
-            if fs.getFreeSpace and fs.getFreeSpace("disk")<bytes then
-                error("Disk needs "..bytes.." bytes; has "..fs.getFreeSpace("disk"))
-            end
-            for name,data in pairs(contents) do
-                write("disk/"..name,data)
-            end
-            disk.setLabel(side,label)
-            local returned=side=="top" and turtle.suckUp(1) or turtle.suckDown(1)
-            if not returned then error("Could not retrieve prepared disk") end
-            prepared=prepared+1
         end
     end
 end
-print("Prepared "..tostring(prepared).." "..(mode=="1" and "initial setup" or "worker").." disks")
+if limit and prepared~=limit then
+    error("Prepared "..tostring(prepared).." disks, expected "..tostring(limit))
+end
+print("Prepared "..tostring(prepared).." "..(mode=="1" and "setup" or "worker").." disks")

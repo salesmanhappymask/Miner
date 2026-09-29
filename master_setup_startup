@@ -1,0 +1,81 @@
+local VERSION=112
+local SEED_PROTOCOL="miner_swarm_seed_v112"
+
+local function writeFile(path,data)
+    local f=fs.open(path,"w")
+    if not f then error("Could not write "..path) end
+    f.write(data)
+    f.close()
+end
+
+local function openSeedNetwork()
+    for _,side in ipairs({"left","right","top","bottom","front","back"}) do
+        if peripheral.getType(side)=="modem" then
+            if not rednet.isOpen(side) then rednet.open(side) end
+            return true
+        end
+    end
+    return false
+end
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1,1)
+print("Master Foreman setup disk")
+print("Installing permanent updater...")
+
+writeFile("world_anchor",textutils.serialize({x=0,y=0,z=1}))
+
+if not fs.exists("update") or not fs.exists("updater.cfg") then
+    if not shell.run("/disk/update","master") then
+        error("Could not install Master Foreman updater")
+    end
+end
+
+print("Installing current release...")
+if not shell.run("update","master") then
+    error("Master Foreman update failed")
+end
+
+os.setComputerLabel("Foreman-1")
+openSeedNetwork()
+print("Installation complete.")
+print("Waiting for Regional Manager fuel and reboot...")
+
+local acknowledged=false
+while not acknowledged do
+    if openSeedNetwork() then
+        rednet.broadcast({
+            type="seed_master_ready",
+            version=VERSION,
+            id=os.getComputerID()
+        },SEED_PROTOCOL)
+        local sender,message=rednet.receive(SEED_PROTOCOL,1)
+        if sender and type(message)=="table" and message.type=="seed_master_ack" and
+            tonumber(message.target)==os.getComputerID() then
+            acknowledged=true
+        end
+    else
+        sleep(1)
+    end
+end
+
+if disk.isPresent("top") then
+    if not turtle.suckUp(1) then error("Could not retrieve setup disk from the overhead drive") end
+end
+if disk.isPresent("top") then error("Setup disk is still present in the overhead drive") end
+
+print("Setup disk secured.")
+print("Waiting for Regional Manager reboot...")
+
+while true do
+    if openSeedNetwork() then
+        rednet.broadcast({
+            type="seed_master_disk_clear",
+            version=VERSION,
+            id=os.getComputerID()
+        },SEED_PROTOCOL)
+    end
+    sleep(1)
+end

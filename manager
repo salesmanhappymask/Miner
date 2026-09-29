@@ -1,3 +1,383 @@
+local SEED_PROTOCOL="miner_swarm_seed_v112"
+
+local function runManagerSeedBootstrap()
+    local seed=loadTable("manager_seed.cfg")
+    if type(seed)=="table" and seed.complete==true then
+        return seed
+    end
+
+    seed=type(seed)=="table" and seed or {
+        version=VERSION,
+        phase="START",
+        x=0,
+        y=0,
+        z=-1,
+        dir=DIR_N,
+        worldOrigin={x=0,y=0,z=0}
+    }
+    seed.version=VERSION
+    seed.worldOrigin=seed.worldOrigin or {x=0,y=0,z=0}
+    seed.x=tonumber(seed.x) or 0
+    seed.y=tonumber(seed.y) or 0
+    seed.z=tonumber(seed.z) or -1
+    seed.dir=tonumber(seed.dir) or DIR_N
+
+    local function saveSeed()
+        if not saveTable("manager_seed.cfg",seed) then
+            error("Could not save Regional Manager seed state")
+        end
+    end
+
+    local function show(message)
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.white)
+        term.clear()
+        term.setCursorPos(1,1)
+        print("Regional Manager Seed")
+        print("v"..tostring(VERSION))
+        print("")
+        print(message)
+        print("")
+        print("Phase: "..tostring(seed.phase))
+    end
+
+    local function firstEmptySlot()
+        for slot=1,16 do
+            if turtle.getItemCount(slot)==0 then return slot end
+        end
+        return nil
+    end
+
+    local function frontCount(kind)
+        local items=scanInventory("front")
+        if type(items)~="table" then return 0 end
+        local total=0
+        for _,item in pairs(items) do
+            if matchesItem(item,kind) then
+                total=total+tonumber(item.qty or item.size or 1)
+            end
+        end
+        return total
+    end
+
+    local function pullOne(kind)
+        local slot=firstEmptySlot()
+        if not slot then return nil end
+        if takeNamedFromFront(kind,1,slot)<1 then return nil end
+        return slot
+    end
+
+    local function openSeedNetwork()
+        for _,side in ipairs(SIDES) do
+            if peripheral.getType(side)=="modem" then
+                if not rednet.isOpen(side) then rednet.open(side) end
+                return true
+            end
+        end
+        return false
+    end
+
+    local function turnRightSeed()
+        if not turtle.turnRight() then return false end
+        seed.dir=(seed.dir+1)%4
+        saveSeed()
+        return true
+    end
+
+    local function faceSeed(target)
+        target=target%4
+        while seed.dir~=target do
+            if not turnRightSeed() then return false end
+        end
+        return true
+    end
+
+    local function clearSeedFront()
+        for attempt=1,20 do
+            if not turtle.detect() then
+                local attacked=turtle.attack()
+                if not attacked then return true end
+            else
+                local kind=peripheral.getType("front")
+                if kind then
+                    return false,"Path occupied by peripheral "..tostring(kind)
+                end
+                local ok,reason=turtle.dig()
+                if not ok then return false,tostring(reason or "dig failed") end
+            end
+            sleep(0.1)
+            if not turtle.detect() then return true end
+        end
+        return false,"Path remained blocked"
+    end
+
+    local function forwardSeed()
+        for attempt=1,20 do
+            local ok=turtle.forward()
+            if ok then
+                if seed.dir==DIR_N then seed.z=seed.z+1
+                elseif seed.dir==DIR_E then seed.x=seed.x+1
+                elseif seed.dir==DIR_S then seed.z=seed.z-1
+                else seed.x=seed.x-1 end
+                saveSeed()
+                return true
+            end
+            local cleared,reason=clearSeedFront()
+            if not cleared then return false,reason end
+            sleep(0.1)
+        end
+        return false,"Regional Manager movement remained blocked"
+    end
+
+    local function moveSeedTo(tx,tz)
+        while seed.x<tx do if not faceSeed(DIR_E) or not forwardSeed() then return false end end
+        while seed.x>tx do if not faceSeed(DIR_W) or not forwardSeed() then return false end end
+        while seed.z<tz do if not faceSeed(DIR_N) or not forwardSeed() then return false end end
+        while seed.z>tz do if not faceSeed(DIR_S) or not forwardSeed() then return false end end
+        return true
+    end
+
+    local function supplyReady()
+        local inv=wrapInventory("front")
+        if not inv then return false end
+        return frontCount("advanced_wireless_narcissistic_turtle")>=1 and
+            frontCount("floppy")>=5 and
+            frontCount("disk_drive")>=1 and
+            frontCount("lava_bucket")>=2
+    end
+
+    local function placeSupplyChest()
+        if wrapInventory("front") then return supplyReady() end
+        if turtle.detect() then return false end
+        for slot=1,16 do
+            if turtle.getItemCount(slot)>0 then
+                turtle.select(slot)
+                local okProbe,canFuel=pcall(turtle.refuel,0)
+                if not (okProbe and canFuel) then
+                    local placed=turtle.place()
+                    if placed then
+                        sleep(0.2)
+                        if wrapInventory("front") then return supplyReady() end
+                        turtle.dig()
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    os.setComputerLabel("Regional Manager")
+    show("Preparing autonomous deployment")
+
+    if seed.phase=="START" then
+        if seed.x~=0 or seed.z~=-1 then
+            error("Regional Manager seed pose is not at the Foreman-1 starting square")
+        end
+        if not faceSeed(DIR_N) then error("Regional Manager could not face north") end
+        if not placeSupplyChest() then
+            error("Place the Black Blue Blue supply Ender Chest in the Regional Manager inventory and verify its bootstrap contents")
+        end
+        seed.phase="SUPPLY_PLACED"
+        saveSeed()
+    end
+
+    if seed.phase=="SUPPLY_PLACED" then
+        if not supplyReady() then
+            error("Black Blue Blue supply chest is missing the Master Foreman turtle, five disks, Disk Drive, or two lava buckets")
+        end
+        seed.masterSlot=pullOne("advanced_wireless_narcissistic_turtle")
+        seed.workerDiskSlots={}
+        for i=1,4 do seed.workerDiskSlots[i]=pullOne("floppy") end
+        seed.setupDiskSlot=pullOne("floppy")
+        seed.driveSlot=pullOne("disk_drive")
+        seed.rmLavaSlot=pullOne("lava_bucket")
+        seed.masterLavaSlot=pullOne("lava_bucket")
+        if not seed.masterSlot or not seed.setupDiskSlot or not seed.driveSlot or
+            not seed.rmLavaSlot or not seed.masterLavaSlot then
+            error("Regional Manager could not pull the complete bootstrap package")
+        end
+        for i=1,4 do
+            if not seed.workerDiskSlots[i] then error("Regional Manager could not pull all four worker disks") end
+        end
+        seed.phase="SUPPLIES_PULLED"
+        saveSeed()
+    end
+
+    if seed.phase=="SUPPLIES_PULLED" then
+        if turtle.getFuelLevel()~="unlimited" then
+            turtle.select(seed.rmLavaSlot)
+            if not turtle.refuel(0) or not turtle.refuel(1) then
+                error("Regional Manager could not refuel from its reserved lava bucket")
+            end
+            seed.rmBucketSlot=seed.rmLavaSlot
+        end
+        seed.phase="RM_REFUELED"
+        saveSeed()
+    end
+
+    if seed.phase=="RM_REFUELED" then
+        if peripheral.getType("top")~="drive" then
+            turtle.select(seed.driveSlot)
+            if not turtle.placeUp() then error("Regional Manager could not place the bootstrap Disk Drive above itself") end
+            sleep(0.2)
+        end
+        if peripheral.getType("top")~="drive" then error("Bootstrap Disk Drive is not above the Regional Manager") end
+        seed.phase="DRIVE_PLACED"
+        saveSeed()
+    end
+
+    if seed.phase=="DRIVE_PLACED" then
+        show("Preparing four worker disks")
+        if not shell.run("prep","2","4","quarry worker") then error("Worker disk preparation failed") end
+        seed.phase="WORKER_DISKS_PREPPED"
+        saveSeed()
+    end
+
+    if seed.phase=="WORKER_DISKS_PREPPED" then
+        if not faceSeed(DIR_N) or not wrapInventory("front") then error("Regional Manager cannot access the Black Blue Blue supply chest") end
+        for i=1,4 do
+            local slot=seed.workerDiskSlots[i]
+            if turtle.getItemCount(slot)>0 then
+                turtle.select(slot)
+                if not turtle.drop(1) then error("Could not return worker disk "..tostring(i).." to the supply chest") end
+            end
+        end
+        seed.phase="WORKER_DISKS_RETURNED"
+        saveSeed()
+    end
+
+    if seed.phase=="WORKER_DISKS_RETURNED" then
+        show("Preparing Master Foreman setup disk")
+        if not shell.run("prep","1","1","setup") then error("Master Foreman setup disk preparation failed") end
+        seed.phase="SETUP_DISK_PREPPED"
+        saveSeed()
+    end
+
+    if seed.phase=="SETUP_DISK_PREPPED" then
+        if disk.isPresent("top") then error("Bootstrap Disk Drive already contains an unexpected disk") end
+        turtle.select(seed.setupDiskSlot)
+        if not turtle.dropUp(1) then error("Could not insert Master Foreman setup disk") end
+        sleep(0.2)
+        if not disk.isPresent("top") then error("Master Foreman setup disk was not detected") end
+        seed.phase="SETUP_DISK_INSERTED"
+        saveSeed()
+    end
+
+    if seed.phase=="SETUP_DISK_INSERTED" then
+        if not faceSeed(DIR_S) then error("Regional Manager could not turn south") end
+        if not forwardSeed() then error("Regional Manager could not move back from the bootstrap station") end
+        if not faceSeed(DIR_N) then error("Regional Manager could not face north after backing away") end
+        seed.phase="BACKED"
+        saveSeed()
+    end
+
+    if seed.phase=="BACKED" then
+        local masterId=nil
+        local okExisting,idExisting=pcall(peripheral.call,"front","getID")
+        if okExisting and tonumber(idExisting) then masterId=tonumber(idExisting) end
+        if not masterId then
+            if turtle.detect() then error("Master Foreman placement square is occupied") end
+            turtle.select(seed.masterSlot)
+            if not turtle.place() then error("Regional Manager could not place the Master Foreman") end
+            sleep(0.3)
+            for attempt=1,20 do
+                local ok,id=pcall(peripheral.call,"front","getID")
+                if ok and tonumber(id) then masterId=tonumber(id) break end
+                sleep(0.1)
+            end
+        end
+        if not masterId then error("Regional Manager could not identify the placed Master Foreman") end
+        seed.masterId=masterId
+        pcall(peripheral.call,"front","turnOn")
+        seed.phase="MASTER_PLACED"
+        saveSeed()
+    end
+
+    if seed.phase=="MASTER_PLACED" then
+        if not openSeedNetwork() then error("Regional Manager wireless modem is unavailable") end
+        show("Waiting for Master Foreman software installation")
+        local ready=false
+        local deadline=now()+120
+        while now()<deadline and not ready do
+            local sender,message=rednet.receive(SEED_PROTOCOL,1)
+            if tonumber(sender)==tonumber(seed.masterId) and type(message)=="table" and
+                message.type=="seed_master_ready" and tonumber(message.version)==VERSION then
+                ready=true
+            end
+        end
+        if not ready then error("Master Foreman setup disk did not report installation complete") end
+        rednet.send(seed.masterId,{type="seed_master_ack",target=seed.masterId},SEED_PROTOCOL)
+        seed.phase="MASTER_READY"
+        saveSeed()
+    end
+
+    if seed.phase=="MASTER_READY" then
+        if not seed.masterLavaTransferred then
+            if turtle.getItemCount(seed.masterLavaSlot)<=0 then error("Master Foreman lava bucket is missing") end
+            turtle.select(seed.masterLavaSlot)
+            if not turtle.drop(1) then error("Regional Manager could not transfer the Master Foreman lava bucket") end
+            seed.masterLavaTransferred=true
+            saveSeed()
+        end
+        if not seed.setupDiskCleared then
+            if not openSeedNetwork() then error("Regional Manager wireless modem is unavailable") end
+            local cleared=false
+            local deadline=now()+30
+            while now()<deadline and not cleared do
+                local sender,message=rednet.receive(SEED_PROTOCOL,1)
+                if tonumber(sender)==tonumber(seed.masterId) and type(message)=="table" and
+                    message.type=="seed_master_disk_clear" and tonumber(message.version)==VERSION then
+                    cleared=true
+                end
+            end
+            if not cleared then error("Master Foreman did not secure its setup disk before reboot") end
+            seed.setupDiskCleared=true
+            saveSeed()
+        end
+        local ok=pcall(peripheral.call,"front","reboot")
+        if not ok then
+            pcall(peripheral.call,"front","shutdown")
+            sleep(0.5)
+            pcall(peripheral.call,"front","turnOn")
+        end
+        seed.phase="MASTER_REBOOTED"
+        saveSeed()
+    end
+
+    if seed.phase=="MASTER_REBOOTED" then
+        if not seed.rmBucketTransferred then
+            if seed.rmBucketSlot and turtle.getItemCount(seed.rmBucketSlot)>0 then
+                turtle.select(seed.rmBucketSlot)
+                if not turtle.drop(1) then error("Regional Manager could not hand its empty bucket to the Master Foreman") end
+            end
+            seed.rmBucketTransferred=true
+            saveSeed()
+        end
+        while seed.z>MANAGER_IDLE.z do
+            if not faceSeed(DIR_S) or not forwardSeed() then
+                error("Regional Manager could not clear the Master Foreman setup lane")
+            end
+        end
+        if not moveSeedTo(MANAGER_IDLE.x,MANAGER_IDLE.z) or not faceSeed(DIR_N) then
+            error("Regional Manager could not reach its idle position")
+        end
+        seed.phase="AT_IDLE"
+        saveSeed()
+    end
+
+    if seed.phase=="AT_IDLE" then
+        seed.complete=true
+        seed.phase="COMPLETE"
+        seed.x=MANAGER_IDLE.x
+        seed.y=0
+        seed.z=MANAGER_IDLE.z
+        seed.dir=DIR_N
+        saveSeed()
+    end
+
+    return seed
+end
+
 local function runRegionalManager()
     while not openNetwork() do
         term.setBackgroundColor(colors.black)
@@ -9,7 +389,7 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
-    local OBSERVER_PROTOCOL="miner_swarm_monitor_v111"
+    local OBSERVER_PROTOCOL="miner_swarm_monitor_v112"
     local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send
@@ -41,6 +421,7 @@ local function runRegionalManager()
     local monitorSide,mon=findMonitor()
     if mon then mon.setTextScale(0.5) end
 
+    local seedConfig=loadTable("manager_seed.cfg")
     local data=loadTableLight("regional_manager.tmp")
     if not data and
         (fs.exists("regional_manager.tmp") or fs.exists("regional_manager.tmp.new") or
@@ -86,6 +467,7 @@ local function runRegionalManager()
             commissioningComplete=false,
             swarmStarted=false,
             gpsReady=false,
+            worldOrigin=(seedConfig and seedConfig.worldOrigin) or {x=0,y=0,z=0},
             minerSetupApproved=false,
             minerSetupDeclined=false,
             minerSetupGateRequested=false,
@@ -822,7 +1204,7 @@ local function runRegionalManager()
         data.commissioningComplete=false
         data.swarmStarted=false
         data.gpsReady=false
-        data.worldOrigin=nil
+        data.worldOrigin=(seedConfig and seedConfig.worldOrigin) or data.worldOrigin or {x=0,y=0,z=0}
         data.minerSetupApproved=false
         data.minerSetupDeclined=false
         data.minerSetupGateRequested=false
@@ -1042,7 +1424,8 @@ local function runRegionalManager()
                 foremanId=message.foremanId,
                 service=message.service,
                 fuel=message.fuel,
-                status=data.recall.mode and data.recall.mode~="DUMP" and
+                status=(data.recall.mode and data.recall.mode~="DUMP" and
+                    not (data.recall.mode=="PACK" and data.recall.state=="PACK_DUMP")) and
                     "SUSPENDED" or (message.type=="service_arrived" and "PENDING" or "WAITING_ARRIVAL"),
                 arrived=message.type=="service_arrived",
                 created=now(),
@@ -1058,7 +1441,13 @@ local function runRegionalManager()
                 job.service=existing.service
             end
             existing.arrived=existing.arrived or message.type=="service_arrived"
-            existing.status=existing.arrived and ((existing.status=="WAITING_ARRIVAL") and "PENDING" or existing.status) or existing.status
+            local acceptingService=not data.recall.mode or data.recall.mode=="DUMP" or
+                (data.recall.mode=="PACK" and data.recall.state=="PACK_DUMP")
+            if acceptingService and existing.status=="SUSPENDED" then
+                existing.status=existing.arrived and "PENDING" or "WAITING_ARRIVAL"
+            else
+                existing.status=existing.arrived and ((existing.status=="WAITING_ARRIVAL") and "PENDING" or existing.status) or existing.status
+            end
             existing.updated=now()
             existing.minerId=sender
         end
@@ -2656,7 +3045,8 @@ local function runRegionalManager()
                     end
 
                 elseif message.type=="recall_loader_ack" and message.session==data.session and
-                    data.recall.active and data.recall.loaderRequired and message.number then
+                    data.recall.active and data.recall.loaderRequired and message.number and
+                    message.mode==data.recall.mode then
                     local n=tonumber(message.number)
                     local home=n and NAVIGATOR_RECALL[n]
                     local valid=home and registeredNodeSender("navigator",n,sender) and
@@ -2982,4 +3372,5 @@ local function runRegionalManager()
 end
 
 
+runManagerSeedBootstrap()
 runRegionalManager()

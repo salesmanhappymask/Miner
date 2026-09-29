@@ -49,6 +49,30 @@ local function runningFromDisk()
     return p:sub(1,5)=="disk/" or p:sub(1,6)=="/disk/"
 end
 
+local function managerAutoUpdate()
+    if REGIONAL_MANAGER~=1 or runningFromDisk() then return end
+    local localVersion=tonumber((readFile("version") or ""):match("^%s*(%d+)%s*$")) or 0
+    local remote=fetch("version")
+    if not remote then
+        print("Automatic update check unavailable; starting installed release.")
+        sleep(1)
+        return
+    end
+    local remoteVersion=tonumber(tostring(remote):match("^%s*(%d+)%s*$"))
+    if not remoteVersion then
+        print("Automatic update check returned an invalid version; starting installed release.")
+        sleep(1)
+        return
+    end
+    if remoteVersion>localVersion then
+        print("Release "..tostring(remoteVersion).." available. Updating automatically...")
+        if not shell.run("update","manager","--auto-reboot") then
+            error("Automatic Regional Manager update failed")
+        end
+        error("Automatic update returned without rebooting")
+    end
+end
+
 local function ensureLocal(name)
     if fs.exists(name) then
         return true
@@ -144,6 +168,8 @@ local function runFile(path,role,autoRecover)
         sleep(60)
     end
 end
+
+managerAutoUpdate()
 
 local base=""
 local cfg=loadCfg()

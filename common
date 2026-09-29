@@ -1,5 +1,5 @@
-VERSION = 111
-PROTOCOL = "miner_swarm_v111"
+VERSION = 112
+PROTOCOL = "miner_swarm_v112"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -132,7 +132,7 @@ function now()
     return os.clock()
 end
 
-DEBUG_PROTOCOL = "miner_swarm_debug_v111"
+DEBUG_PROTOCOL = "miner_swarm_debug_v112"
 DEBUG_LOG_DIR = "logs"
 DEBUG_LOG_MAX = 65536
 DEBUG_ERROR_LOG_MAX = 16384
@@ -555,6 +555,8 @@ function matchesItem(item, kind)
         return enderChestFrequency(item)==0
     elseif kind == "ender_fuel" then
         return enderChestFrequency(item)==11
+    elseif kind == "ender_supply" then
+        return enderChestFrequency(item)==4027
     elseif kind == "lava_bucket" then
         return string.find(text,"lava",1,true)~=nil and string.find(text,"bucket",1,true)~=nil
     elseif kind == "empty_bucket" then
