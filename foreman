@@ -1514,14 +1514,20 @@ local function runForeman(cfg)
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type == "recall_command" then
                         flags.resume=false
                         flags.recallMode = message.mode or "NORMAL"
-                        if flags.recallMode=="NORMAL" or flags.recallMode=="SHUTDOWN" then
+                        if flags.recallMode=="NORMAL" or flags.recallMode=="DUMP" or
+                            flags.recallMode=="SHUTDOWN" or flags.recallMode=="PACK" then
                             flags.advanceCancelled=true
                         end
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type=="pack_clear" and
                         state.phase=="RECALLED_PAUSED" and state.recallMode=="PACK" then
-                        os.setComputerLabel(nil)
+                        for attempt=1,5 do
+                            os.setComputerLabel(nil)
+                            if os.getComputerLabel()==nil then break end
+                            sleep(0.1)
+                        end
                         if os.getComputerLabel()==nil then
                             state.packReady=true
+                            state.packAcknowledged=nil
                             saveState()
                             send(cfg.managerId,{
                                 type="pack_ready",role="foreman",number=number,session=cfg.session
@@ -3927,6 +3933,10 @@ local function runForeman(cfg)
 
         state.phase="RECALLED_PAUSED"
         state.recallMode=mode
+        if mode=="PACK" then
+            state.packReady=nil
+            state.packAcknowledged=nil
+        end
         saveState()
         checkpointForeman()
 

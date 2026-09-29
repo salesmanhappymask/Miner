@@ -328,6 +328,10 @@ local function runNavigator(cfg)
 
         state.recalled=true
         state.recallMode=mode
+        if mode=="PACK" then
+            state.packReady=nil
+            state.packAcknowledged=nil
+        end
         save()
 
         send(cfg.managerId,{
@@ -436,6 +440,7 @@ local function runNavigator(cfg)
                     elseif message.type=="pack_clear" and state.recallMode=="PACK" then
                         if clearNavigatorLabel() then
                             state.packReady=true
+                            state.packAcknowledged=nil
                             save()
                             send(cfg.managerId,{type="pack_ready",role="navigator",
                                 number=cfg.number,session=cfg.session})
@@ -797,6 +802,7 @@ local function runNavigator(cfg)
                 elseif message.type=="pack_clear" and state.recalled and state.recallMode=="PACK" then
                     if clearNavigatorLabel() then
                         state.packReady=true
+                        state.packAcknowledged=nil
                         save()
                         send(cfg.managerId,{
                             type="pack_ready",role="navigator",number=cfg.number,
