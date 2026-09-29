@@ -1,5 +1,5 @@
 local RAW = "https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
-local MIN_VERSION = 119
+local MIN_VERSION = 120
 local CONFIG = "updater.cfg"
 local args = {...}
 
@@ -188,18 +188,30 @@ end
 
 local files = {"startup", "common", "prep", "push", "pushlogs", role == "manager" and "manager" or "foreman"}
 local staged = {}
-local updaterSource = fetch("update")
-local version = fetch("version"):match("^%s*(%d+)%s*$")
-if not version or tonumber(version) < MIN_VERSION then
-    error("Remote version must be " .. MIN_VERSION .. " or later; nothing was changed")
+local updaterSource
+local version
+local commonVersion
+local snapshotReady = false
+for attempt = 1, 6 do
+    staged = {}
+    local before = fetch("version"):match("^%s*(%d+)%s*$")
+    if before and tonumber(before) >= MIN_VERSION then
+        updaterSource = fetch("update")
+        for _, name in ipairs(files) do
+            staged[name] = fetch(name)
+        end
+        commonVersion = staged.common:match("^%s*VERSION%s*=%s*(%d+)")
+        local after = fetch("version"):match("^%s*(%d+)%s*$")
+        if before == after and commonVersion == before then
+            version = before
+            snapshotReady = true
+            break
+        end
+    end
+    if attempt < 6 then sleep(1) end
 end
-
-for _, name in ipairs(files) do
-    staged[name] = fetch(name)
-end
-
-if staged.common:match("^%s*VERSION%s*=%s*(%d+)") ~= version then
-    error("Common/version mismatch; nothing was changed")
+if not snapshotReady then
+    error("Remote release is inconsistent after 6 checks; version=" .. tostring(version or fetch("version"):match("^%s*(%d+)%s*$")) .. ", common=" .. tostring(commonVersion) .. ". Re-upload the complete release with version last; nothing was changed")
 end
 
 local regional = role == "manager" and "1" or "0"
@@ -224,7 +236,7 @@ if compile then
 end
 
 if fetch("version"):match("^%s*(%d+)%s*$") ~= version then
-    error("Remote version changed during download; nothing was changed")
+    error("Remote version changed after snapshot validation; nothing was changed")
 end
 
 local stageDir = ".update_stage"
