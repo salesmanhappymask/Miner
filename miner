@@ -1597,6 +1597,20 @@ local function runMiner(cfg)
         return true
     end
 
+    local function clearChunkAdvanceLane(moveError)
+        local ok,peripheralType=pcall(peripheral.getType,"front")
+        if ok and peripheralType then
+            return false,"Next chunk travel lane occupied by peripheral "..tostring(peripheralType)
+        end
+        if turtle.detect() then
+            local dug,digError=turtle.dig()
+            if dug then return true end
+            return false,"Could not clear next chunk block: "..tostring(digError or moveError or "dig failed")
+        end
+        turtle.attack()
+        return true,moveError
+    end
+
     local function runChunkMove(target)
         if state.recoveryLocked or state.recallMode or not state.complete or
             state.x~=cfg.row or state.y~=0 or state.z<0 or state.z>16 then return false end
@@ -1606,7 +1620,7 @@ local function runMiner(cfg)
         flags.advanceCancelled=false
         local ok,reason=travelChunkNorth(state,save,face,0,target,cfg.worldOrigin,function()
             return flags.advanceCancelled or flags.recallMode~=nil
-        end)
+        end,clearChunkAdvanceLane)
         if not ok then
             if flags.advanceCancelled or flags.recallMode then
                 state.advanceStage=nil
@@ -1651,22 +1665,27 @@ local function runMiner(cfg)
         state.phase="BLOCKED_MINING"
         state.blockedReason=reason
         state.blockedDetail=detail
+        state.blockedRetryCount=(tonumber(state.blockedRetryCount) or 0)+1
         save()
         checkpoint()
         local lastReport=0
+        local retryDelay=math.min(10*state.blockedRetryCount,60)
+        local retryAt=now()+retryDelay
 
         while true do
             if flags.recallMode then
                 return false
             end
 
-            if flags.resume then
+            if flags.resume or now()>=retryAt then
+                local automatic=not flags.resume
                 flags.resume=false
                 state.blockedReason=nil
                 state.blockedDetail=nil
                 state.phase="MINING"
                 save()
-                sendState("Retrying blocked mining action")
+                sendState(automatic and "Automatically retrying blocked mining action" or
+                    "Retrying blocked mining action")
                 return true
             end
 
@@ -1678,7 +1697,8 @@ local function runMiner(cfg)
                         " attack="..tostring(detail.attackSuccess)..
                         " move="..tostring(detail.forwardError or "blocked")
                 end
-                sendState("BLOCKED_MINING: " .. tostring(reason) .. suffix)
+                sendState("BLOCKED_MINING: " .. tostring(reason) .. suffix..
+                    " | retry="..tostring(math.max(0,math.ceil(retryAt-now()))).."s")
                 lastReport=now()
             end
 
@@ -1711,7 +1731,15 @@ local function runMiner(cfg)
                 return false
             end
             local moved,moveError=attemptForward()
-            if moved then return true end
+            if moved then
+                if state.blockedRetryCount or state.blockedReason or state.blockedDetail then
+                    state.blockedRetryCount=nil
+                    state.blockedReason=nil
+                    state.blockedDetail=nil
+                    save()
+                end
+                return true
+            end
             lastForwardError=moveError
             if state.recoveryLocked or flags.recallMode then
                 return false

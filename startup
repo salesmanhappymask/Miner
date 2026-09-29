@@ -90,8 +90,22 @@ local function releaseBase(role)
     return nil
 end
 
-local function runFile(path,role)
-    local ok,err=pcall(dofile,path)
+local function runFile(path,role,autoRecover)
+    local ok,err
+    if autoRecover and parallel and parallel.waitForAll then
+        local finished=false
+        parallel.waitForAll(function()
+            ok,err=pcall(dofile,path)
+            finished=true
+        end,function()
+            sleep(15)
+            if not finished and fs.exists(".runtime_crash_count") then
+                fs.delete(".runtime_crash_count")
+            end
+        end)
+    else
+        ok,err=pcall(dofile,path)
+    end
 
     if ok then
         return
@@ -113,6 +127,18 @@ local function runFile(path,role)
     print(tostring(err))
     print("")
     print("Error saved to " .. role .. "_error.log")
+
+    if autoRecover then
+        local count=tonumber(readFile(".runtime_crash_count") or "0") or 0
+        count=count+1
+        writeFile(".runtime_crash_count",tostring(count))
+        if count<=3 then
+            print("Automatic reboot " .. tostring(count) .. "/3 in 3 seconds")
+            sleep(3)
+            os.reboot()
+        end
+        print("Automatic reboot stopped after 3 consecutive crashes")
+    end
 
     while true do
         sleep(60)
@@ -161,5 +187,5 @@ else
 end
 
 _G.SWARM_ROLE_NAME=roleName
-runFile(base .. "common","common")
-runFile(base .. roleFile,roleName)
+runFile(base .. "common","common",false)
+runFile(base .. roleFile,roleName,true)

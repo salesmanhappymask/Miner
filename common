@@ -1,5 +1,5 @@
-VERSION = 105
-PROTOCOL = "miner_swarm_v105"
+VERSION = 106
+PROTOCOL = "miner_swarm_v106"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -126,7 +126,7 @@ function now()
     return os.clock()
 end
 
-DEBUG_PROTOCOL = "miner_swarm_debug_v105"
+DEBUG_PROTOCOL = "miner_swarm_debug_v106"
 DEBUG_LOG_DIR = "logs"
 DEBUG_LOG_MAX = 65536
 DEBUG_ERROR_LOG_MAX = 16384
@@ -276,7 +276,12 @@ end
 function debugIngest(sender,message)
     if debugRole~="regional_manager" or type(message)~="table" or message.version~=VERSION or type(message.lines)~="table" then return end
     for _,line in ipairs(message.lines) do
-        debugAppend(fs.combine(DEBUG_LOG_DIR,"current.log"),"[remote="..tostring(sender).."] "..tostring(line),DEBUG_LOG_MAX)
+        local remote="[remote="..tostring(sender).."] "..tostring(line)
+        debugAppend(fs.combine(DEBUG_LOG_DIR,"current.log"),remote,DEBUG_LOG_MAX)
+        if string.find(remote,"[ERROR]",1,true) or string.find(remote,"[CRASH]",1,true) or
+            string.find(remote,"[RECOVERY]",1,true) then
+            debugAppend(fs.combine(DEBUG_LOG_DIR,"errors.log"),remote,DEBUG_ERROR_LOG_MAX)
+        end
     end
 end
 
@@ -1285,7 +1290,7 @@ function verifyBootWitness(state,origin,hadIntent)
     return true
 end
 
-function travelChunkNorth(state,save,face,baseZ,targetIndex,origin,abortCheck)
+function travelChunkNorth(state,save,face,baseZ,targetIndex,origin,abortCheck,clearForward)
     local function cancelled()
         return type(abortCheck)=="function" and abortCheck() and true or false
     end
@@ -1325,15 +1330,46 @@ function travelChunkNorth(state,save,face,baseZ,targetIndex,origin,abortCheck)
         if turtle.getFuelLevel()~="unlimited" and turtle.getFuelLevel()<destination-state.z then
             return false,"Not enough fuel for chunk move"
         end
-        if turtle.detect() then return false,"Next chunk travel lane blocked" end
         local previous=state.z
-        state.chunkMoveIntent={fromZ=previous,toZ=previous+1,
-            fuelBefore=turtle.getFuelLevel()}
-        save()
-        if not turtle.forward() then
-            state.chunkMoveIntent=nil
+        local attempts=0
+        local moved=false
+        local lastReason=nil
+        while not moved do
+            if cancelled() then return false,"Chunk move cancelled" end
+            if turtle.detect() then
+                if type(clearForward)~="function" then
+                    return false,"Next chunk travel lane blocked"
+                end
+                local cleared,clearReason=clearForward()
+                if not cleared then
+                    return false,clearReason or "Next chunk travel lane blocked"
+                end
+                lastReason=clearReason
+            end
+            state.chunkMoveIntent={fromZ=previous,toZ=previous+1,
+                fuelBefore=turtle.getFuelLevel()}
             save()
-            return false,"Next chunk travel lane blocked"
+            local ok,moveReason=turtle.forward()
+            if ok then
+                moved=true
+            else
+                state.chunkMoveIntent=nil
+                save()
+                attempts=attempts+1
+                lastReason=moveReason or lastReason
+                if type(clearForward)~="function" then
+                    return false,"Next chunk travel lane blocked"
+                end
+                local retry,clearReason=clearForward(moveReason)
+                if not retry then
+                    return false,clearReason or moveReason or "Next chunk travel lane blocked"
+                end
+                lastReason=clearReason or lastReason
+                if attempts>=20 then
+                    return false,lastReason or "Next chunk travel lane blocked"
+                end
+                sleep(0.1)
+            end
         end
         state.z=previous+1
         state.seq=(tonumber(state.seq) or 0)+1
@@ -1349,3 +1385,4 @@ function travelChunkNorth(state,save,face,baseZ,targetIndex,origin,abortCheck)
     save()
     return true
 end
+

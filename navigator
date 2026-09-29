@@ -671,7 +671,8 @@ local function runNavigator(cfg)
     local pendingRecallMode=nil
     local advanceCancelled=false
 
-    while true do
+    local function eventLoop()
+        while true do
         local event={os.pullEvent()}
 
         if event[1]=="modem_message" then
@@ -836,6 +837,17 @@ local function runNavigator(cfg)
             timer=os.startTimer(5)
         end
     end
+    end
+
+    local function heartbeatLoop()
+        while true do
+            sleep(5)
+            pcall(openNetwork)
+            pcall(sendNavigatorStatus)
+        end
+    end
+
+    parallel.waitForAny(eventLoop,heartbeatLoop)
 end
 
 

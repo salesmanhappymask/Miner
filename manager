@@ -9,7 +9,7 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
-    local OBSERVER_PROTOCOL="miner_swarm_monitor_v105"
+    local OBSERVER_PROTOCOL="miner_swarm_monitor_v106"
     local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send
@@ -141,6 +141,7 @@ local function runRegionalManager()
     data.authority=data.authority or {}
     data.requests=data.requests or {}
     data.foremanJobs=data.foremanJobs or {}
+    data.blockedHistory=data.blockedHistory or {}
     data.commissioningComplete=data.commissioningComplete and true or false
     data.swarmStarted=data.swarmStarted and true or false
     data.recall=data.recall or {
@@ -1628,6 +1629,15 @@ local function runRegionalManager()
     end
 
     local function mergeStatusEntry(registry,key,sender,message)
+        if registry==data.miners and type(message.blockedDetail)=="table" then
+            data.blockedHistory[key]={
+                stamp=now(),
+                chunkIndex=message.chunkIndex,
+                state=message.state,
+                message=message.message,
+                detail=message.blockedDetail
+            }
+        end
         local entry=registry[key] or {}
         entry.recovery=nil
         entry.message=nil
