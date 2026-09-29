@@ -1,0 +1,343 @@
+local MON_NAME = "monitor_20"
+local mon = peripheral.wrap(MON_NAME)
+if not mon then error("No monitor: " .. MON_NAME) end
+if mon.setTextScale then mon.setTextScale(0.5) end
+
+local EXCLUDE = { [MON_NAME] = true }
+
+local function supportsColor(m)
+  return m.isColor and m.isColor() or false
+end
+
+local IS_COLOR = supportsColor(mon)
+
+local C_BG     = colors.black
+local C_HEADER = IS_COLOR and colors.lightGray or colors.black
+local C_DIV    = IS_COLOR and colors.gray or colors.black
+local C_INSET  = colors.black
+local C_ACCENT = IS_COLOR and colors.cyan or colors.white
+local C_TEXT   = colors.white
+local C_MUTED  = IS_COLOR and colors.lightGray or colors.white
+local C_BRAND  = IS_COLOR and colors.blue or colors.white
+
+local function clamp(n,a,b) if n<a then return a elseif n>b then return b else return n end end
+
+local function makeUI(m)
+  local w, h = m.getSize()
+  local cache = {}
+
+  local function setBg(bg)
+    if IS_COLOR then m.setBackgroundColor(bg) else m.setBackgroundColor(colors.black) end
+  end
+  local function setFg(fg)
+    if IS_COLOR then m.setTextColor(fg) else m.setTextColor(colors.white) end
+  end
+
+  local function rect(x, y, ww, hh, bg)
+    if ww <= 0 or hh <= 0 then return end
+    local x1 = clamp(x, 1, w)
+    local y1 = clamp(y, 1, h)
+    local x2 = clamp(x + ww - 1, 1, w)
+    local y2 = clamp(y + hh - 1, 1, h)
+    if x2 < x1 or y2 < y1 then return end
+    setBg(bg)
+    local line = string.rep(" ", x2 - x1 + 1)
+    for yy = y1, y2 do
+      m.setCursorPos(x1, yy)
+      m.write(line)
+    end
+  end
+
+  local function field(key, x, y, ww, s, fg, bg)
+    if ww <= 0 or y < 1 or y > h then return end
+    s = tostring(s or "")
+    if #s > ww then s = s:sub(1, ww) end
+    local out = s .. string.rep(" ", ww - #s)
+
+    local k1, k2, k3 = key, key .. "_fg", key .. "_bg"
+    if cache[k1] == out and cache[k2] == fg and cache[k3] == bg then return end
+
+    setBg(bg or colors.black)
+    setFg(fg or colors.white)
+    m.setCursorPos(x, y)
+    m.write(out)
+
+    cache[k1], cache[k2], cache[k3] = out, fg, bg
+  end
+
+  local function clearAll()
+    setBg(C_BG)
+    setFg(C_TEXT)
+    m.clear()
+    cache = {}
+  end
+
+  return { w = w, h = h, rect = rect, field = field, clearAll = clearAll }
+end
+
+local ui = makeUI(mon)
+
+local function wrapLines(text, w)
+  local out = {}
+  local i = 1
+  while i <= #text do
+    out[#out + 1] = text:sub(i, i + w - 1)
+    i = i + w
+  end
+  if #out == 0 then out[1] = "" end
+  return out
+end
+
+local function getPeripheralList()
+  local list = {}
+  for _, name in ipairs(peripheral.getNames()) do
+    if not EXCLUDE[name] then
+      local pType = peripheral.getType(name)
+      list[#list + 1] = { name = name, pType = pType or "unknown" }
+    end
+  end
+  table.sort(list, function(a,b) return a.name < b.name end)
+  return list
+end
+
+local function listFingerprint(list)
+  local t = {}
+  for i = 1, #list do
+    t[#t + 1] = list[i].name .. ":" .. tostring(list[i].pType)
+  end
+  return table.concat(t, "|")
+end
+
+local function methodsFingerprint(methods)
+  if not methods then return "" end
+  return table.concat(methods, "|")
+end
+
+local function safeGetMethods(name)
+  if not name then return nil end
+  if not peripheral.isPresent(name) then return nil end
+  local m = peripheral.getMethods(name) or {}
+  table.sort(m)
+  return m
+end
+
+local function cardSurface(x, y, ww, hh, accentColor)
+  ui.rect(x, y, ww, hh, C_BG)
+  ui.rect(x, y, ww, 1, C_DIV)
+  ui.rect(x, y + hh - 1, ww, 1, C_DIV)
+  ui.rect(x, y, 1, hh, C_DIV)
+  ui.rect(x + ww - 1, y, 1, hh, C_DIV)
+  ui.rect(x + 1, y + 1, ww - 2, hh - 2, C_INSET)
+  ui.rect(x + 1, y + 1, 1, hh - 2, accentColor or C_ACCENT)
+end
+
+local function drawHeader(title)
+  local w = ui.w
+  ui.rect(1, 1, w, 1, C_HEADER)
+  ui.rect(1, 2, w, 1, C_DIV)
+
+  local brand = "ZelOS"
+  ui.field("hdr_brand", w - #brand, 1, #brand, brand, C_BRAND, C_HEADER)
+  local tx = 1 + math.floor((w - #title) / 2)
+  ui.field("hdr_title", tx, 1, #title, title, C_TEXT, C_HEADER)
+end
+
+-- Subheader without bottom divider
+local function drawSubheader(boxKey, x, y, ww, label)
+  ui.rect(x, y, ww, 1, C_HEADER)
+  ui.field(boxKey .. "_sub", x + 1, y, ww - 2, label, C_TEXT, C_HEADER)
+end
+
+local function computeLayout()
+  local w, h = ui.w, ui.h
+  local topY = 4
+  local boxH = h - topY + 1
+  if boxH < 6 then boxH = 6 end
+
+  local gutter = 1
+  local total = w - 2 - gutter
+  if total < 10 then total = w - 2 end
+
+  local leftW = math.floor(total / 2)
+  local rightW = total - leftW
+
+  local leftX = 2
+  local rightX = leftX + leftW + gutter
+
+  return {
+    topY = topY,
+    boxH = boxH,
+    leftX = leftX, leftW = leftW,
+    rightX = rightX, rightW = rightW,
+  }
+end
+
+local function drawScreen(list, selectedIdx, selectedName, methods)
+  ui.clearAll()
+  drawHeader("Peripheral Inspector")
+
+  local L = computeLayout()
+
+  cardSurface(L.leftX,  L.topY, L.leftW,  L.boxH, C_ACCENT)
+  cardSurface(L.rightX, L.topY, L.rightW, L.boxH, C_ACCENT)
+
+  local padL = 3
+  local l_ix = L.leftX + padL
+  local l_w  = L.leftW - padL - 2
+
+  local r_ix = L.rightX + padL
+  local r_w  = L.rightW - padL - 2
+
+  -- Subheaders
+  drawSubheader("left",  L.leftX + 1,  L.topY + 1, L.leftW - 2,  "Detected Peripherals")
+  drawSubheader("right", L.rightX + 1, L.topY + 1, L.rightW - 2, "Methods")
+
+  -- Single blank line after subheaders
+  local l_listY = L.topY + 3
+  local r_listY = L.topY + 3
+
+  local l_listH = (L.topY + L.boxH - 2) - l_listY + 1
+  local r_listH = (L.topY + L.boxH - 2) - r_listY + 1
+
+  local hitboxes = {}
+  local y = l_listY
+
+  for i, p in ipairs(list) do
+    if y > (l_listY + l_listH - 1) then break end
+
+    local line = string.format("%d) %s (%s)", i, p.name, p.pType)
+    local lines = wrapLines(line, l_w)
+
+    local startY = y
+    local drawn = 0
+    local isSel = (selectedIdx == i)
+    local fg = isSel and C_ACCENT or C_TEXT
+
+    for li = 1, #lines do
+      if y > (l_listY + l_listH - 1) then break end
+      ui.field("l_" .. i .. "_" .. li, l_ix, y, l_w, lines[li], fg, C_INSET)
+      y = y + 1
+      drawn = drawn + 1
+    end
+
+    if drawn > 0 then
+      hitboxes[#hitboxes + 1] = {
+        idx = i,
+        x1 = l_ix, x2 = l_ix + l_w - 1,
+        y1 = startY, y2 = startY + drawn - 1,
+      }
+    end
+
+    -- one extra blank line between peripherals
+    if y <= (l_listY + l_listH - 1) then
+      ui.field("l_sp_" .. i, l_ix, y, l_w, "", C_TEXT, C_INSET)
+      y = y + 1
+    end
+  end
+
+  while y <= (l_listY + l_listH - 1) do
+    ui.field("l_tail_" .. y, l_ix, y, l_w, "", C_TEXT, C_INSET)
+    y = y + 1
+  end
+
+  -- Methods (no extra spacing between entries)
+  local ry = r_listY
+
+  if not selectedName then
+    ui.field("r_hint", r_ix, ry, r_w, "(select a peripheral)", C_MUTED, C_INSET)
+  elseif not methods or #methods == 0 then
+    ui.field("r_empty", r_ix, ry, r_w, "(no methods)", C_MUTED, C_INSET)
+  else
+    for mi = 1, #methods do
+      if ry > (r_listY + r_listH - 1) then break end
+      local lines = wrapLines(methods[mi], r_w)
+      for li = 1, #lines do
+        if ry > (r_listY + r_listH - 1) then break end
+        ui.field("r_" .. mi .. "_" .. li, r_ix, ry, r_w, lines[li], C_TEXT, C_INSET)
+        ry = ry + 1
+      end
+    end
+  end
+
+  return hitboxes
+end
+
+local selectedIdx, selectedName = nil, nil
+local methods, lastMethodsSig = nil, ""
+
+local list = getPeripheralList()
+local listSig = listFingerprint(list)
+local hitboxes = drawScreen(list, selectedIdx, selectedName, methods)
+
+local refreshSeconds = 0.5
+local refreshTimer = os.startTimer(refreshSeconds)
+
+while true do
+  local e, a, b, c = os.pullEvent()
+
+  if e == "timer" and a == refreshTimer then
+    local newList = getPeripheralList()
+    local newSig = listFingerprint(newList)
+
+    local changed = false
+    if newSig ~= listSig then
+      list, listSig = newList, newSig
+      changed = true
+
+      if selectedName then
+        local newIdx = nil
+        for i = 1, #list do
+          if list[i].name == selectedName then
+            newIdx = i
+            break
+          end
+        end
+        if not newIdx then
+          selectedIdx, selectedName = nil, nil
+          methods, lastMethodsSig = nil, ""
+        else
+          selectedIdx = newIdx
+        end
+      end
+    end
+
+    if selectedName then
+      local newMethods = safeGetMethods(selectedName)
+      local msig = methodsFingerprint(newMethods)
+      if msig ~= lastMethodsSig then
+        methods = newMethods or {}
+        lastMethodsSig = msig
+        changed = true
+      end
+    end
+
+    if changed then
+      hitboxes = drawScreen(list, selectedIdx, selectedName, methods)
+    end
+
+    refreshTimer = os.startTimer(refreshSeconds)
+
+  elseif e == "monitor_touch" then
+    local monName, x, y = a, b, c
+    if monName == MON_NAME then
+      local picked = nil
+      for i = 1, #hitboxes do
+        local hb = hitboxes[i]
+        if x >= hb.x1 and x <= hb.x2 and y >= hb.y1 and y <= hb.y2 then
+          picked = hb.idx
+          break
+        end
+      end
+
+      if picked and list[picked] then
+        selectedIdx = picked
+        selectedName = list[picked].name
+
+        methods = safeGetMethods(selectedName) or {}
+        lastMethodsSig = methodsFingerprint(methods)
+
+        hitboxes = drawScreen(list, selectedIdx, selectedName, methods)
+      end
+    end
+  end
+end
