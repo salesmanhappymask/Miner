@@ -592,6 +592,7 @@ local function runNavigator(cfg)
             number=cfg.number,
             id=os.getComputerID(),
             mode=mode,
+            packToken=mode=="PACK" and state.packToken or nil,
             x=state.x,
             y=state.y,
             z=state.z,
@@ -634,6 +635,7 @@ local function runNavigator(cfg)
 
     local function recallNavigator(mode)
         mode=mode or "NORMAL"
+        if mode=="PACK" then state.packPending=nil end
         if state.loaderExpected and state.loaderPlaced then
             local recovered,reason=retrieveChunkLoader()
             if not recovered then
@@ -782,6 +784,16 @@ local function runNavigator(cfg)
             if sender==cfg.managerId and message.session==cfg.session and
                 message.type=="recall_command" then
                 deploymentRecall=message.mode or "NORMAL"
+                if deploymentRecall=="PACK" then
+                    state.packPending=nil
+                    state.packToken=tonumber(message.packToken)
+                elseif deploymentRecall=="NORMAL" and message.packPending==true then
+                    state.packPending=true
+                else
+                    state.packPending=nil
+                    state.packToken=nil
+                end
+                save()
             elseif sender==cfg.controller and message.type=="configure" and
                 message.target==os.getComputerID() then
                 send(cfg.controller,{type="install_ok",role="navigator",number=cfg.number})
@@ -806,12 +818,13 @@ local function runNavigator(cfg)
                 local sender,message=rednet.receive(PROTOCOL,1)
                 if sender==cfg.managerId and type(message)=="table" and
                     message.session==cfg.session then
-                    if message.type=="resume_swarm" and state.recallMode~="PACK" then
+                    if message.type=="resume_swarm" and state.recallMode~="PACK" and not state.packPending then
                         state.recalled=false
                         state.recallMode=nil
                         save()
                     elseif message.type=="recall_command" and
                         message.mode~=state.recallMode then
+                        if message.mode=="PACK" then state.packToken=tonumber(message.packToken) end
                         if not recallNavigator(message.mode or "NORMAL") then
                             status("navigator","RECALL_BLOCKED",{
                                 number=cfg.number,x=state.x,y=state.y,z=state.z,
@@ -819,19 +832,22 @@ local function runNavigator(cfg)
                                 session=cfg.session
                             })
                         end
-                    elseif message.type=="pack_clear" and state.recallMode=="PACK" then
+                    elseif message.type=="pack_clear" and state.recallMode=="PACK" and
+                        tonumber(message.packToken)==tonumber(state.packToken) then
                         if clearNavigatorLabel() then
                             state.packReady=true
                             state.packAcknowledged=nil
                             save()
                             send(cfg.managerId,{type="pack_ready",role="navigator",
-                                number=cfg.number,session=cfg.session})
+                                number=cfg.number,packToken=state.packToken,labelCleared=true,
+                                x=state.x,y=state.y,z=state.z,dir=state.dir,session=cfg.session})
                         end
                     end
                 end
                 if state.recalled and now()-lastHome>=3 then
                     send(cfg.managerId,{type="recall_home",role="navigator",
                         number=cfg.number,id=os.getComputerID(),mode=state.recallMode,
+                        packToken=state.recallMode=="PACK" and state.packToken or nil,
                         x=state.x,y=state.y,z=state.z,dir=state.dir,
                         session=cfg.session})
                     lastHome=now()
@@ -1306,6 +1322,16 @@ local function runNavigator(cfg)
                 elseif message.type=="recall_command" then
                     advanceCancelled=true
                     pendingRecallMode=message.mode or "NORMAL"
+                    if pendingRecallMode=="PACK" then
+                        state.packPending=nil
+                        state.packToken=tonumber(message.packToken)
+                    elseif pendingRecallMode=="NORMAL" and message.packPending==true then
+                        state.packPending=true
+                    else
+                        state.packPending=nil
+                        state.packToken=nil
+                    end
+                    save()
                     if not recallNavigator(pendingRecallMode) then
                         status("navigator","RECALL_BLOCKED",{
                             number=cfg.number,
@@ -1316,21 +1342,24 @@ local function runNavigator(cfg)
                             session=cfg.session
                         })
                     end
-                elseif message.type=="pack_clear" and state.recalled and state.recallMode=="PACK" then
+                elseif message.type=="pack_clear" and state.recalled and state.recallMode=="PACK" and
+                    tonumber(message.packToken)==tonumber(state.packToken) then
                     if clearNavigatorLabel() then
                         state.packReady=true
                         state.packAcknowledged=nil
                         save()
                         send(cfg.managerId,{
                             type="pack_ready",role="navigator",number=cfg.number,
-                            session=cfg.session
+                            packToken=state.packToken,labelCleared=true,
+                            x=state.x,y=state.y,z=state.z,dir=state.dir,session=cfg.session
                         })
                     end
-                elseif message.type=="pack_ready_ack" and state.packReady then
+                elseif message.type=="pack_ready_ack" and state.packReady and
+                    tonumber(message.packToken)==tonumber(state.packToken) then
                     state.packAcknowledged=true
                     save()
                 elseif message.type=="resume_swarm" then
-                    if not resumeNavigator() then
+                    if state.recallMode~="PACK" and not state.packPending and not resumeNavigator() then
                         status("navigator","NAVIGATION_ERROR",{
                             number=cfg.number,
                             x=state.x,
@@ -1348,7 +1377,8 @@ local function runNavigator(cfg)
             if state.packReady and not state.packAcknowledged then
                 send(cfg.managerId,{
                     type="pack_ready",role="navigator",number=cfg.number,
-                    session=cfg.session
+                    packToken=state.packToken,labelCleared=true,
+                    x=state.x,y=state.y,z=state.z,dir=state.dir,session=cfg.session
                 })
             end
             timer=os.startTimer(5)

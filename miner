@@ -1190,15 +1190,25 @@ local function runMiner(cfg)
                             save()
                             os.reboot()
                         elseif message.type == "start_mining" then
-                            if not state.advanceStage and not state.recallMode and
+                            if not state.packPending and state.recallMode~="PACK" and
+                                not state.packDumpRequested and
+                                not (state.request and state.request.packDump) and
+                                not state.advanceStage and not state.recallMode and
                                 state.phase~="RECALLED_PAUSED" and
                                 state.phase~="RECALLING" and not flags.recallMode then
                                 flags.start=true
                             end
                         elseif message.type=="resume_swarm" then
-                            if not state.advanceStage then flags.start=true end
-                            if state.phase=="RECALLED_PAUSED" or state.phase=="RECALLING" or state.recallMode or state.recallResume or flags.recallMode then
-                                flags.resume=true
+                            if not state.packPending and state.recallMode~="PACK" and
+                                not state.packDumpRequested and
+                                not (state.request and state.request.packDump) then
+                                if not state.advanceStage then flags.start=true end
+                                if state.phase=="RECALLED_PAUSED" or state.phase=="RECALLING" or state.recallMode or state.recallResume or flags.recallMode then
+                                    flags.resume=true
+                                end
+                            else
+                                flags.start=false
+                                flags.resume=false
                             end
             elseif message.type == "service_complete" and state.request and message.requestId == state.request.id then
                             flags.serviceComplete = true
@@ -1213,14 +1223,28 @@ local function runMiner(cfg)
                             local incomingMode=message.mode or "NORMAL"
                             if incomingMode=="PACK" then
                                 local incomingToken=tonumber(message.packToken)
-                                if incomingToken and incomingToken~=tonumber(state.packToken) then
+                                state.packPending=nil
+                                state.recallResume=nil
+                                state.packDumpComplete=nil
+                                state.packDumpRequested=nil
+                                flags.start=false
+                                flags.resume=false
+                                if incomingToken then
                                     state.packToken=incomingToken
-                                    state.packDumpComplete=nil
-                                    state.packDumpRequested=nil
                                 end
-                                if message.dumpBeforePack==true and not state.packDumpComplete then
-                                    state.packDumpRequested=true
-                                end
+                                save()
+                            elseif incomingMode=="NORMAL" and message.packPending==true then
+                                state.packPending=true
+                                state.packDumpComplete=nil
+                                state.packDumpRequested=nil
+                                flags.start=false
+                                flags.resume=false
+                                save()
+                            else
+                                state.packPending=nil
+                                state.packToken=nil
+                                state.packDumpRequested=nil
+                                state.packDumpComplete=nil
                                 save()
                             end
                             if incomingMode=="NORMAL" or incomingMode=="DUMP" or
@@ -1237,6 +1261,7 @@ local function runMiner(cfg)
                                         row=state.row,
                                         id=os.getComputerID(),
                                         mode=incomingMode,
+                                        packToken=incomingMode=="PACK" and state.packToken or nil,
                                         x=state.x,
                                         y=state.y,
                                         z=state.z,
@@ -1264,7 +1289,8 @@ local function runMiner(cfg)
                                 flags.recallMode=incomingMode
                             end
                         elseif message.type=="pack_clear" and state.phase=="RECALLED_PAUSED" and
-                            state.recallMode=="PACK" and cfg.row~=WORKER_COUNT then
+                            state.recallMode=="PACK" and cfg.row~=WORKER_COUNT and
+                            tonumber(message.packToken)==tonumber(state.packToken) then
                             for attempt=1,5 do
                                 os.setComputerLabel(nil)
                                 if os.getComputerLabel()==nil then break end
@@ -1275,14 +1301,17 @@ local function runMiner(cfg)
                                 state.packAcknowledged=nil
                                 save()
                                 send(cfg.managerId,{
-                                    type="pack_ready",role="miner",row=cfg.row,session=cfg.session
+                                    type="pack_ready",role="miner",row=cfg.row,
+                                    packToken=state.packToken,labelCleared=true,
+                                    x=state.x,y=state.y,z=state.z,dir=state.dir,session=cfg.session
                                 })
                             end
-                        elseif message.type=="pack_ready_ack" and state.packReady then
+                        elseif message.type=="pack_ready_ack" and state.packReady and
+                            tonumber(message.packToken)==tonumber(state.packToken) then
                             state.packAcknowledged=true
                             save()
                         elseif message.type=="pack_collect" and cfg.row==WORKER_COUNT and
-                            state.recallMode=="PACK" then
+                            state.recallMode=="PACK" and tonumber(message.packToken)==tonumber(state.packToken) then
                             flags.packCollect=true
                         elseif message.type == "hold_position" then
                             state.phase="RECOVERY_LOCK"
@@ -2034,6 +2063,13 @@ local function runMiner(cfg)
         if state.recoveryLocked then
             return false
         end
+        if state.packPending or state.recallMode=="PACK" or state.packDumpRequested or
+            (state.request and state.request.packDump) then
+            flags.start=false
+            flags.resume=false
+            sendState("Return to mine blocked while Pack It Up is pending")
+            return false
+        end
 
         if not face(DIR_N) then
             return false
@@ -2321,7 +2357,13 @@ local function runMiner(cfg)
         flags.start=false
         flags.resume=false
 
-        if not state.recallResume then
+        if mode=="PACK" then
+            state.recallResume=nil
+            state.packPending=nil
+            flags.start=false
+            flags.resume=false
+            save()
+        elseif not state.recallResume then
             state.recallResume={
                 x=state.x,
                 y=state.y,
@@ -2391,6 +2433,7 @@ local function runMiner(cfg)
             row=state.row,
             id=os.getComputerID(),
             mode=mode,
+            packToken=mode=="PACK" and state.packToken or nil,
             labelCleared=false,
             x=state.x,
             y=state.y,
@@ -2468,6 +2511,14 @@ local function runMiner(cfg)
     end
 
     local function resumeFromRecall()
+        if state.packPending or state.recallMode=="PACK" or state.packDumpRequested or
+            (state.request and state.request.packDump) then
+            flags.start=false
+            flags.resume=false
+            save()
+            sendState("Resume ignored while Pack It Up is pending")
+            return true
+        end
         if not state.recallResume then
             state.phase="WAITING"
             state.recallMode=nil
@@ -2548,7 +2599,9 @@ local function runMiner(cfg)
                 return true
             elseif state.packReady and not state.packAcknowledged and now()-(state.lastPackSend or -10)>=2 then
                 send(cfg.managerId,{
-                    type="pack_ready",role="miner",row=cfg.row,session=cfg.session
+                    type="pack_ready",role="miner",row=cfg.row,
+                    packToken=state.packToken,labelCleared=true,
+                    x=state.x,y=state.y,z=state.z,dir=state.dir,session=cfg.session
                 })
                 state.lastPackSend=now()
             elseif flags.recallMode then
@@ -2568,7 +2621,8 @@ local function runMiner(cfg)
     end
 
     collectPackedMiners=function()
-        if cfg.row~=WORKER_COUNT or state.recallMode~="PACK" or state.z~=0 or state.y~=0 then
+        if cfg.row~=WORKER_COUNT or state.recallMode~="PACK" or
+            state.x<1 or state.x>WORKER_COUNT or state.z~=0 or state.y~=0 then
             return false
         end
 
@@ -2580,7 +2634,7 @@ local function runMiner(cfg)
             state.packMissing[#state.packMissing+1]=row
             save()
             send(cfg.managerId,{type="pack_missing",row=WORKER_COUNT,
-                missing=row,session=cfg.session})
+                missing=row,packToken=state.packToken,session=cfg.session})
             sendState("Miner-"..tostring(row).." item not collected")
         end
 
@@ -2592,60 +2646,82 @@ local function runMiner(cfg)
             save()
             send(cfg.managerId,{
                 type="pack_blocked",row=WORKER_COUNT,x=state.x,
-                reason=state.packError,session=cfg.session
+                reason=state.packError,packToken=state.packToken,session=cfg.session
             })
             sendState(state.packError)
             return false
         end
 
-        if state.x==WORKER_COUNT and not state.packStepIntent and
-            freeInventorySlots()<WORKER_COUNT-1 then
-            return packBlock("Miner-16 needs at least 15 free inventory slots before packing")
+        if state.x==WORKER_COUNT and not state.packStepIntent then
+            if freeInventorySlots()<WORKER_COUNT-1 then
+                return packBlock("Miner-16 needs at least 15 free inventory slots before packing")
+            end
+            if state.dir==DIR_N then
+                if not turnStep(false) then
+                    return packBlock("Miner-16 could not turn left for pack collection")
+                end
+            elseif state.dir~=DIR_W then
+                return packBlock("Miner-16 is not facing north at the start of pack collection")
+            end
+        elseif state.dir~=DIR_W then
+            return packBlock("Miner-16 lost west-facing pack alignment")
         end
 
-        if state.dir~=DIR_W then
-            if not face(DIR_W) then
-                return packBlock("Miner-16 could not face west for pack collection")
-            end
-        end
         state.phase="PACK_COLLECT"
         state.packError=nil
         save()
+
         while state.x>1 do
             local targetRow=state.x-1
             if not state.packStepIntent then
+                if not turtle.detect() then
+                    return packBlock("Expected parked Miner-"..tostring(targetRow).." in the pack lane")
+                end
+                local before={}
+                for slot=1,16 do before[slot]=turtle.getItemCount(slot) end
+                state.packStepIntent={stage="DIGGING",targetRow=targetRow,before=before}
+                save()
+            end
+
+            if state.packStepIntent.targetRow and state.packStepIntent.targetRow~=targetRow then
+                return packBlock("Pack step target no longer matches Miner-16 position")
+            end
+
+            if state.packStepIntent.stage=="DIGGING" then
+                local before=state.packStepIntent.before or {}
                 if turtle.detect() then
-                    local before={}
-                    for slot=1,16 do before[slot]=turtle.getItemCount(slot) end
                     local dug,digError=turtle.dig()
                     if not dug then
                         return packBlock("Could not break parked Miner-"..tostring(targetRow)..
                             ": "..tostring(digError or "dig failed"))
                     end
-                    local recovered=false
-                    for slot=1,16 do
-                        if turtle.getItemCount(slot)>before[slot] then recovered=true end
-                    end
-                    if not recovered then
-                        for attempt=1,3 do
-                            turtle.suck()
-                            for slot=1,16 do
-                                if turtle.getItemCount(slot)>before[slot] then recovered=true end
-                            end
-                            if recovered then break end
-                            sleep(0.2)
-                        end
-                    end
-                    if not recovered then reportMissing(targetRow) end
-                else
-                    reportMissing(targetRow)
                 end
-                state.packStepIntent={stage="DUG"}
+
+                local recovered=false
+                for slot=1,16 do
+                    if turtle.getItemCount(slot)>(tonumber(before[slot]) or 0) then recovered=true end
+                end
+                if not recovered then
+                    for attempt=1,3 do
+                        turtle.suck()
+                        for slot=1,16 do
+                            if turtle.getItemCount(slot)>(tonumber(before[slot]) or 0) then recovered=true end
+                        end
+                        if recovered then break end
+                        sleep(0.2)
+                    end
+                end
+                if not recovered then reportMissing(targetRow) end
+
+                state.packStepIntent.stage="DUG"
+                state.packStepIntent.before=nil
                 save()
             end
+
             state.packStepIntent.stage="MOVING"
             state.packStepIntent.fuelBefore=turtle.getFuelLevel()
             save()
+
             local moved=false
             local lastMoveError=nil
             local deadline=now()+10
@@ -2665,6 +2741,7 @@ local function runMiner(cfg)
                 return packBlock("Pack lane blocked before Miner-"..tostring(targetRow)..
                     ": "..tostring(lastMoveError or "forward failed"))
             end
+
             state.x=state.x-1
             state.seq=state.seq+1
             state.packStepIntent=nil
@@ -2672,10 +2749,17 @@ local function runMiner(cfg)
             save()
             checkpoint()
             send(cfg.managerId,{type="pack_progress",row=WORKER_COUNT,x=state.x,
-                collected=WORKER_COUNT-state.x,missing=state.packMissing,session=cfg.session})
-            sendState("Packed " .. tostring(WORKER_COUNT-state.x) .. "/"..
-                tostring(WORKER_COUNT-1).."; next Miner-" .. tostring(state.x-1))
+                collected=WORKER_COUNT-state.x,missing=state.packMissing,
+                packToken=state.packToken,session=cfg.session})
+            if state.x>1 then
+                sendState("Packed " .. tostring(WORKER_COUNT-state.x) .. "/"..
+                    tostring(WORKER_COUNT-1).."; next Miner-" .. tostring(state.x-1))
+            else
+                sendState("Packed " .. tostring(WORKER_COUNT-1) .. "/"..
+                    tostring(WORKER_COUNT-1).."; parked at Miner-1")
+            end
         end
+
         for attempt=1,5 do
             os.setComputerLabel(nil)
             if os.getComputerLabel()==nil then break end
@@ -2684,15 +2768,17 @@ local function runMiner(cfg)
         if os.getComputerLabel()~=nil then
             return packBlock("Miner-16 could not clear its label after pack collection")
         end
+
         state.phase="PACK_DONE"
         state.packError=nil
         save()
         for i=1,5 do
             send(cfg.managerId,{type="pack_done",row=WORKER_COUNT,x=state.x,
-                collected=WORKER_COUNT-1,missing=state.packMissing,session=cfg.session})
+                collected=WORKER_COUNT-1,missing=state.packMissing,
+                packToken=state.packToken,session=cfg.session})
             sleep(0.1)
         end
-        os.shutdown()
+        sendState("Pack complete; paused at Miner-1")
         return true
     end
 
@@ -2785,11 +2871,13 @@ local function runMiner(cfg)
         checkpoint()
 
         if state.phase=="PACK_DONE" then
-            for i=1,5 do
-                send(cfg.managerId,{type="pack_done",row=WORKER_COUNT,x=state.x,collected=WORKER_COUNT-1,missing=state.packMissing,session=cfg.session})
-                sleep(0.1)
+            while state.phase=="PACK_DONE" do
+                send(cfg.managerId,{type="pack_done",row=WORKER_COUNT,x=state.x,
+                    collected=WORKER_COUNT-1,missing=state.packMissing,
+                    packToken=state.packToken,session=cfg.session})
+                sendState("Pack complete; paused at Miner-1")
+                sleep(3)
             end
-            os.shutdown()
             return
         end
 

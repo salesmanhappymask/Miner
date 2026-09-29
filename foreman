@@ -1507,7 +1507,9 @@ local function runForeman(cfg)
                             flags.chunkCommand={stage=message.stage,target=target}
                         end
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type == "start_mining" then
-                        flags.startMining = true
+                        if not state.packPending and state.recallMode~="PACK" and not flags.packService then
+                            flags.startMining = true
+                        end
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type == "cancel_advance" then
                         flags.advanceCancelled=true
                         if message.mode=="NORMAL" or message.mode=="SHUTDOWN" then
@@ -1515,6 +1517,8 @@ local function runForeman(cfg)
                             flags.recallMode=message.mode
                         end
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type=="pack_service_begin" then
+                        state.packPending=nil
+                        flags.resume=false
                         if state.recallMode=="PACK" and (flags.packService or active or #queue>0 or
                             state.phase=="PACK_SERVICE" or state.phase=="SERVICING" or
                             state.phase=="RETURNING_AFTER_SERVICE" or state.phase=="SERVICE_UNLOAD_TRIP") then
@@ -1541,12 +1545,23 @@ local function runForeman(cfg)
                         flags.packService=false
                         flags.resume=false
                         flags.recallMode = message.mode or "NORMAL"
+                        if flags.recallMode=="PACK" then
+                            state.packPending=nil
+                            state.packToken=tonumber(message.packToken)
+                        elseif flags.recallMode=="NORMAL" and message.packPending==true then
+                            state.packPending=true
+                        else
+                            state.packPending=nil
+                            state.packToken=nil
+                        end
                         if flags.recallMode=="NORMAL" or flags.recallMode=="DUMP" or
                             flags.recallMode=="SHUTDOWN" or flags.recallMode=="PACK" then
                             flags.advanceCancelled=true
                         end
+                        saveState()
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type=="pack_clear" and
-                        state.phase=="RECALLED_PAUSED" and state.recallMode=="PACK" then
+                        state.phase=="RECALLED_PAUSED" and state.recallMode=="PACK" and
+                        tonumber(message.packToken)==tonumber(state.packToken) then
                         for attempt=1,5 do
                             os.setComputerLabel(nil)
                             if os.getComputerLabel()==nil then break end
@@ -1557,16 +1572,21 @@ local function runForeman(cfg)
                             state.packAcknowledged=nil
                             saveState()
                             send(cfg.managerId,{
-                                type="pack_ready",role="foreman",number=number,session=cfg.session
+                                type="pack_ready",role="foreman",number=number,
+                                packToken=state.packToken,labelCleared=true,
+                                x=state.x,y=state.y,z=state.z,dir=state.dir,session=cfg.session
                             })
                         end
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type=="pack_ready_ack" and
-                        state.packReady then
+                        state.packReady and tonumber(message.packToken)==tonumber(state.packToken) then
                         state.packAcknowledged=true
                         saveState()
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type == "resume_swarm" then
-                        if state.phase=="RECALLED_PAUSED" or state.phase=="RECALLING" or state.recallMode or flags.recallMode then
+                        if not state.packPending and state.recallMode~="PACK" and not flags.packService and
+                            (state.phase=="RECALLED_PAUSED" or state.phase=="RECALLING" or state.recallMode or flags.recallMode) then
                             flags.resume=true
+                        else
+                            flags.resume=false
                         end
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type == "status_query" then
                         sendState("")
@@ -4235,6 +4255,7 @@ local function runForeman(cfg)
             number=number,
             id=id,
             mode=mode,
+            packToken=mode=="PACK" and state.packToken or nil,
             x=state.x,
             y=state.y,
             z=state.z,
@@ -4348,7 +4369,7 @@ local function runForeman(cfg)
             end
         end
 
-        if not loadOwnFuel(true) then
+        if not loadOwnFuel(not flags.packService) then
             return false
         end
 
@@ -4883,7 +4904,9 @@ local function runForeman(cfg)
             if state.phase=="RECALLED_PAUSED" then
                 if state.packReady and not state.packAcknowledged and now()-(state.lastPackSend or -10)>=2 then
                     send(cfg.managerId,{
-                        type="pack_ready",role="foreman",number=number,session=cfg.session
+                        type="pack_ready",role="foreman",number=number,
+                        packToken=state.packToken,labelCleared=true,
+                        x=state.x,y=state.y,z=state.z,dir=state.dir,session=cfg.session
                     })
                     state.lastPackSend=now()
                 end
