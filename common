@@ -1,5 +1,5 @@
-VERSION = 99
-PROTOCOL = "miner_swarm_v99"
+VERSION = 100
+PROTOCOL = "miner_swarm_v100"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -126,7 +126,7 @@ function now()
     return os.clock()
 end
 
-DEBUG_PROTOCOL = "miner_swarm_debug_v99"
+DEBUG_PROTOCOL = "miner_swarm_debug_v100"
 DEBUG_LOG_DIR = "logs"
 DEBUG_LOG_MAX = 196608
 DEBUG_REMOTE_BATCH = 12

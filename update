@@ -1,5 +1,5 @@
 local RAW = "https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
-local MIN_VERSION = 99
+local MIN_VERSION = 100
 local CONFIG = "updater.cfg"
 local args = {...}
 

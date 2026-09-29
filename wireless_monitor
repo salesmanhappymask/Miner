@@ -1,5 +1,5 @@
 local EXPECTED_ID=1633
-local PROTOCOL="miner_swarm_v99"
+local PROTOCOL="miner_swarm_v100"
 
 if os.getComputerID()~=EXPECTED_ID then
     error("This wireless monitor is assigned to computer ID "..EXPECTED_ID)

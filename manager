@@ -48,7 +48,8 @@ local function runRegionalManager()
         error("Regional Manager state unreadable; refusing to create a new session")
     end
 
-    if data and (data.version==56 or data.version==57 or data.version==58 or data.version==59 or data.version==60 or data.version==61 or data.version==62 or data.version==63 or data.version==64 or data.version==65 or data.version==66 or data.version==67 or data.version==68 or data.version==69 or data.version==70 or data.version==71 or data.version==72 or data.version==73 or data.version==74 or data.version==75 or data.version==76 or data.version==77 or data.version==78 or data.version==79 or data.version==80 or data.version==81 or data.version==82 or data.version==83 or data.version==84 or data.version==85 or data.version==86 or data.version==87 or data.version==88 or data.version==89 or data.version==90 or data.version==91 or data.version==92) then
+    local savedManagerVersion=tonumber(data and data.version)
+    if data and savedManagerVersion and savedManagerVersion>=56 and savedManagerVersion<VERSION then
         data.version=VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end
@@ -525,7 +526,7 @@ local function runRegionalManager()
         local m=data.miners[row]
         if not m then return string.format("M%02d   NO SIGNAL",row),C_FAULT end
         local c=online(m,20) and C_TEXT or C_FAULT
-        if m.state=="RECOVERY_LOCK" or m.recovery then c=C_FAULT end
+        if m.state=="RECOVERY_LOCK" then c=C_FAULT end
         local task=""
         for _,r in pairs(data.requests) do
             if r.row==row and r.status~="COMPLETE" then
@@ -1474,21 +1475,28 @@ local function runRegionalManager()
                 save()
             end
         elseif data.recall.mode=="PACK" then
-            if data.recall.state=="PACK_RECALL" and mh==16 and fh==4 and nh==4 then
+            if data.recall.state=="PACK_RECALL" and mh==tm and fh==tf and nh==tn then
                 data.recall.state="PACK_CLEAR"
                 save()
             elseif data.recall.state=="PACK_CLEAR" then
                 local ready=0
+                local expectedReady=0
+                local collectorId=data.recall.targets.miners[WORKER_COUNT]
                 for _,id in pairs(data.recall.targets.miners) do
-                    if id~=data.recall.targets.miners[16] and data.recall.packReady[id] then ready=ready+1 end
+                    if id~=collectorId then
+                        expectedReady=expectedReady+1
+                        if data.recall.packReady[id] then ready=ready+1 end
+                    end
                 end
                 for _,id in pairs(data.recall.targets.foremen) do
+                    expectedReady=expectedReady+1
                     if data.recall.packReady[id] then ready=ready+1 end
                 end
                 for _,id in pairs(data.recall.targets.navigators) do
+                    expectedReady=expectedReady+1
                     if data.recall.packReady[id] then ready=ready+1 end
                 end
-                if ready==23 then
+                if ready==expectedReady then
                     data.recall.state="PACK_COLLECT"
                     data.recall.collectAfter=now()+2
                     save()
@@ -1540,7 +1548,7 @@ local function runRegionalManager()
 
         local foremen,miners=registeredCounts()
 
-        if foremen<4 or miners<16 then
+        if foremen<FOREMAN_COUNT or miners<WORKER_COUNT then
             return false
         end
 
@@ -1563,6 +1571,21 @@ local function runRegionalManager()
         },nil,true)
 
         return true
+    end
+
+    local function mergeStatusEntry(registry,key,sender,message)
+        local entry=registry[key] or {}
+        entry.recovery=nil
+        entry.message=nil
+        entry.request=nil
+        entry.advanceStage=nil
+        entry.setupMissing=nil
+        entry.packMissing=nil
+        for k,v in pairs(message) do entry[k]=v end
+        entry.id=sender
+        entry.lastSeen=now()
+        registry[key]=entry
+        return entry
     end
 
     local function announceManagerOnline()
@@ -2185,21 +2208,11 @@ local function runRegionalManager()
                     data.nodes[sender]=node
 
                     if message.role=="foreman" and message.number then
-                        data.foremen[message.number]=data.foremen[message.number] or {}
-                        for k,v in pairs(message) do data.foremen[message.number][k]=v end
-                        data.foremen[message.number].id=sender
-                        data.foremen[message.number].lastSeen=now()
+                        mergeStatusEntry(data.foremen,tonumber(message.number),sender,message)
                     elseif message.role=="miner" and message.row then
-                        data.miners[message.row]=data.miners[message.row] or {}
-                        for k,v in pairs(message) do data.miners[message.row][k]=v end
-                        data.miners[message.row].id=sender
-                        data.miners[message.row].lastSeen=now()
+                        mergeStatusEntry(data.miners,tonumber(message.row),sender,message)
                     elseif message.role=="navigator" and message.number then
-                        local n=tonumber(message.number)
-                        data.navigators[n]=data.navigators[n] or {}
-                        for k,v in pairs(message) do data.navigators[n][k]=v end
-                        data.navigators[n].id=sender
-                        data.navigators[n].lastSeen=now()
+                        mergeStatusEntry(data.navigators,tonumber(message.number),sender,message)
                     end
 
                     save()
