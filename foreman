@@ -3103,10 +3103,16 @@ local function runForeman(cfg)
             return false
         end
 
-        local needFloppies = 1 - selfCount("floppy")
-        if needFloppies > 0 and takeNamedIntoSelf("floppy",needFloppies) < needFloppies then
-            state.setupBlockReason="Cannot pull a floppy from the Black Blue Blue supply chest"
-            return false
+        local needFloppies = 1 - selfCount("worker_floppy")
+        if needFloppies > 0 then
+            local moved=takeNamedIntoSelf("worker_floppy",needFloppies)
+            if moved<needFloppies and selfCount("floppy")<1 then
+                moved=moved+takeNamedIntoSelf("floppy",needFloppies-moved)
+            end
+            if selfCount("floppy")<1 then
+                state.setupBlockReason="Cannot pull a quarry worker floppy from the Black Blue Blue supply chest"
+                return false
+            end
         end
 
         local needLoaders = 2 - selfCount("chunk_loader")
@@ -3169,6 +3175,95 @@ local function runForeman(cfg)
         end
         state.setupBlockReason=nil
         return true
+    end
+
+    local function mountedWorkerInstaller()
+        if not disk.isPresent("front") then return false end
+        if not fs.exists("disk") or not fs.isDir("disk") then return false end
+        if fs.exists("disk/update") then return false end
+        if not fs.exists("disk/startup") then return false end
+        local f=fs.open("disk/startup","r")
+        if not f then return false end
+        local data=f.readAll()
+        f.close()
+        local expected=tostring(data or ""):match("EXPECTED_VERSION%s*=%s*(%d+)")
+        return tonumber(expected)==VERSION
+    end
+
+    local function workerFloppyCandidate(rejected)
+        rejected=rejected or {}
+        for pass=1,2 do
+            for slot=1,16 do
+                if not rejected[slot] and turtle.getItemCount(slot)>0 then
+                    local item=selfItem(slot)
+                    if item and matchesItem(item,"floppy") then
+                        local text=itemText(item)
+                        local isWorker=matchesItem(item,"worker_floppy") or
+                            string.find(text,"quarry worker",1,true)~=nil
+                        local isSetup=matchesItem(item,"setup_floppy") or
+                            string.find(text,"setup",1,true)~=nil
+                        if (pass==1 and isWorker) or (pass==2 and not isSetup) then
+                            return slot
+                        end
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function ensureWorkerInstallerDisk()
+        local rejected={}
+        if disk.isPresent("front") then
+            if mountedWorkerInstaller() then return true end
+            local target=nil
+            for slot=1,16 do
+                if turtle.getItemCount(slot)==0 then target=slot break end
+            end
+            if not target then
+                state.setupBlockReason="Foreman-1 has no free slot to recover a non-worker bootstrap disk"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            turtle.select(target)
+            if not turtle.suck(1) then
+                state.setupBlockReason="Foreman-1 could not recover a non-worker bootstrap disk"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            rejected[target]=true
+        end
+
+        while true do
+            local slot=workerFloppyCandidate(rejected)
+            if not slot then
+                state.setupBlockReason="Foreman-1 needs a quarry worker disk, not the setup disk"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            turtle.select(slot)
+            if not turtle.drop(1) then
+                state.setupBlockReason="Foreman-1 could not insert a quarry worker disk"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            waitFrontDisk(1)
+            if mountedWorkerInstaller() then
+                return true
+            end
+            turtle.select(slot)
+            if not turtle.suck(1) then
+                state.setupBlockReason="Foreman-1 inserted a non-worker disk and could not recover it"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            rejected[slot]=true
+        end
     end
 
     local function masterPlaceBootstrapInstaller()
@@ -3246,24 +3341,10 @@ local function runForeman(cfg)
             return false
         end
 
-        if not disk.isPresent("front") then
-            if not selfSelectKind("floppy") then
-                ensureGroundLevel()
-                return false
-            end
-
-            if not turtle.drop(1) then
-                ensureGroundLevel()
-                return false
-            end
-            waitFrontDisk(1)
-        end
-
-        if not disk.isPresent("front") then
+        if not ensureWorkerInstallerDisk() then
             ensureGroundLevel()
-            state.phase="PLACEMENT_ERROR"
+            state.phase="WAITING_SUPPLIES"
             saveState()
-            sendState("Bootstrap floppy verification failed")
             return false
         end
 

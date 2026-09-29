@@ -1,5 +1,5 @@
-local VERSION=114
-local SEED_PROTOCOL="miner_swarm_seed_v114"
+local VERSION=115
+local SEED_PROTOCOL="miner_swarm_seed_v115"
 
 local function writeFile(path,data)
     local f=fs.open(path,"w")
@@ -61,21 +61,22 @@ while not acknowledged do
     end
 end
 
-if disk.isPresent("top") then
-    if not turtle.suckUp(1) then error("Could not retrieve setup disk from the overhead drive") end
-end
-if disk.isPresent("top") then error("Setup disk is still present in the overhead drive") end
-
-print("Setup disk secured.")
-print("Waiting for Regional Manager reboot...")
+print("Installation complete and setup disk released to Regional Manager.")
+print("Waiting for installer cleanup and reboot...")
 
 while true do
     if openSeedNetwork() then
         rednet.broadcast({
-            type="seed_master_disk_clear",
+            type="seed_master_cleanup_ready",
             version=VERSION,
             id=os.getComputerID()
         },SEED_PROTOCOL)
+        local sender,message=rednet.receive(SEED_PROTOCOL,1)
+        if sender and type(message)=="table" and message.type=="seed_master_cleanup_done" and
+            tonumber(message.target)==os.getComputerID() and tonumber(message.version)==VERSION then
+            print("Installer recovered by Regional Manager.")
+        end
+    else
+        sleep(1)
     end
-    sleep(1)
 end

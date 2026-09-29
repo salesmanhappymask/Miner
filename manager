@@ -1,4 +1,4 @@
-local SEED_PROTOCOL="miner_swarm_seed_v114"
+local SEED_PROTOCOL="miner_swarm_seed_v115"
 
 local function runManagerSeedBootstrap()
     local seed=loadTable("manager_seed.cfg")
@@ -320,11 +320,109 @@ local function runManagerSeedBootstrap()
         end
         if not ready then error("Master Foreman setup disk did not report installation complete") end
         rednet.send(seed.masterId,{type="seed_master_ack",target=seed.masterId},SEED_PROTOCOL)
-        seed.phase="MASTER_READY"
+        seed.phase="MASTER_ACKED"
         saveSeed()
     end
 
-    if seed.phase=="MASTER_READY" then
+    if seed.phase=="MASTER_ACKED" then
+        if not openSeedNetwork() then error("Regional Manager wireless modem is unavailable") end
+        show("Waiting for Master Foreman installer cleanup handoff")
+        local ready=false
+        local deadline=now()+30
+        while now()<deadline and not ready do
+            local sender,message=rednet.receive(SEED_PROTOCOL,1)
+            if tonumber(sender)==tonumber(seed.masterId) and type(message)=="table" then
+                if message.type=="seed_master_cleanup_ready" and tonumber(message.version)==VERSION then
+                    ready=true
+                elseif message.type=="seed_master_ready" and tonumber(message.version)==VERSION then
+                    rednet.send(seed.masterId,{type="seed_master_ack",target=seed.masterId},SEED_PROTOCOL)
+                end
+            end
+        end
+        if not ready then error("Master Foreman did not release the setup drive for Regional Manager cleanup") end
+        seed.phase="INSTALLER_ASCEND"
+        saveSeed()
+    end
+
+    if seed.phase=="INSTALLER_ASCEND" then
+        local frontType=peripheral.getType("front")
+        local okId,idFront=pcall(peripheral.call,"front","getID")
+        if frontType=="drive" then
+            seed.y=1
+        elseif okId and tonumber(idFront)==tonumber(seed.masterId) then
+            if not turtle.up() then error("Regional Manager could not rise to the bootstrap Disk Drive") end
+            seed.y=1
+            sleep(0.2)
+        else
+            error("Regional Manager cannot reconcile the Master Foreman installer cleanup position")
+        end
+        if peripheral.getType("front")~="drive" then
+            error("Bootstrap Disk Drive is not in front of the Regional Manager at cleanup height")
+        end
+        seed.phase="INSTALLER_LEVEL"
+        saveSeed()
+    end
+
+    if seed.phase=="INSTALLER_LEVEL" then
+        if not seed.setupDiskRecovered then
+            if disk.isPresent("front") then
+                if turtle.getItemCount(seed.setupDiskSlot)>0 then
+                    error("Reserved setup disk slot is occupied before recovery")
+                end
+                turtle.select(seed.setupDiskSlot)
+                if not turtle.suck(1) then error("Regional Manager could not recover the Master Foreman setup disk") end
+                sleep(0.2)
+            end
+            if disk.isPresent("front") or turtle.getItemCount(seed.setupDiskSlot)<=0 then
+                error("Master Foreman setup disk recovery could not be verified")
+            end
+            seed.setupDiskRecovered=true
+            saveSeed()
+        end
+        if not seed.driveRecovered then
+            if peripheral.getType("front")=="drive" then
+                if turtle.getItemCount(seed.driveSlot)>0 then
+                    error("Reserved Disk Drive slot is occupied before recovery")
+                end
+                turtle.select(seed.driveSlot)
+                if not turtle.dig() then error("Regional Manager could not recover the bootstrap Disk Drive") end
+                sleep(0.2)
+            end
+            if peripheral.getType("front")=="drive" or turtle.getItemCount(seed.driveSlot)<=0 then
+                error("Bootstrap Disk Drive recovery could not be verified")
+            end
+            seed.driveRecovered=true
+            saveSeed()
+        end
+        seed.phase="INSTALLER_DESCEND"
+        saveSeed()
+    end
+
+    if seed.phase=="INSTALLER_DESCEND" then
+        local okId,idFront=pcall(peripheral.call,"front","getID")
+        if okId and tonumber(idFront)==tonumber(seed.masterId) then
+            seed.y=0
+        else
+            if not turtle.down() then error("Regional Manager could not descend after recovering the bootstrap installer") end
+            seed.y=0
+            sleep(0.2)
+        end
+        local okMaster,masterFront=pcall(peripheral.call,"front","getID")
+        if not okMaster or tonumber(masterFront)~=tonumber(seed.masterId) then
+            error("Master Foreman is not in front of the Regional Manager after installer cleanup")
+        end
+        seed.phase="MASTER_HANDOFF"
+        saveSeed()
+    end
+
+    if seed.phase=="MASTER_HANDOFF" then
+        if not seed.driveTransferred then
+            if turtle.getItemCount(seed.driveSlot)<=0 then error("Recovered bootstrap Disk Drive is missing") end
+            turtle.select(seed.driveSlot)
+            if not turtle.drop(1) then error("Regional Manager could not hand the Disk Drive to Foreman-1") end
+            seed.driveTransferred=true
+            saveSeed()
+        end
         if not seed.masterLavaTransferred then
             if turtle.getItemCount(seed.masterLavaSlot)<=0 then error("Master Foreman lava bucket is missing") end
             turtle.select(seed.masterLavaSlot)
@@ -332,20 +430,8 @@ local function runManagerSeedBootstrap()
             seed.masterLavaTransferred=true
             saveSeed()
         end
-        if not seed.setupDiskCleared then
-            if not openSeedNetwork() then error("Regional Manager wireless modem is unavailable") end
-            local cleared=false
-            local deadline=now()+30
-            while now()<deadline and not cleared do
-                local sender,message=rednet.receive(SEED_PROTOCOL,1)
-                if tonumber(sender)==tonumber(seed.masterId) and type(message)=="table" and
-                    message.type=="seed_master_disk_clear" and tonumber(message.version)==VERSION then
-                    cleared=true
-                end
-            end
-            if not cleared then error("Master Foreman did not secure its setup disk before reboot") end
-            seed.setupDiskCleared=true
-            saveSeed()
+        if openSeedNetwork() then
+            rednet.send(seed.masterId,{type="seed_master_cleanup_done",target=seed.masterId,version=VERSION},SEED_PROTOCOL)
         end
         local ok=pcall(peripheral.call,"front","reboot")
         if not ok then
@@ -402,7 +488,7 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
-    local OBSERVER_PROTOCOL="miner_swarm_monitor_v114"
+    local OBSERVER_PROTOCOL="miner_swarm_monitor_v115"
     local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send
