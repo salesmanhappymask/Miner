@@ -9,7 +9,7 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
-    local OBSERVER_PROTOCOL="miner_swarm_monitor_v110"
+    local OBSERVER_PROTOCOL="miner_swarm_monitor_v111"
     local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send
@@ -1230,6 +1230,7 @@ local function runRegionalManager()
         local packet={
             type="recall_command",
             mode=mode,
+            packToken=mode=="PACK" and data.recall.packToken or nil,
             session=data.session
         }
         local count=0
@@ -1277,6 +1278,28 @@ local function runRegionalManager()
             session=data.session,
             reason="DUMP_SERVICE"
         },"foreman",false)
+    end
+
+    local function sendPackDumpRecall()
+        local minerPacket={
+            type="recall_command",
+            mode="PACK",
+            dumpBeforePack=true,
+            packToken=data.recall.packToken,
+            session=data.session
+        }
+        for row,id in pairs(data.recall.targets.miners or {}) do
+            if id and not data.recall.emptied[row] then
+                send(id,minerPacket)
+            end
+        end
+        if not data.recall.waitCollectors then
+            for n,id in pairs(data.recall.targets.navigators or {}) do
+                if id and n~=1 and n~=3 and not data.recall.homeNavigators[n] then
+                    send(id,{type="recall_command",mode="PACK",packToken=data.recall.packToken,session=data.session})
+                end
+            end
+        end
     end
 
     local function sendDumpFinalRecall()
@@ -1333,6 +1356,7 @@ local function runRegionalManager()
 
     local function driveRecallLoaderHandoff(mh,fh,empty,tm,tf)
         if not data.recall.loaderRequired or data.recall.loaderPhase=="DONE" then return end
+        if data.recall.mode=="PACK" and not data.recall.packDumpComplete then return end
         if data.recall.loaderPhase=="WAIT_OTHERS" then
             local ready=mh>=tm and fh>=tf and otherRecallNavigatorsHome()
             if data.recall.mode=="DUMP" then
@@ -1440,8 +1464,11 @@ local function runRegionalManager()
 
         resumeUntil=0
         if abortingAdvance then data.advance=nil end
+        data.recallSequence=(tonumber(data.recallSequence) or 0)+1
+        local recallToken=data.recallSequence
+        local skipPackDump=mode=="PACK" and options.skipPackDump==true
         data.recall={
-            state=mode=="DUMP" and "DUMP_RECALLING" or (mode=="SHUTDOWN" and "SHUTDOWN_RECALL" or (mode=="PACK" and "PACK_RECALL" or "RECALLING")),
+            state=mode=="DUMP" and "DUMP_RECALLING" or (mode=="SHUTDOWN" and "SHUTDOWN_RECALL" or (mode=="PACK" and (skipPackDump and "PACK_RECALL" or "PACK_DUMP") or "RECALLING")),
             mode=mode,
             active=true,
             homeMiners={},
@@ -1455,6 +1482,8 @@ local function runRegionalManager()
             packCollected=0,
             packMissing={},
             packError=nil,
+            packToken=mode=="PACK" and recallToken or nil,
+            packDumpComplete=mode=="PACK" and skipPackDump and true or nil,
             waitCollectors=cancelledPhase=="COLLECT_M" and true or nil,
             loaderRequired=data.commissioningComplete and targets.navigators[1]~=nil and targets.navigators[3]~=nil and true or false,
             loaderPhase=(data.commissioningComplete and targets.navigators[1]~=nil and targets.navigators[3]~=nil) and "WAIT_OTHERS" or "DONE",
@@ -1477,6 +1506,9 @@ local function runRegionalManager()
         if mode=="DUMP" then
             wakeForemenForDump()
             sendRecallToNodes("DUMP",true)
+        elseif mode=="PACK" and not skipPackDump then
+            wakeForemenForDump()
+            sendPackDumpRecall()
         else
             sendRecallToNodes(mode,false)
         end
@@ -1564,7 +1596,11 @@ local function runRegionalManager()
             if ready then
                 data.recall.waitCollectors=nil
                 save()
-                sendRecallToNodes(data.recall.mode,false)
+                if data.recall.mode=="PACK" and data.recall.state=="PACK_DUMP" then
+                    sendPackDumpRecall()
+                else
+                    sendRecallToNodes(data.recall.mode,false)
+                end
             end
         end
 
@@ -1575,6 +1611,14 @@ local function runRegionalManager()
             sendDumpFinalRecall()
             lastRecall=now()
             save()
+        elseif data.recall.mode=="PACK" and data.recall.state=="PACK_DUMP" and
+            mh>=tm and empty>=tm and not data.recall.packDumpComplete then
+            data.recall.packDumpComplete=true
+            data.recall.foremenFinalizing=true
+            data.recall.state="PACK_RECALL"
+            save()
+            sendRecallToNodes("PACK",false)
+            lastRecall=now()
         end
 
         driveRecallLoaderHandoff(mh,fh,empty,tm,tf)
@@ -1587,7 +1631,7 @@ local function runRegionalManager()
                 data.recall.active=false
                 save()
                 if continuePacking then
-                    beginRecall("DUMP",{packAfterDump=true})
+                    beginRecall("PACK",{allowAdvanceAbort=true})
                 end
             end
         elseif data.recall.mode=="DUMP" then
@@ -1596,7 +1640,7 @@ local function runRegionalManager()
                 data.recall.state="DUMP_RECALLED_PAUSED"
                 data.recall.active=false
                 save()
-                if continuePacking then beginRecall("PACK",{allowAdvanceAbort=true}) end
+                if continuePacking then beginRecall("PACK",{allowAdvanceAbort=true,skipPackDump=true}) end
             end
         elseif data.recall.mode=="SHUTDOWN" then
             if shut>=(tm+tf+tn) then
@@ -2316,15 +2360,15 @@ local function runRegionalManager()
                         data.recall.packAfterDump=true
                         save()
                     else
-                        beginRecall("PACK")
+                        beginRecall("PACK",{allowAdvanceAbort=true,skipPackDump=true})
                     end
                 elseif data.recall.mode=="NORMAL" and data.recall.active then
                     data.recall.packAfterRecall=true
                     save()
                 elseif data.advance then
-                    beginRecall("NORMAL",{packAfterRecall=true})
+                    beginRecall("PACK",{allowAdvanceAbort=true})
                 else
-                    beginRecall("DUMP",{packAfterDump=true})
+                    beginRecall("PACK",{allowAdvanceAbort=true})
                 end
             end
         elseif command=="4" then
@@ -2676,7 +2720,9 @@ local function runRegionalManager()
                 elseif message.type=="recall_dump_empty" and message.session==data.session and message.row then
                     local row=tonumber(message.row)
                     local miner=data.miners[row]
-                    if data.recall.mode=="DUMP" and miner and miner.id==sender and
+                    local acceptingDump=data.recall.mode=="DUMP" or
+                        (data.recall.mode=="PACK" and data.recall.state=="PACK_DUMP")
+                    if acceptingDump and miner and miner.id==sender and
                         message.x==row and message.y==0 and message.z==0 and message.dir==DIR_N then
                         data.recall.emptied[row]=true
                         save()
@@ -2849,7 +2895,8 @@ local function runRegionalManager()
             end
 
             if now()-lastDispatch>=0.5 and
-                (data.recall.state=="NORMAL" or data.recall.state=="DUMP_RECALLING") then
+                (data.recall.state=="NORMAL" or data.recall.state=="DUMP_RECALLING" or
+                 data.recall.state=="PACK_DUMP") then
                 dispatchJobs()
                 lastDispatch=now()
             end
@@ -2866,7 +2913,10 @@ local function runRegionalManager()
                         sendRecallToNodes("DUMP",true)
                     end
                 elseif data.recall.mode=="PACK" then
-                    if data.recall.state=="PACK_RECALL" then
+                    if data.recall.state=="PACK_DUMP" then
+                        wakeForemenForDump()
+                        sendPackDumpRecall()
+                    elseif data.recall.state=="PACK_RECALL" then
                         sendRecallToNodes("PACK",false)
                     elseif data.recall.state=="PACK_CLEAR" then
                         sendPackClear()

@@ -1211,6 +1211,18 @@ local function runMiner(cfg)
                             })
                         elseif message.type == "recall_command" then
                             local incomingMode=message.mode or "NORMAL"
+                            if incomingMode=="PACK" then
+                                local incomingToken=tonumber(message.packToken)
+                                if incomingToken and incomingToken~=tonumber(state.packToken) then
+                                    state.packToken=incomingToken
+                                    state.packDumpComplete=nil
+                                    state.packDumpRequested=nil
+                                end
+                                if message.dumpBeforePack==true and not state.packDumpComplete then
+                                    state.packDumpRequested=true
+                                end
+                                save()
+                            end
                             if incomingMode=="NORMAL" or incomingMode=="DUMP" or
                                 incomingMode=="SHUTDOWN" or incomingMode=="PACK" then
                                 flags.advanceCancelled=true
@@ -2208,6 +2220,7 @@ local function runMiner(cfg)
         flags.serviceComplete=false
         local wasFinal=state.request.finalService and true or false
         local wasRecallDump=state.request.recallDump and true or false
+        local wasPackDump=state.request.packDump and true or false
         state.lastCompletedRequest=state.request.id
         state.request=nil
         save()
@@ -2219,7 +2232,9 @@ local function runMiner(cfg)
 
         if wasRecallDump then
             state.phase="RECALLED_PAUSED"
-            state.recallMode="DUMP"
+            state.recallMode=wasPackDump and "PACK" or "DUMP"
+            state.packDumpRequested=nil
+            if wasPackDump then state.packDumpComplete=true end
             face(DIR_N)
             save()
             checkpoint()
@@ -2228,13 +2243,14 @@ local function runMiner(cfg)
                 role="miner",
                 row=state.row,
                 id=os.getComputerID(),
+                mode=state.recallMode,
                 x=state.x,
                 y=state.y,
                 z=state.z,
                 dir=state.dir,
                 session=cfg.session
             })
-            sendState("Dump recall complete; paused at home")
+            sendState(wasPackDump and "Pack dump complete; paused at home" or "Dump recall complete; paused at home")
             return true
         end
 
@@ -2270,6 +2286,32 @@ local function runMiner(cfg)
             return false
         end
         if state.seq>incoming then checkpoint() end
+        return true
+    end
+
+    local function stagePackDumpAtHome()
+        if state.recallMode~="PACK" or not state.packDumpRequested then return false end
+        if state.x~=cfg.homeX or state.y~=cfg.homeY or state.z~=cfg.homeZ then return false end
+        if not state.request then
+            state.requestSeq=(state.requestSeq or 0)+1
+            state.request={
+                id=tostring(os.getComputerID()) .. ":pack:" .. tostring(state.requestSeq),
+                kind="DUMP",
+                finalService=false,
+                recallDump=true,
+                packDump=true
+            }
+        else
+            state.request.recallDump=true
+            state.request.packDump=true
+            state.request.finalService=false
+            if state.request.kind=="REFUEL" then state.request.kind="BOTH" end
+        end
+        state.packDumpRequested=nil
+        state.phase="WAITING_SERVICE"
+        save()
+        requestPacket(true)
+        sendState("Pack dump waiting for Foreman-"..tostring(cfg.foremanNumber))
         return true
     end
 
@@ -2378,6 +2420,15 @@ local function runMiner(cfg)
             requestPacket(true)
             state.phase="WAITING_SERVICE"
             save()
+        elseif mode=="PACK" and state.packDumpRequested then
+            if not stagePackDumpAtHome() then
+                state.phase="RECOVERY_LOCK"
+                state.recoveryLocked=true
+                state.recoveryReason="Pack dump could not be staged at miner home"
+                save()
+                sendState(state.recoveryReason)
+                return false
+            end
         elseif mode=="SHUTDOWN" then
             for i=1,5 do
                 os.setComputerLabel(nil)
@@ -2486,7 +2537,10 @@ local function runMiner(cfg)
 
     local function waitRecalledPause()
         while state.phase=="RECALLED_PAUSED" do
-            if flags.packCollect and cfg.row==WORKER_COUNT and state.recallMode=="PACK" then
+            if state.packDumpRequested and state.recallMode=="PACK" then
+                if not stagePackDumpAtHome() then return false end
+                return true
+            elseif flags.packCollect and cfg.row==WORKER_COUNT and state.recallMode=="PACK" then
                 flags.packCollect=false
                 if not collectPackedMiners() then
                     return state.phase=="PACK_BLOCKED"
