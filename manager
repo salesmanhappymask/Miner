@@ -9,7 +9,7 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
-    local OBSERVER_ID=1633
+    local OBSERVER_PROTOCOL="miner_swarm_monitor_v102"
     local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send
@@ -592,9 +592,8 @@ local function runRegionalManager()
     end
 
     local function sendObserverSnapshot(force)
-        if not OBSERVER_ID or OBSERVER_ID==managerId then return end
         if not force and now()-lastObserverSend<1 then return end
-        send(OBSERVER_ID,observerSnapshot())
+        rednet.broadcast(observerSnapshot(),OBSERVER_PROTOCOL)
         lastObserverSend=now()
     end
 

@@ -1,9 +1,4 @@
-local EXPECTED_ID=1633
-local PROTOCOL="miner_swarm_v100"
-
-if os.getComputerID()~=EXPECTED_ID then
-    error("This wireless monitor is assigned to computer ID "..EXPECTED_ID)
-end
+local PROTOCOL="miner_swarm_monitor_v102"
 
 local function openNetwork()
     local opened=false
@@ -63,7 +58,7 @@ local function draw()
     surface.setTextColor(colors.white)
     surface.clear()
     local stale=not snapshot or os.clock()-lastSeen>5
-    writeAt(surface,1,1,"WIRELESS REGIONAL MANAGER  v"..tostring(snapshot and snapshot.version or "?"),colors.lightBlue,colors.gray,w)
+    writeAt(surface,1,1,"WIRELESS REGIONAL MANAGER  v"..tostring(snapshot and snapshot.version or "?").."  ID "..tostring(os.getComputerID()),colors.lightBlue,colors.gray,w)
     if not snapshot then
         writeAt(surface,2,3,"Waiting for Regional Manager feed...",colors.orange,colors.black,w-2)
         return

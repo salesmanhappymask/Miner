@@ -119,25 +119,18 @@ local function runMinerCommissioning(cfg)
             state.orientationAnchor=nil
         end
 
-        local foremanSide=nil
-        for _,side in ipairs({"back","left","front","right"}) do
-            local ok,adjacent=pcall(peripheral.call,side,"getID")
-            if ok and tonumber(adjacent)==tonumber(cfg.foremanId) then
-                foremanSide=side
-                break
-            end
+        local startDir=tonumber(cfg.detectedStartDir)
+        if startDir==nil then
+            startDir=cfg.placementSupported and DIR_N or DIR_S
         end
-
-        if not foremanSide then
-            state.orientationTurns=0
-            state.recoveryReason="Foreman-"..tostring(cfg.foremanNumber)..
-                " is not detectable beside Miner-"..tostring(cfg.row).." during deployment"
+        if startDir<DIR_N or startDir>DIR_W then
+            state.recoveryReason="Miner placement orientation metadata is invalid"
             save()
             return false
         end
 
-        local turns={back=0,left=1,front=2,right=3}
-        local needed=turns[foremanSide] or 0
+        state.dir=startDir
+        local needed=(DIR_N-state.dir)%4
         state.orientationTurns=0
 
         for i=1,needed do
@@ -151,7 +144,7 @@ local function runMinerCommissioning(cfg)
             if not turtle.turnRight() then
                 state.orientationTurnIntent=nil
                 state.recoveryReason="Could not turn Miner-"..tostring(cfg.row)..
-                    " while aligning north"
+                    " while aligning north from recorded placement orientation"
                 save()
                 return false
             end
