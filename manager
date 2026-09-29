@@ -9,7 +9,7 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
-    local OBSERVER_PROTOCOL="miner_swarm_monitor_v108"
+    local OBSERVER_PROTOCOL="miner_swarm_monitor_v109"
     local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send
@@ -505,6 +505,10 @@ local function runRegionalManager()
         end
         local line=string.format("%s  M %d/%d  F %d/%d  GPS %d/%d  Empty %d/%d",
             tostring(r.state),mh,tm,fh,tf,nh,tn,empty,tm)
+        if r.loaderRequired and r.loaderPhase and r.loaderPhase~="DONE" then
+            line=line.."  Loader:"..tostring(r.loaderPhase)
+            if r.loaderError then line=line.." STOP:"..tostring(r.loaderError) end
+        end
         if r.mode=="PACK" then
             local m=data.miners[16]
             local collected=tonumber(r.packCollected) or (m and m.state=="PACK_COLLECT" and WORKER_COUNT-(tonumber(m.x) or WORKER_COUNT)) or 0
@@ -978,7 +982,10 @@ local function runRegionalManager()
             send(sender,{type="recall_command",mode="SHUTDOWN",session=data.session})
         elseif data.recall.mode=="PACK" then
             if data.recall.state=="PACK_RECALL" then
-                send(sender,{type="recall_command",mode="PACK",session=data.session})
+                local n=message.role=="navigator" and tonumber(message.number) or nil
+                if not (data.recall.loaderRequired and data.recall.loaderPhase~="DONE" and (n==1 or n==3)) then
+                    send(sender,{type="recall_command",mode="PACK",session=data.session})
+                end
             elseif data.recall.state=="PACK_CLEAR" and sender~=data.recall.targets.miners[WORKER_COUNT] then
                 send(sender,{type="pack_clear",session=data.session})
             elseif data.recall.state=="PACK_COLLECT" and sender==data.recall.targets.miners[WORKER_COUNT] and
@@ -986,7 +993,9 @@ local function runRegionalManager()
                 send(sender,{type="pack_collect",session=data.session})
             end
         elseif data.recall.active then
-            if data.recall.mode~="DUMP" or message.role=="miner" then
+            local n=message.role=="navigator" and tonumber(message.number) or nil
+            local stagedLoader=data.recall.loaderRequired and data.recall.loaderPhase~="DONE" and (n==1 or n==3)
+            if not stagedLoader and (data.recall.mode~="DUMP" or message.role=="miner") then
                 send(sender,{type="recall_command",mode=data.recall.mode,session=data.session})
             end
         elseif data.swarmStarted then
@@ -1237,6 +1246,8 @@ local function runRegionalManager()
             if (role=="foreman" or role=="navigator") and
                 data.recall.waitCollectors then return end
             local index=tonumber(role=="miner" and entry.row or entry.number)
+            if role=="navigator" and data.recall.loaderRequired and data.recall.loaderPhase~="DONE" and
+                (index==1 or index==3) then return end
             if mode=="PACK" and role=="foreman" and index~=packForemanTarget then return end
             local home=role=="miner" and data.recall.homeMiners or
                 (role=="foreman" and data.recall.homeForemen or data.recall.homeNavigators)
@@ -1280,8 +1291,61 @@ local function runRegionalManager()
         end)
         forEachKnownNode("navigator",function(id,role,entry)
             local n=tonumber(entry.number)
+            if data.recall.loaderRequired and data.recall.loaderPhase~="DONE" and (n==1 or n==3) then return end
             if not n or not data.recall.homeNavigators[n] then send(id,packet) end
         end)
+    end
+
+    local function sendRecallLoaderStage()
+        if not data.recall.active or not data.recall.loaderRequired then return end
+        local phase=data.recall.loaderPhase
+        local n=nil
+        local action=nil
+        if phase=="N1_HOME_ANCHOR" then n=1 action="N1_HOME_ANCHOR"
+        elseif phase=="N3_HOME" then n=3 action="N3_HOME"
+        elseif phase=="N1_COLLECT_HOME" then n=1 action="N1_COLLECT_HOME"
+        else return end
+        local id=data.recall.targets.navigators[n]
+        if not id then
+            data.recall.loaderError="Navigator-"..tostring(n).." is not registered for recall loader handoff"
+            save()
+            return
+        end
+        local nav=data.navigators[n]
+        if not nav or not online(nav,20) then
+            data.recall.loaderError="Navigator-"..tostring(n).." is offline during recall Chunk Loader handoff"
+            save()
+        end
+        send(id,{
+            type="recall_loader_command",
+            action=action,
+            mode=data.recall.mode,
+            session=data.session
+        })
+    end
+
+    local function otherRecallNavigatorsHome()
+        for n,id in pairs(data.recall.targets.navigators or {}) do
+            if n~=1 and n~=3 and id and not data.recall.homeNavigators[n] then return false end
+        end
+        return true
+    end
+
+    local function driveRecallLoaderHandoff(mh,fh,empty,tm,tf)
+        if not data.recall.loaderRequired or data.recall.loaderPhase=="DONE" then return end
+        if data.recall.loaderPhase=="WAIT_OTHERS" then
+            local ready=mh>=tm and fh>=tf and otherRecallNavigatorsHome()
+            if data.recall.mode=="DUMP" then
+                ready=ready and empty>=tm and data.recall.foremenFinalizing==true
+            end
+            if ready then
+                data.recall.loaderPhase="N1_HOME_ANCHOR"
+                data.recall.loaderError=nil
+                save()
+                sendRecallLoaderStage()
+                lastRecall=now()
+            end
+        end
     end
 
     local function sendPackClear()
@@ -1392,6 +1456,9 @@ local function runRegionalManager()
             packMissing={},
             packError=nil,
             waitCollectors=cancelledPhase=="COLLECT_M" and true or nil,
+            loaderRequired=data.commissioningComplete and targets.navigators[1]~=nil and targets.navigators[3]~=nil and true or false,
+            loaderPhase=(data.commissioningComplete and targets.navigators[1]~=nil and targets.navigators[3]~=nil) and "WAIT_OTHERS" or "DONE",
+            loaderError=nil,
             targets=targets
         }
 
@@ -1503,6 +1570,16 @@ local function runRegionalManager()
 
         local mh,fh,nh,empty,shut,tm,tf,tn=recallCounts()
 
+        if data.recall.mode=="DUMP" and mh>=tm and empty>=tm and not data.recall.foremenFinalizing then
+            data.recall.foremenFinalizing=true
+            sendDumpFinalRecall()
+            lastRecall=now()
+            save()
+        end
+
+        driveRecallLoaderHandoff(mh,fh,empty,tm,tf)
+        if data.recall.loaderRequired and data.recall.loaderPhase~="DONE" then return end
+
         if data.recall.mode=="NORMAL" then
             if mh>=tm and fh>=tf and nh>=tn then
                 local continuePacking=data.recall.packAfterRecall
@@ -1514,19 +1591,12 @@ local function runRegionalManager()
                 end
             end
         elseif data.recall.mode=="DUMP" then
-            if mh>=tm and empty>=tm then
-                if not data.recall.foremenFinalizing then
-                    data.recall.foremenFinalizing=true
-                    sendDumpFinalRecall()
-                    lastRecall=now()
-                    save()
-                elseif fh>=tf and nh>=tn then
-                    local continuePacking=data.recall.packAfterDump
-                    data.recall.state="DUMP_RECALLED_PAUSED"
-                    data.recall.active=false
-                    save()
-                    if continuePacking then beginRecall("PACK",{allowAdvanceAbort=true}) end
-                end
+            if mh>=tm and empty>=tm and data.recall.foremenFinalizing and fh>=tf and nh>=tn then
+                local continuePacking=data.recall.packAfterDump
+                data.recall.state="DUMP_RECALLED_PAUSED"
+                data.recall.active=false
+                save()
+                if continuePacking then beginRecall("PACK",{allowAdvanceAbort=true}) end
             end
         elseif data.recall.mode=="SHUTDOWN" then
             if shut>=(tm+tf+tn) then
@@ -2533,6 +2603,44 @@ local function runRegionalManager()
                         save()
                     end
 
+                elseif message.type=="recall_loader_blocked" and message.session==data.session and
+                    data.recall.active and data.recall.loaderRequired and message.number then
+                    local n=tonumber(message.number)
+                    if registeredNodeSender("navigator",n,sender) and (n==1 or n==3) then
+                        data.recall.loaderError="Navigator-"..tostring(n).." "..tostring(message.reason or "Chunk Loader recall blocked")
+                        save()
+                    end
+
+                elseif message.type=="recall_loader_ack" and message.session==data.session and
+                    data.recall.active and data.recall.loaderRequired and message.number then
+                    local n=tonumber(message.number)
+                    local home=n and NAVIGATOR_RECALL[n]
+                    local valid=home and registeredNodeSender("navigator",n,sender) and
+                        message.x==home.x and message.y==home.y and message.z==home.z and message.dir==DIR_N
+                    if valid and data.recall.loaderPhase=="N1_HOME_ANCHOR" and n==1 and
+                        message.action=="N1_HOME_ANCHOR" and message.loaderPlaced==true and message.loaderSite=="RECALL" then
+                        data.recall.homeNavigators[1]=true
+                        data.recall.loaderPhase="N3_HOME"
+                        data.recall.loaderError=nil
+                        save()
+                        sendRecallLoaderStage()
+                        lastRecall=now()
+                    elseif valid and data.recall.loaderPhase=="N3_HOME" and n==3 and
+                        message.action=="N3_HOME" and message.loaderPlaced==false and message.loaderCarried==true then
+                        data.recall.homeNavigators[3]=true
+                        data.recall.loaderPhase="N1_COLLECT_HOME"
+                        data.recall.loaderError=nil
+                        save()
+                        sendRecallLoaderStage()
+                        lastRecall=now()
+                    elseif valid and data.recall.loaderPhase=="N1_COLLECT_HOME" and n==1 and
+                        message.action=="N1_COLLECT_HOME" and message.loaderPlaced==false and message.loaderCarried==true then
+                        data.recall.homeNavigators[1]=true
+                        data.recall.loaderPhase="DONE"
+                        data.recall.loaderError=nil
+                        save()
+                    end
+
                 elseif message.type=="recall_home" and message.session==data.session and
                     data.recall.active and (message.mode==data.recall.mode or
                         (data.recall.mode=="DUMP" and message.mode=="NORMAL")) then
@@ -2747,7 +2855,10 @@ local function runRegionalManager()
             end
 
             if data.recall.active and now()-lastRecall>=3 then
-                if data.recall.mode=="DUMP" then
+                if data.recall.loaderRequired and data.recall.loaderPhase~="WAIT_OTHERS" and
+                    data.recall.loaderPhase~="DONE" then
+                    sendRecallLoaderStage()
+                elseif data.recall.mode=="DUMP" then
                     if data.recall.foremenFinalizing then
                         sendDumpFinalRecall()
                     else

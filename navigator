@@ -38,6 +38,15 @@ local function runNavigator(cfg)
     state.loaderExpected=cfg.loaderExpected and true or false
     state.loaderPlaced=state.loaderPlaced and true or false
     state.loaderSlot=tonumber(state.loaderSlot)
+    if state.loaderPlaced and not state.loaderSite then
+        local site=NAVIGATOR_SITES[tonumber(cfg.number)]
+        local home=NAVIGATOR_RECALL[tonumber(cfg.number)]
+        if site and state.x==site.x and state.y==site.y and state.z==site.z then
+            state.loaderSite="WORK"
+        elseif home and state.x==home.x and state.y==home.y and state.z==home.z then
+            state.loaderSite="RECALL"
+        end
+    end
     if state.awaitingLoader and state.loaderExpected and not state.loaderPlaced and not state.loaderSlot then
         local found=nil
         local multiple=false
@@ -65,6 +74,7 @@ local function runNavigator(cfg)
                 state.loaderPlaced=true
                 state.loaderSlot=nil
                 state.loaderChunk=state.chunkIndex
+                state.loaderSite=intent.loaderSite or state.loaderSite or "WORK"
             end
             state.loaderIntent=nil
             saveTableLight(statePath,state)
@@ -84,6 +94,7 @@ local function runNavigator(cfg)
                 state.loaderPlaced=false
                 state.loaderSlot=found
                 state.loaderChunk=nil
+                state.loaderSite=nil
             elseif total>before then
                 state.recoveryLocked=true
                 state.recoveryReason="Interrupted Chunk Loader recovery left an ambiguous inventory"
@@ -325,9 +336,13 @@ local function runNavigator(cfg)
         return found
     end
 
-    local function placeChunkLoader()
+    local function placeChunkLoader(loaderSite)
         if not state.loaderExpected then return true end
-        if state.loaderPlaced then return true end
+        loaderSite=loaderSite or "WORK"
+        if state.loaderPlaced then
+            if state.loaderSite==loaderSite then return true end
+            return false,"Chunk Loader is already deployed at "..tostring(state.loaderSite or "an unknown site")
+        end
         if not loaderInInventory() then
             return false,"Chunk Loader item 781 is not in Navigator inventory"
         end
@@ -335,7 +350,7 @@ local function runNavigator(cfg)
         local slot=state.loaderSlot
         local before=turtle.getItemCount(slot)
         state.loaderIntent={action="PLACE",slot=slot,countBefore=before,
-            chunkIndex=state.chunkIndex,x=state.x,y=state.y,z=state.z}
+            chunkIndex=state.chunkIndex,x=state.x,y=state.y,z=state.z,loaderSite=loaderSite}
         save()
         turtle.select(slot)
         local ok,reason=turtle.place()
@@ -348,6 +363,7 @@ local function runNavigator(cfg)
         state.loaderPlaced=true
         state.loaderSlot=nil
         state.loaderChunk=state.chunkIndex
+        state.loaderSite=loaderSite
         state.loaderIntent=nil
         save()
         face(DIR_N)
@@ -385,6 +401,7 @@ local function runNavigator(cfg)
         state.loaderPlaced=false
         state.loaderSlot=slot
         state.loaderChunk=nil
+        state.loaderSite=nil
         state.loaderIntent=nil
         save()
         face(DIR_N)
@@ -483,7 +500,7 @@ local function runNavigator(cfg)
         if not vertical(site.y) then return false end
 
         if state.loaderExpected then
-            local placed,reason=placeChunkLoader()
+            local placed,reason=placeChunkLoader("WORK")
             if not placed then
                 state.navigationError=reason
                 save()
@@ -513,63 +530,44 @@ local function runNavigator(cfg)
         return os.getComputerLabel()==nil
     end
 
-    local function recallNavigator(mode)
-        mode=mode or "NORMAL"
-
-        if state.loaderExpected and state.loaderPlaced then
-            local site=NAVIGATOR_SITES[tonumber(cfg.number)]
-            if not site or state.x~=site.x or state.y~=site.y or state.z~=site.z then
-                state.navigationError="Chunk Loader is deployed but Navigator is not at its loader site"
-                save()
-                return false
-            end
-            local recovered,reason=retrieveChunkLoader()
-            if not recovered then
-                state.navigationError=reason
-                save()
-                return false
-            end
-        end
-
+    local function moveToRecallHome()
         local target=NAVIGATOR_RECALL[tonumber(cfg.number)]
         if not target then return false end
         local targetX=target.x
         local targetY=target.y
         local targetZ=target.z
-
+        local extended=state.chunkTravel or state.z>16
+        if extended and not state.chunkTravel then
+            state.chunkTravel=true
+            save()
+        end
         local alreadyHome=
             state.x==targetX and
             state.y==targetY and
             state.z==targetZ
-
         if not alreadyHome then
             if not vertical(NAVIGATOR_CRUISE[cfg.number]) then return false end
-
             while state.x<targetX do
                 if not step(DIR_E) then return false end
             end
-
             while state.x>targetX do
                 if not step(DIR_W) then return false end
             end
-
             while state.z<targetZ do
                 if not step(DIR_N) then return false end
             end
-
             while state.z>targetZ do
                 if not step(DIR_S) then return false end
             end
-
-            if not vertical(targetY) then
-                return false
-            end
+            if not vertical(targetY) then return false end
         end
+        if not face(DIR_N) then return false end
+        state.chunkTravel=nil
+        save()
+        return true
+    end
 
-        if not face(DIR_N) then
-            return false
-        end
-
+    local function finishRecallHome(mode,allowShutdown)
         state.recalled=true
         state.recallMode=mode
         if mode=="PACK" then
@@ -577,7 +575,6 @@ local function runNavigator(cfg)
             state.packAcknowledged=nil
         end
         save()
-
         send(cfg.managerId,{
             type="recall_home",
             role="navigator",
@@ -588,10 +585,11 @@ local function runNavigator(cfg)
             y=state.y,
             z=state.z,
             dir=state.dir,
+            loaderPlaced=state.loaderPlaced and true or false,
+            loaderSite=state.loaderSite,
             session=cfg.session
         })
-
-        if mode=="SHUTDOWN" then
+        if mode=="SHUTDOWN" and allowShutdown then
             if not clearNavigatorLabel() then
                 status("navigator","RECOVERY_LOCK",{
                     number=cfg.number,
@@ -603,7 +601,6 @@ local function runNavigator(cfg)
                 })
                 return false
             end
-
             for shutdownAttempt=1,8 do
                 send(cfg.managerId,{
                     type="recall_shutdown_ready",
@@ -614,15 +611,145 @@ local function runNavigator(cfg)
                     y=state.y,
                     z=state.z,
                     dir=state.dir,
+                    loaderPlaced=state.loaderPlaced and true or false,
                     session=cfg.session
                 })
                 sleep(0.1)
             end
-
             os.shutdown()
         end
-
         return true
+    end
+
+    local function recallNavigator(mode)
+        mode=mode or "NORMAL"
+        if state.loaderExpected and state.loaderPlaced then
+            local recovered,reason=retrieveChunkLoader()
+            if not recovered then
+                state.navigationError=reason
+                save()
+                return false
+            end
+        end
+        if state.loaderExpected and not loaderInInventory() then
+            state.navigationError="Chunk Loader is not secured for recall"
+            save()
+            return false
+        end
+        if not moveToRecallHome() then return false end
+        return finishRecallHome(mode,true)
+    end
+
+    local function recallLoaderAck(action,mode)
+        send(cfg.managerId,{
+            type="recall_loader_ack",
+            role="navigator",
+            number=cfg.number,
+            id=os.getComputerID(),
+            action=action,
+            mode=mode,
+            x=state.x,
+            y=state.y,
+            z=state.z,
+            dir=state.dir,
+            loaderPlaced=state.loaderPlaced and true or false,
+            loaderSite=state.loaderSite,
+            loaderCarried=loaderInInventory() and true or false,
+            session=cfg.session
+        })
+    end
+
+    local function recallLoaderBlocked(action,reason)
+        state.navigationError=reason
+        save()
+        send(cfg.managerId,{
+            type="recall_loader_blocked",
+            role="navigator",
+            number=cfg.number,
+            id=os.getComputerID(),
+            action=action,
+            reason=reason,
+            x=state.x,
+            y=state.y,
+            z=state.z,
+            loaderPlaced=state.loaderPlaced and true or false,
+            loaderSite=state.loaderSite,
+            session=cfg.session
+        })
+    end
+
+    local function handleRecallLoaderCommand(message)
+        local action=tostring(message.action or "")
+        local mode=message.mode or "NORMAL"
+        local home=NAVIGATOR_RECALL[tonumber(cfg.number)]
+        if not home then
+            recallLoaderBlocked(action,"Navigator recall position is undefined")
+            return false
+        end
+        if action=="N1_HOME_ANCHOR" and tonumber(cfg.number)==1 then
+            if state.recalled and state.x==home.x and state.y==home.y and state.z==home.z and
+                state.loaderPlaced and state.loaderSite=="RECALL" then
+                recallLoaderAck(action,mode)
+                return true
+            end
+            if state.loaderPlaced then
+                local ok,reason=retrieveChunkLoader()
+                if not ok then recallLoaderBlocked(action,reason) return false end
+            end
+            if not loaderInInventory() then
+                recallLoaderBlocked(action,"Navigator-1 does not have its Chunk Loader for recall handoff")
+                return false
+            end
+            if not moveToRecallHome() then
+                recallLoaderBlocked(action,state.navigationError or "Navigator-1 could not reach recall home")
+                return false
+            end
+            local placed,reason=placeChunkLoader("RECALL")
+            if not placed then recallLoaderBlocked(action,reason) return false end
+            state.navigationError=nil
+            finishRecallHome(mode,false)
+            recallLoaderAck(action,mode)
+            return true
+        elseif action=="N3_HOME" and tonumber(cfg.number)==3 then
+            if state.recalled and state.x==home.x and state.y==home.y and state.z==home.z and
+                not state.loaderPlaced and loaderInInventory() then
+                recallLoaderAck(action,mode)
+                return true
+            end
+            if state.loaderPlaced then
+                local ok,reason=retrieveChunkLoader()
+                if not ok then recallLoaderBlocked(action,reason) return false end
+            end
+            if not loaderInInventory() then
+                recallLoaderBlocked(action,"Navigator-3 does not have its Chunk Loader for recall")
+                return false
+            end
+            if not moveToRecallHome() then
+                recallLoaderBlocked(action,state.navigationError or "Navigator-3 could not reach recall home")
+                return false
+            end
+            state.navigationError=nil
+            recallLoaderAck(action,mode)
+            return finishRecallHome(mode,true)
+        elseif action=="N1_COLLECT_HOME" and tonumber(cfg.number)==1 then
+            if state.x~=home.x or state.y~=home.y or state.z~=home.z then
+                recallLoaderBlocked(action,"Navigator-1 is not at recall home for final Chunk Loader collection")
+                return false
+            end
+            if state.loaderPlaced then
+                local ok,reason=retrieveChunkLoader()
+                if not ok then recallLoaderBlocked(action,reason) return false end
+            end
+            if not loaderInInventory() then
+                recallLoaderBlocked(action,"Navigator-1 final recall Chunk Loader is not secured")
+                return false
+            end
+            state.navigationError=nil
+            recallLoaderAck(action,mode)
+            return finishRecallHome(mode,true)
+        end
+        recallLoaderBlocked(action,"Unexpected recall Chunk Loader command for Navigator-"..tostring(cfg.number))
+        return false
     end
 
     if state.recoveryLocked then
@@ -885,9 +1012,32 @@ local function runNavigator(cfg)
             loaderExpected=state.loaderExpected and true or false,
             loaderPlaced=state.loaderPlaced and true or false,
             loaderOwned=state.loaderExpected and (state.loaderPlaced or loaderInInventory()) or false,
+            loaderSite=state.loaderSite,
             message=message,
             session=cfg.session
         })
+    end
+
+    local deploymentReadyAt=now()+5
+
+    local function sendDeploymentAck()
+        if not state.deployed or now()<deploymentReadyAt then return false end
+        local site=NAVIGATOR_SITES[tonumber(cfg.number)]
+        if not site or state.x~=site.x or state.y~=site.y or state.z~=site.z then return false end
+        if state.loaderExpected and (not state.loaderPlaced or state.loaderSite~="WORK") then return false end
+        send(cfg.controller,{
+            type="navigator_deployed",
+            id=os.getComputerID(),
+            number=cfg.number,
+            x=state.x,
+            y=state.y,
+            z=state.z,
+            chunkIndex=state.chunkIndex,
+            loaderPlaced=state.loaderPlaced and true or false,
+            loaderSite=state.loaderSite,
+            session=cfg.session
+        })
+        return true
     end
 
     local function resumeNavigator()
@@ -898,6 +1048,14 @@ local function runNavigator(cfg)
         local site=NAVIGATOR_SITES[cfg.number]
         if not site then
             return false
+        end
+        if state.loaderExpected and state.loaderPlaced and state.loaderSite=="RECALL" then
+            local recovered,reason=retrieveChunkLoader()
+            if not recovered then
+                state.navigationError=reason
+                save()
+                return false
+            end
         end
 
         if not vertical(NAVIGATOR_CRUISE[cfg.number]) then return false end
@@ -934,7 +1092,7 @@ local function runNavigator(cfg)
         end
 
         if state.loaderExpected and not state.loaderPlaced then
-            local placed,reason=placeChunkLoader()
+            local placed,reason=placeChunkLoader("WORK")
             if not placed then
                 state.navigationError=reason
                 save()
@@ -979,7 +1137,10 @@ local function runNavigator(cfg)
             local message=event[3]
             local protocol=event[4]
 
-            if sender==cfg.managerId and protocol==PROTOCOL and type(message)=="table" and message.session==cfg.session then
+            if sender==cfg.controller and protocol==PROTOCOL and type(message)=="table" and
+                message.type=="deploy_navigator" and tonumber(message.number)==tonumber(cfg.number) then
+                sendDeploymentAck()
+            elseif sender==cfg.managerId and protocol==PROTOCOL and type(message)=="table" and message.session==cfg.session then
                 if message.type=="status_query" then
                     sendNavigatorStatus()
                 elseif message.type=="cancel_advance" then
@@ -1127,6 +1288,10 @@ local function runNavigator(cfg)
                             loaderPlaced=state.loaderPlaced and true or false,
                             session=cfg.session})
                     end
+                elseif message.type=="recall_loader_command" then
+                    advanceCancelled=true
+                    pendingRecallMode=nil
+                    handleRecallLoaderCommand(message)
                 elseif message.type=="recall_command" then
                     advanceCancelled=true
                     pendingRecallMode=message.mode or "NORMAL"
@@ -1168,6 +1333,7 @@ local function runNavigator(cfg)
             end
         elseif event[1]=="timer" and event[2]==timer then
             sendNavigatorStatus()
+            sendDeploymentAck()
             if state.packReady and not state.packAcknowledged then
                 send(cfg.managerId,{
                     type="pack_ready",role="navigator",number=cfg.number,

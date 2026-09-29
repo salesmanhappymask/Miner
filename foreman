@@ -3252,8 +3252,53 @@ local function runForeman(cfg)
             saveState()
             return nil
         end
+        local function waitDeployment(id)
+            if not id then return nil end
+            local lastProbe=0
+            local deadline=now()+12
+            while now()<deadline do
+                if flags.recallMode then return nil end
+                if now()-lastProbe>=1 then
+                    send(id,{
+                        type="deploy_navigator",
+                        target=id,
+                        number=n,
+                        fuelKind=state.navigatorFuelKind,
+                        session=cfg.session
+                    })
+                    lastProbe=now()
+                end
+                local _,reply=waitInbox(function(sender,m)
+                    return sender==id and type(m)=="table" and
+                        m.type=="navigator_deployed" and tonumber(m.number)==n and
+                        (not m.session or m.session==cfg.session)
+                end,0.5)
+                if reply then
+                    local site=NAVIGATOR_SITES[n]
+                    local valid=site and tonumber(reply.x)==site.x and tonumber(reply.y)==site.y and
+                        tonumber(reply.z)==site.z and tonumber(reply.chunkIndex or 0)==tonumber(state.chunkIndex or 0)
+                    if n==1 or n==3 then
+                        valid=valid and reply.loaderPlaced==true and reply.loaderSite=="WORK"
+                    end
+                    if not valid then
+                        state.phase="WAITING_NAVIGATOR_RECOVERY"
+                        saveState()
+                        sendState("Navigator-"..tostring(n).." deployment confirmation is invalid")
+                        return nil
+                    end
+                    progress.stage="DEPLOYED"
+                    saveState()
+                    return id
+                end
+            end
+            state.phase="WAITING_NAVIGATOR_RECOVERY"
+            state.setupBlockReason="Navigator-"..tostring(n).." did not confirm stable deployment"
+            saveState()
+            sendState(state.setupBlockReason)
+            return nil
+        end
         if progress and progress.stage=="TRAVELING" then
-            return progress.id
+            return waitDeployment(progress.id)
         end
         if not progress then
             if selfCount("advanced_wireless_mining_turtle")<1 or
@@ -3399,7 +3444,8 @@ local function runForeman(cfg)
                     type="deploy_navigator",
                     target=newId,
                     number=n,
-                    fuelKind=state.navigatorFuelKind
+                    fuelKind=state.navigatorFuelKind,
+                    session=cfg.session
                 })
                 lastDeploy=now()
             end
@@ -3466,7 +3512,7 @@ local function runForeman(cfg)
         progress.stage="TRAVELING"
         saveState()
         sendState("Navigator-" .. tostring(n) .. " traveling")
-        return newId
+        return waitDeployment(newId)
     end
 
     local function masterCommissionForeman(n)
@@ -3818,6 +3864,39 @@ local function runForeman(cfg)
                 saveState()
                 state.navigatorProgress=nil
                 saveState()
+            end
+        end
+
+        for _,n in ipairs(navigatorOrder) do
+            local id=cfg.navigators[n]
+            local confirmed=nil
+            local lastProbe=0
+            local deadline=now()+6
+            while id and not confirmed and now()<deadline do
+                if flags.recallMode then return false end
+                if now()-lastProbe>=1 then
+                    send(id,{
+                        type="deploy_navigator",
+                        target=id,
+                        number=n,
+                        fuelKind=state.navigatorFuelKind,
+                        session=cfg.session
+                    })
+                    lastProbe=now()
+                end
+                local _,reply=waitInbox(function(sender,m)
+                    return sender==id and type(m)=="table" and
+                        m.type=="navigator_deployed" and tonumber(m.number)==n and
+                        (not m.session or m.session==cfg.session)
+                end,0.5)
+                if reply then confirmed=reply end
+            end
+            if not confirmed then
+                state.phase="WAITING_NAVIGATOR_SETUP"
+                state.setupBlockReason="Navigator-"..tostring(n).." stopped responding after deployment"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
             end
         end
 
