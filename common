@@ -1,5 +1,5 @@
-VERSION = 106
-PROTOCOL = "miner_swarm_v106"
+VERSION = 107
+PROTOCOL = "miner_swarm_v107"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -126,7 +126,7 @@ function now()
     return os.clock()
 end
 
-DEBUG_PROTOCOL = "miner_swarm_debug_v106"
+DEBUG_PROTOCOL = "miner_swarm_debug_v107"
 DEBUG_LOG_DIR = "logs"
 DEBUG_LOG_MAX = 65536
 DEBUG_ERROR_LOG_MAX = 16384
@@ -1385,4 +1385,3 @@ function travelChunkNorth(state,save,face,baseZ,targetIndex,origin,abortCheck,cl
     save()
     return true
 end
-

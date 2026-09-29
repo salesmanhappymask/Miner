@@ -1,5 +1,5 @@
 local RAW = "https://raw.githubusercontent.com/salesmanhappymask/Miner/main/"
-local MIN_VERSION = 106
+local MIN_VERSION = 107
 local CONFIG = "updater.cfg"
 local args = {...}
 
@@ -8,6 +8,14 @@ local function readFile(path)
     if not file then return nil end
     local data = file.readAll()
     file.close()
+    return data
+end
+
+local function canonicalText(data)
+    data = tostring(data or "")
+    data = data:gsub("\r\n", "\n")
+    data = data:gsub("\r", "\n")
+    data = data:gsub("\n+$", "")
     return data
 end
 
@@ -44,7 +52,8 @@ local function fetch(name)
     if not response then error("Could not download " .. name .. "; nothing was changed") end
     local data = response.readAll()
     response.close()
-    if not data or data == "" then error("Empty " .. name .. "; nothing was changed") end
+    data = canonicalText(data)
+    if data == "" then error("Empty " .. name .. "; nothing was changed") end
     return data
 end
 
