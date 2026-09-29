@@ -1,4 +1,4 @@
-local SEED_PROTOCOL="miner_swarm_seed_v118"
+local SEED_PROTOCOL="miner_swarm_seed_v119"
 
 local function runManagerSeedBootstrap()
     local seed=loadTable("manager_seed.cfg")
@@ -488,7 +488,7 @@ local function runRegionalManager()
     end
 
     local managerId=os.getComputerID()
-    local OBSERVER_PROTOCOL="miner_swarm_monitor_v118"
+    local OBSERVER_PROTOCOL="miner_swarm_monitor_v119"
     local lastObserverSend=0
     setRegionalManager(managerId)
     local rawSend=send
@@ -592,6 +592,26 @@ local function runRegionalManager()
     data.chunkIndex=tonumber(data.chunkIndex) or 0
     data.managerPose=data.managerPose or {x=MANAGER_IDLE.x,y=0,z=MANAGER_IDLE.z,dir=DIR_N,
         chunkIndex=data.chunkIndex,seq=0}
+    if data.recall and data.recall.packMoveIntent then
+        local intent=data.recall.packMoveIntent
+        local moved=movementFromFuel(intent.fuelBefore,turtle.getFuelLevel())
+        if moved==nil then
+            data.managerPose.recoveryLocked=true
+            data.managerPose.recoveryReason="Cannot resolve interrupted Regional Manager pack move"
+        elseif moved then
+            data.managerPose.x=intent.toX
+            data.managerPose.z=intent.toZ
+            data.managerPose.dir=intent.dir
+            data.managerPose.seq=(tonumber(data.managerPose.seq) or 0)+1
+            data.recall.packMoveIntent=nil
+        else
+            data.managerPose.x=intent.fromX
+            data.managerPose.z=intent.fromZ
+            data.managerPose.dir=intent.dir
+            data.recall.packMoveIntent=nil
+        end
+        saveTableLight("regional_manager.tmp",data)
+    end
     resolveChunkMove(data.managerPose,function()
         if not saveTableLight("regional_manager.tmp",data) then
             error("Manager chunk move recovery write failed")
@@ -646,6 +666,7 @@ local function runRegionalManager()
     data.recall.targets.foremen=data.recall.targets.foremen or {}
     data.recall.targets.navigators=data.recall.targets.navigators or {}
     data.recall.packReady=data.recall.packReady or {}
+    data.recall.packAssetsReady=data.recall.packAssetsReady or {}
 
     for _,registry in ipairs({data.nodes,data.foremen,data.miners,data.navigators}) do
         for _,entry in pairs(registry) do
@@ -1467,8 +1488,12 @@ local function runRegionalManager()
                 if not (data.recall.loaderRequired and data.recall.loaderPhase~="DONE" and (n==1 or n==3)) then
                     send(sender,{type="recall_command",mode="PACK",packToken=data.recall.packToken,session=data.session})
                 end
-            elseif data.recall.state=="PACK_CLEAR" and sender~=data.recall.targets.miners[WORKER_COUNT] then
+            elseif data.recall.state=="PACK_CLEAR" and message.role=="miner" and
+                sender~=data.recall.targets.miners[WORKER_COUNT] then
                 send(sender,{type="pack_clear",packToken=data.recall.packToken,session=data.session})
+            elseif data.recall.state=="PACK_ASSETS" and message.role=="miner" and
+                isChestCollector(tonumber(message.row) or -1) then
+                send(sender,{type="pack_assets_collect",packToken=data.recall.packToken,session=data.session})
             elseif data.recall.state=="PACK_COLLECT" and sender==data.recall.targets.miners[WORKER_COUNT] and
                 now()>=(data.recall.collectAfter or 0) then
                 send(sender,{type="pack_collect",packToken=data.recall.packToken,session=data.session})
@@ -1849,11 +1874,14 @@ local function runRegionalManager()
                 send(id,{type="pack_clear",packToken=data.recall.packToken,session=data.session})
             end
         end
-        for _,group in ipairs({data.recall.targets.foremen or {},data.recall.targets.navigators or {}}) do
-            for _,id in pairs(group) do
-                if not data.recall.packReady[id] then
-                    send(id,{type="pack_clear",packToken=data.recall.packToken,session=data.session})
-                end
+    end
+
+    local function sendPackAssetCollection()
+        for n=1,FOREMAN_COUNT do
+            local row=chestCollectorRow(n)
+            local id=data.recall.targets.miners[row]
+            if id and not data.recall.packAssetsReady[row] then
+                send(id,{type="pack_assets_collect",packToken=data.recall.packToken,session=data.session})
             end
         end
     end
@@ -1945,11 +1973,18 @@ local function runRegionalManager()
             emptied={},
             shutdown={},
             packReady={},
+            packAssetsReady={},
             packAfterRecall=options.packAfterRecall==true and true or nil,
             packAfterDump=options.packAfterDump==true and true or nil,
             packCollected=0,
             packMissing={},
             packError=nil,
+            packDepositedCount=nil,
+            packSupplyCount=nil,
+            packFinalizeStage=nil,
+            packMoveIntent=nil,
+            packLavaSlots={},
+            packSupplySlot=nil,
             packToken=mode=="PACK" and recallToken or nil,
             waitCollectors=cancelledPhase=="COLLECT_M" and true or nil,
             loaderRequired=data.commissioningComplete and targets.navigators[1]~=nil and targets.navigators[3]~=nil and true or false,
@@ -2019,11 +2054,18 @@ local function runRegionalManager()
         r.emptied={}
         r.shutdown={}
         r.packReady={}
+        r.packAssetsReady={}
         r.packAfterRecall=nil
         r.packAfterDump=nil
         r.packCollected=0
         r.packMissing={}
         r.packError=nil
+        r.packDepositedCount=nil
+        r.packSupplyCount=nil
+        r.packFinalizeStage=nil
+        r.packMoveIntent=nil
+        r.packLavaSlots={}
+        r.packSupplySlot=nil
         r.packToken=data.recallSequence
         r.waitCollectors=nil
         r.loaderRequired=false
@@ -2149,7 +2191,7 @@ local function runRegionalManager()
                 data.recall.active=false
                 save()
                 if continuePacking then
-                    startPackFromHome()
+                    beginRecall("DUMP",{packAfterDump=true})
                 end
             end
         elseif data.recall.mode=="DUMP" then
@@ -2183,15 +2225,21 @@ local function runRegionalManager()
                         if data.recall.packReady[id] then ready=ready+1 end
                     end
                 end
-                for _,id in pairs(data.recall.targets.foremen) do
-                    expectedReady=expectedReady+1
-                    if data.recall.packReady[id] then ready=ready+1 end
-                end
-                for _,id in pairs(data.recall.targets.navigators) do
-                    expectedReady=expectedReady+1
-                    if data.recall.packReady[id] then ready=ready+1 end
-                end
                 if ready==expectedReady then
+                    data.recall.state="PACK_ASSETS"
+                    data.recall.packError=nil
+                    data.recall.packAssetsReady=data.recall.packAssetsReady or {}
+                    save()
+                    sendPackAssetCollection()
+                    lastRecall=now()
+                end
+            elseif data.recall.state=="PACK_ASSETS" then
+                local ready=0
+                for n=1,FOREMAN_COUNT do
+                    local row=chestCollectorRow(n)
+                    if data.recall.packAssetsReady[row] then ready=ready+1 end
+                end
+                if ready==FOREMAN_COUNT then
                     data.recall.state="PACK_COLLECT"
                     data.recall.packError=nil
                     data.recall.collectAfter=now()
@@ -2456,6 +2504,260 @@ local function runRegionalManager()
         end
         turtle.select(previous)
         return true
+    end
+
+    local function managerPackTurnRight()
+        if not turtle.turnRight() then return false,"turn failed" end
+        data.managerPose.dir=((tonumber(data.managerPose.dir) or DIR_N)+1)%4
+        save()
+        flushManager(true)
+        return true
+    end
+
+    local function managerPackFace(target)
+        target=target%4
+        while data.managerPose.dir~=target do
+            local ok,reason=managerPackTurnRight()
+            if not ok then return false,reason end
+        end
+        return true
+    end
+
+    local function managerPackForward()
+        local fromX=data.managerPose.x
+        local fromZ=data.managerPose.z
+        local toX=fromX
+        local toZ=fromZ
+        if data.managerPose.dir==DIR_N then toZ=toZ+1
+        elseif data.managerPose.dir==DIR_E then toX=toX+1
+        elseif data.managerPose.dir==DIR_S then toZ=toZ-1
+        else toX=toX-1 end
+        data.recall.packMoveIntent={fromX=fromX,fromZ=fromZ,toX=toX,toZ=toZ,
+            dir=data.managerPose.dir,fuelBefore=turtle.getFuelLevel()}
+        save()
+        flushManager(true)
+        local ok,reason=turtle.forward()
+        if not ok then
+            data.recall.packMoveIntent=nil
+            save()
+            flushManager(true)
+            return false,tostring(reason or "forward blocked")
+        end
+        data.managerPose.x=toX
+        data.managerPose.z=toZ
+        data.managerPose.seq=(tonumber(data.managerPose.seq) or 0)+1
+        data.recall.packMoveIntent=nil
+        save()
+        flushManager(true)
+        return true
+    end
+
+    local function managerPackMoveTo(tx,tz)
+        while data.managerPose.x<tx do
+            local ok,reason=managerPackFace(DIR_E)
+            if not ok then return false,reason end
+            ok,reason=managerPackForward()
+            if not ok then return false,reason end
+        end
+        while data.managerPose.x>tx do
+            local ok,reason=managerPackFace(DIR_W)
+            if not ok then return false,reason end
+            ok,reason=managerPackForward()
+            if not ok then return false,reason end
+        end
+        while data.managerPose.z<tz do
+            local ok,reason=managerPackFace(DIR_N)
+            if not ok then return false,reason end
+            ok,reason=managerPackForward()
+            if not ok then return false,reason end
+        end
+        while data.managerPose.z>tz do
+            local ok,reason=managerPackFace(DIR_S)
+            if not ok then return false,reason end
+            ok,reason=managerPackForward()
+            if not ok then return false,reason end
+        end
+        return true
+    end
+
+    local function packInventoryCount(side,kind)
+        local items=scanInventory(side)
+        if type(items)~="table" then return nil end
+        local total=0
+        for _,item in pairs(items) do
+            if matchesItem(item,kind) then
+                total=total+tonumber(item.qty or item.size or 1)
+            end
+        end
+        return total
+    end
+
+    local function packInventoryTotal(side)
+        local items=scanInventory(side)
+        if type(items)~="table" then return nil end
+        local total=0
+        for _,item in pairs(items) do
+            total=total+tonumber(item.qty or item.size or 1)
+        end
+        return total
+    end
+
+    local function managerEmptySlot()
+        for slot=1,16 do
+            if turtle.getItemCount(slot)==0 then return slot end
+        end
+        return nil
+    end
+
+    local function packFinalizeBlocked(reason)
+        data.recall.packError=tostring(reason or "Regional Manager pack finalization blocked")
+        save()
+        flushManager(true)
+        return false
+    end
+
+    local function runPackFinalize()
+        if not data.recall or data.recall.mode~="PACK" or
+            data.recall.state~="PACK_RM_FINALIZE" then return false end
+        if not turtle or not turtle.forward then
+            return packFinalizeBlocked("Regional Manager must be a turtle to finish Pack It Up")
+        end
+        if data.managerPose.recoveryLocked then
+            return packFinalizeBlocked(data.managerPose.recoveryReason or "Regional Manager pack position is uncertain")
+        end
+        if data.managerPose.y~=0 then
+            return packFinalizeBlocked("Regional Manager is not at ground level for pack finalization")
+        end
+        local stage=data.recall.packFinalizeStage or "SUPPLY"
+        if stage=="SUPPLY" then
+            local ok,reason=managerPackMoveTo(0,-1)
+            if not ok then return packFinalizeBlocked("RM could not reach the original Foreman-1 placement square: "..tostring(reason)) end
+            ok,reason=managerPackFace(DIR_N)
+            if not ok then return packFinalizeBlocked(reason) end
+            if not wrapInventory("front") then
+                return packFinalizeBlocked("Black Blue Blue supply chest is not directly north of the RM")
+            end
+            data.recall.packFinalizeStage="LAVA"
+            data.recall.packError=nil
+            save()
+            flushManager(true)
+            stage="LAVA"
+        end
+        if stage=="LAVA" then
+            local lava=packInventoryCount("front","lava_bucket")
+            if lava==nil then return packFinalizeBlocked("Black Blue Blue supply chest is unreadable") end
+            local need=math.max(0,2-lava)
+            data.recall.packLavaSlots=data.recall.packLavaSlots or {}
+            if need>0 then
+                local ok,reason=managerPackMoveTo(0,-3)
+                if not ok then return packFinalizeBlocked("RM could not clear the supply station: "..tostring(reason)) end
+                ok,reason=managerPackMoveTo(2,-3)
+                if not ok then return packFinalizeBlocked("RM could not reach Foreman-1's remaining fuel chest: "..tostring(reason)) end
+                ok,reason=managerPackFace(DIR_N)
+                if not ok then return packFinalizeBlocked(reason) end
+                if not wrapInventory("front") then
+                    return packFinalizeBlocked("Foreman-1 fuel chest is not present at the expected location")
+                end
+                while #data.recall.packLavaSlots<need do
+                    local slot=managerEmptySlot()
+                    if not slot then return packFinalizeBlocked("RM has no free slot for the required lava bucket") end
+                    if takeNamedFromFront("lava_bucket",1,slot)<1 then
+                        return packFinalizeBlocked("Foreman-1 fuel chest does not contain enough full lava buckets")
+                    end
+                    data.recall.packLavaSlots[#data.recall.packLavaSlots+1]=slot
+                    save()
+                    flushManager(true)
+                end
+                ok,reason=managerPackMoveTo(0,-3)
+                if not ok then return packFinalizeBlocked("RM could not return from Foreman-1's fuel chest: "..tostring(reason)) end
+                ok,reason=managerPackMoveTo(0,-1)
+                if not ok then return packFinalizeBlocked("RM could not return to the supply station: "..tostring(reason)) end
+                ok,reason=managerPackFace(DIR_N)
+                if not ok then return packFinalizeBlocked(reason) end
+                if not wrapInventory("front") then
+                    return packFinalizeBlocked("Black Blue Blue supply chest is missing on return")
+                end
+                for _,slot in ipairs(data.recall.packLavaSlots) do
+                    if turtle.getItemCount(slot)>0 then
+                        turtle.select(slot)
+                        if not turtle.drop(1) then
+                            return packFinalizeBlocked("RM could not place a full lava bucket into the supply chest")
+                        end
+                    end
+                end
+                data.recall.packLavaSlots={}
+                save()
+                flushManager(true)
+            end
+            data.recall.packFinalizeStage="VERIFY"
+            data.recall.packError=nil
+            save()
+            flushManager(true)
+            stage="VERIFY"
+        end
+        if stage=="VERIFY" then
+            local checks={
+                {"turtle",WORKER_COUNT-1+FOREMAN_COUNT+NAVIGATOR_COUNT,"packed turtles"},
+                {"ender_dump",FOREMAN_COUNT,"dump Ender Chests"},
+                {"ender_fuel",FOREMAN_COUNT-1,"fuel Ender Chests"},
+                {"lava_bucket",2,"full lava buckets"}
+            }
+            local missing={}
+            local total=packInventoryTotal("front")
+            if total==nil then return packFinalizeBlocked("Black Blue Blue supply chest is unreadable during final verification") end
+            if not data.recall.packDepositedCount or tonumber(data.recall.packDepositedCount)<30 then
+                missing[#missing+1]="Miner-16 verified deposit count "..tostring(data.recall.packDepositedCount or 0).."/30"
+            end
+            if data.recall.packSupplyCount and total<tonumber(data.recall.packSupplyCount) then
+                missing[#missing+1]="total deposited items "..tostring(total).."/"..tostring(data.recall.packSupplyCount)
+            end
+            for _,entry in ipairs(checks) do
+                local count=packInventoryCount("front",entry[1])
+                if count==nil then return packFinalizeBlocked("Black Blue Blue supply chest is unreadable during final verification") end
+                if count<entry[2] then
+                    missing[#missing+1]=entry[3].." "..tostring(count).."/"..tostring(entry[2])
+                end
+            end
+            if #missing>0 then
+                return packFinalizeBlocked("Supply chest verification failed: "..table.concat(missing,", "))
+            end
+            data.recall.packFinalizeStage="COLLECT"
+            data.recall.packError=nil
+            save()
+            flushManager(true)
+            stage="COLLECT"
+        end
+        if stage=="COLLECT" then
+            local slot=managerEmptySlot()
+            if not slot then return packFinalizeBlocked("RM has no free slot for the Black Blue Blue supply chest") end
+            if not wrapInventory("front") then return packFinalizeBlocked("Black Blue Blue supply chest is missing before collection") end
+            turtle.select(slot)
+            local before=turtle.getItemCount(slot)
+            local ok,reason=turtle.dig()
+            if not ok then return packFinalizeBlocked("RM could not collect the Black Blue Blue supply chest: "..tostring(reason or "dig failed")) end
+            if turtle.getItemCount(slot)<=before then
+                turtle.suck()
+            end
+            if turtle.getItemCount(slot)<=before then
+                return packFinalizeBlocked("RM broke the supply chest but could not recover the chest item")
+            end
+            data.recall.packFinalizeStage="DONE"
+            data.recall.packSupplySlot=slot
+            data.recall.packError=nil
+            save()
+            flushManager(true)
+            stage="DONE"
+        end
+        if stage=="DONE" then
+            data.recall.state="PACK_COMPLETE"
+            data.recall.active=false
+            data.recall.packError=nil
+            save()
+            flushManager(true)
+            os.shutdown()
+            return true
+        end
+        return false
     end
 
     local function chunkKey(role,index)
@@ -2880,12 +3182,19 @@ local function runRegionalManager()
                         sendRecallToNodes("NORMAL",false)
                         lastRecall=now()
                     else
+                        beginRecall("DUMP",{packAfterDump=true})
+                    end
+                elseif data.recall.mode=="DUMP" then
+                    if data.recall.active then
+                        data.recall.packAfterDump=true
+                        save()
+                        sendRecallToNodes("DUMP",true)
+                        lastRecall=now()
+                    else
                         startPackFromHome()
                     end
-                elseif data.recall.mode=="DUMP" and not data.recall.active then
-                    startPackFromHome()
                 else
-                    beginRecall("NORMAL",{packAfterRecall=true})
+                    beginRecall("DUMP",{packAfterDump=true})
                 end
             end
         elseif command=="4" then
@@ -3262,24 +3571,39 @@ local function runRegionalManager()
 
                 elseif message.type=="pack_ready" and message.session==data.session and
                     data.recall.mode=="PACK" and tonumber(message.packToken)==tonumber(data.recall.packToken) and
-                    (data.recall.state=="PACK_CLEAR" or data.recall.state=="PACK_COLLECT") then
-                    local index=tonumber(message.role=="miner" and message.row or message.number)
-                    local poseValid=false
-                    if message.role=="miner" and index and index~=WORKER_COUNT then
-                        poseValid=message.x==index and message.y==0 and message.z==0 and message.dir==DIR_N
-                    elseif message.role=="foreman" and index and FOREMAN_IDLE[index] then
-                        local idle=FOREMAN_IDLE[index]
-                        poseValid=message.x==idle.x and message.y==idle.y and message.z==idle.z and message.dir==DIR_N
-                    elseif message.role=="navigator" and index and NAVIGATOR_RECALL[index] then
-                        local idle=NAVIGATOR_RECALL[index]
-                        poseValid=message.x==idle.x and message.y==idle.y and message.z==idle.z and message.dir==DIR_N
-                    end
-                    if poseValid and message.labelCleared==true and registeredNodeSender(message.role,index,sender) and
+                    (data.recall.state=="PACK_CLEAR" or data.recall.state=="PACK_ASSETS") then
+                    local index=tonumber(message.row)
+                    local poseValid=message.role=="miner" and index and index~=WORKER_COUNT and
+                        message.x==index and message.y==0 and message.z==0 and message.dir==DIR_N
+                    if poseValid and message.labelCleared==true and registeredNodeSender("miner",index,sender) and
                         sender~=data.recall.targets.miners[WORKER_COUNT] then
                         data.recall.packReady[sender]=true
                         save()
                         send(sender,{type="pack_ready_ack",packToken=data.recall.packToken,session=data.session})
                     end
+
+                elseif message.type=="pack_assets_ready" and message.session==data.session and
+                    data.recall.mode=="PACK" and tonumber(message.packToken)==tonumber(data.recall.packToken) and
+                    data.recall.state=="PACK_ASSETS" and tonumber(message.row) and
+                    isChestCollector(tonumber(message.row)) and
+                    registeredNodeSender("miner",tonumber(message.row),sender) then
+                    local row=tonumber(message.row)
+                    if message.x==row and message.y==0 and message.z==0 and message.dir==DIR_N and
+                        message.foremanCollected==true and message.navigatorCollected==true and
+                        message.dumpCollected==true and
+                        (row==chestCollectorRow(1) or message.fuelCollected==true) then
+                        data.recall.packAssetsReady[row]=true
+                        data.recall.packError=nil
+                        save()
+                        send(sender,{type="pack_assets_ack",packToken=data.recall.packToken,session=data.session})
+                    end
+
+                elseif message.type=="pack_assets_blocked" and message.session==data.session and
+                    data.recall.mode=="PACK" and tonumber(message.packToken)==tonumber(data.recall.packToken) and
+                    data.recall.state=="PACK_ASSETS" and tonumber(message.row) and
+                    registeredNodeSender("miner",tonumber(message.row),sender) then
+                    data.recall.packError=tostring(message.reason or ("Miner-"..tostring(message.row).." asset collection blocked"))
+                    save()
 
                 elseif message.type=="pack_blocked" and message.session==data.session and
                     data.recall.mode=="PACK" and tonumber(message.packToken)==tonumber(data.recall.packToken) and
@@ -3316,15 +3640,18 @@ local function runRegionalManager()
                     data.recall.mode=="PACK" and tonumber(message.packToken)==tonumber(data.recall.packToken) and
                     sender==data.recall.targets.miners[WORKER_COUNT] and
                     tonumber(message.row)==WORKER_COUNT and tonumber(message.x)==1 and
-                    tonumber(message.collected)==WORKER_COUNT-1 and
-                    (data.recall.state=="PACK_COLLECT" or data.recall.state=="PACK_COMPLETE") then
+                    tonumber(message.collected)==WORKER_COUNT-1 and message.deposited==true and
+                    (data.recall.state=="PACK_COLLECT" or data.recall.state=="PACK_RM_FINALIZE") then
                     data.recall.packCollected=WORKER_COUNT-1
+                    data.recall.packDepositedCount=tonumber(message.depositedCount) or data.recall.packDepositedCount
+                    data.recall.packSupplyCount=tonumber(message.supplyCount) or data.recall.packSupplyCount
                     if type(message.missing)=="table" then
                         data.recall.packMissing=message.missing
                     end
-                    data.recall.state="PACK_COMPLETE"
+                    data.recall.state="PACK_RM_FINALIZE"
                     data.recall.packError=nil
-                    data.recall.active=false
+                    data.recall.active=true
+                    data.recall.packFinalizeStage=data.recall.packFinalizeStage or "SUPPLY"
                     save()
 
                 elseif message.type=="chunk_ack" and message.session==data.session and
@@ -3448,6 +3775,8 @@ local function runRegionalManager()
                         sendRecallToNodes("PACK",false)
                     elseif data.recall.state=="PACK_CLEAR" then
                         sendPackClear()
+                    elseif data.recall.state=="PACK_ASSETS" then
+                        sendPackAssetCollection()
                     elseif data.recall.state=="PACK_COLLECT" and now()>=(data.recall.collectAfter or 0) then
                         local collectorId=data.recall.targets.miners[WORKER_COUNT]
                         if collectorId then
@@ -3470,6 +3799,9 @@ local function runRegionalManager()
 
             refreshGpsReady()
             updateRecallState()
+            if data.recall.state=="PACK_RM_FINALIZE" then
+                runPackFinalize()
+            end
             if not data.advance and
                 (data.managerBucketSlot or
                  (turtle.getFuelLevel()~="unlimited" and

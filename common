@@ -1,5 +1,5 @@
-VERSION = 118
-PROTOCOL = "miner_swarm_v118"
+VERSION = 119
+PROTOCOL = "miner_swarm_v119"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -132,7 +132,7 @@ function now()
     return os.clock()
 end
 
-DEBUG_PROTOCOL = "miner_swarm_debug_v118"
+DEBUG_PROTOCOL = "miner_swarm_debug_v119"
 DEBUG_LOG_DIR = "logs"
 DEBUG_LOG_MAX = 65536
 DEBUG_ERROR_LOG_MAX = 16384
@@ -605,6 +605,8 @@ function matchesItem(item, kind)
         return string.find(text, "narcissistic wireless turtle", 1, true) ~= nil
     elseif kind == "advanced_wireless_turtle" then
         return string.find(text, "advanced wireless turtle", 1, true) ~= nil
+    elseif kind == "turtle" then
+        return string.find(text, "turtle", 1, true) ~= nil
     elseif kind == "computer" then
         return string.find(text, "computer", 1, true) ~= nil and
             string.find(text, "turtle", 1, true) == nil and

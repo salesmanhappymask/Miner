@@ -780,8 +780,8 @@ local function runMiner(cfg)
         saveTableLight(path,state)
     end
 
-    if cfg.row==WORKER_COUNT and state.phase=="PACK_DONE" and state.x>1 and
-        state.recallMode=="PACK" then
+    if cfg.row==WORKER_COUNT and state.phase=="PACK_DONE" and
+        state.recallMode=="PACK" and (state.x>1 or state.packDeposited~=true) then
         state.phase="PACK_COLLECT"
         state.recoveryLocked=false
         state.recoveryReason=nil
@@ -800,9 +800,23 @@ local function runMiner(cfg)
             return state.originEstablished==true and cfg.orientationCalibrated==true and
                 state.y==0 and state.x==cfg.row and state.z>=0 and state.z<=16
         end
-        if cfg.row==WORKER_COUNT and (state.phase=="PACK_COLLECT" or state.phase=="PACK_BLOCKED" or state.phase=="PACK_DONE") then
+        if state.packAssetProgress and state.recallMode=="PACK" and isChestCollector(cfg.row) then
+            local group=math.floor((cfg.row-1)/4)+1
+            if group==1 then
+                return state.originEstablished==true and cfg.orientationCalibrated==true and
+                    state.x>=1 and state.x<=3 and state.y==0 and state.z>=-3 and state.z<=0 and
+                    state.dir>=DIR_N and state.dir<=DIR_W
+            end
             return state.originEstablished==true and cfg.orientationCalibrated==true and
-                state.x>=1 and state.x<=16 and state.y==0 and state.z==0 and state.dir==DIR_W
+                state.x>=cfg.row-1 and state.x<=cfg.row and state.y==0 and
+                state.z>=-2 and state.z<=0 and state.dir>=DIR_N and state.dir<=DIR_W
+        end
+        if cfg.row==WORKER_COUNT and (state.phase=="PACK_COLLECT" or state.phase=="PACK_BLOCKED" or state.phase=="PACK_DONE") then
+            local overflow=state.packOverflowTrip==true
+            return state.originEstablished==true and cfg.orientationCalibrated==true and
+                state.x>=(overflow and 0 or 1) and state.x<=16 and state.y==0 and
+                ((not overflow and state.z==0) or (overflow and state.z>=-1 and state.z<=0)) and
+                state.dir>=DIR_N and state.dir<=DIR_W
         end
         return state.originEstablished==true and cfg.orientationCalibrated==true and
             state.x==cfg.homeX and state.y<=cfg.homeY and
@@ -826,6 +840,12 @@ local function runMiner(cfg)
             state.recoveryLocked=true
             state.recoveryReason="Cannot resolve interrupted Miner-16 pack move"
         end
+        saveTableLight(path,state)
+    end
+
+    if state.phase=="PACK_ASSETS" and state.packAssetProgress and state.recallMode=="PACK" and
+        isChestCollector(cfg.row) and not state.recoveryLocked then
+        state.phase="RECALLED_PAUSED"
         saveTableLight(path,state)
     end
 
@@ -902,7 +922,7 @@ local function runMiner(cfg)
     do
         local managerState,managerSeq=bootManagerState,bootManagerSeq
         if managerState and snapshotHasExactPose(managerState) and
-            not state.motionIntent and not state.turnIntent and
+            not state.motionIntent and not state.turnIntent and not state.packAssetProgress and
             state.phase~="PACK_COLLECT" and state.phase~="PACK_BLOCKED" and
             state.phase~="PACK_DONE" then
             local incoming=tonumber(managerSeq or managerState.seq or 0) or 0
@@ -1037,6 +1057,7 @@ local function runMiner(cfg)
         refuelNow=false,
         serviceComplete=false,
         packCollect=false,
+        packAssets=false,
         newForeman=nil,
         advanceCommand=nil
     }
@@ -1309,6 +1330,14 @@ local function runMiner(cfg)
                         elseif message.type=="pack_ready_ack" and state.packReady and
                             tonumber(message.packToken)==tonumber(state.packToken) then
                             state.packAcknowledged=true
+                            save()
+                        elseif message.type=="pack_assets_collect" and isChestCollector(cfg.row) and
+                            cfg.row~=WORKER_COUNT and state.recallMode=="PACK" and
+                            tonumber(message.packToken)==tonumber(state.packToken) then
+                            flags.packAssets=true
+                        elseif message.type=="pack_assets_ack" and state.packAssetsReady and
+                            tonumber(message.packToken)==tonumber(state.packToken) then
+                            state.packAssetsAcknowledged=true
                             save()
                         elseif message.type=="pack_collect" and cfg.row==WORKER_COUNT and
                             state.recallMode=="PACK" and tonumber(message.packToken)==tonumber(state.packToken) then
@@ -2396,6 +2425,24 @@ local function runMiner(cfg)
             state.packError=nil
             state.packMissing=nil
             state.packStepIntent=nil
+            state.packDeposited=nil
+            state.packDepositedCount=nil
+            state.packSupplyCount=nil
+            state.packOverflowTrip=nil
+            state.packOverflowReturnX=nil
+            state.packOverflowStage=nil
+            state.packOverflowBeforeSupply=nil
+            state.packOverflowBeforeCargo=nil
+            state.packAssetsReady=nil
+            state.packAssetsAcknowledged=nil
+            state.packAssetProgress=nil
+            state.packAssetIntent=nil
+            state.packAssetError=nil
+            state.packAssetFuel=nil
+            state.packAssetDump=nil
+            state.packAssetForeman=nil
+            state.packAssetNavigator=nil
+            state.packAssetFuelRetained=nil
         end
         save()
         sendState("Regional Manager recall: " .. tostring(mode))
@@ -2585,18 +2632,33 @@ local function runMiner(cfg)
     end
 
     local collectPackedMiners
+    local collectPackAssets
 
     local function waitRecalledPause()
         while state.phase=="RECALLED_PAUSED" do
             if state.packDumpRequested and state.recallMode=="PACK" then
                 if not stagePackDumpAtHome() then return false end
                 return true
+            elseif flags.packAssets and isChestCollector(cfg.row) and cfg.row~=WORKER_COUNT and
+                state.recallMode=="PACK" then
+                flags.packAssets=false
+                if not collectPackAssets() then return false end
             elseif flags.packCollect and cfg.row==WORKER_COUNT and state.recallMode=="PACK" then
                 flags.packCollect=false
                 if not collectPackedMiners() then
                     return state.phase=="PACK_BLOCKED"
                 end
                 return true
+            elseif state.packAssetsReady and not state.packAssetsAcknowledged and
+                now()-(state.lastPackAssetSend or -10)>=2 then
+                send(cfg.managerId,{
+                    type="pack_assets_ready",role="miner",row=cfg.row,
+                    packToken=state.packToken,foremanCollected=state.packAssetForeman==true,
+                    navigatorCollected=state.packAssetNavigator==true,
+                    dumpCollected=state.packAssetDump==true,fuelCollected=state.packAssetFuel==true,
+                    x=state.x,y=state.y,z=state.z,dir=state.dir,session=cfg.session
+                })
+                state.lastPackAssetSend=now()
             elseif state.packReady and not state.packAcknowledged and now()-(state.lastPackSend or -10)>=2 then
                 send(cfg.managerId,{
                     type="pack_ready",role="miner",row=cfg.row,
@@ -2620,10 +2682,171 @@ local function runMiner(cfg)
         return not state.recoveryLocked
     end
 
-    collectPackedMiners=function()
-        if cfg.row~=WORKER_COUNT or state.recallMode~="PACK" or
-            state.x<1 or state.x>WORKER_COUNT or state.z~=0 or state.y~=0 then
+    collectPackAssets=function()
+        if state.recallMode~="PACK" or not isChestCollector(cfg.row) or cfg.row==WORKER_COUNT then
             return false
+        end
+
+        local group=math.floor((cfg.row-1)/4)+1
+        local function inventoryTotal()
+            local total=0
+            for slot=1,16 do total=total+turtle.getItemCount(slot) end
+            return total
+        end
+        local function blocked(reason)
+            state.phase="RECALLED_PAUSED"
+            state.packAssetError=tostring(reason or "Pack asset collection blocked")
+            save()
+            send(cfg.managerId,{type="pack_assets_blocked",row=cfg.row,
+                reason=state.packAssetError,packToken=state.packToken,session=cfg.session})
+            sendState(state.packAssetError)
+            return false
+        end
+        local function moveTo(tx,tz)
+            while state.x<tx do if not face(DIR_E) or not attemptForward() then return false end end
+            while state.x>tx do if not face(DIR_W) or not attemptForward() then return false end end
+            while state.z<tz do if not face(DIR_N) or not attemptForward() then return false end end
+            while state.z>tz do if not face(DIR_S) or not attemptForward() then return false end end
+            return true
+        end
+        local function collectAsset(flagName,label,direction)
+            if state[flagName] then return true end
+            local intent=state.packAssetIntent
+            if not intent or intent.flag~=flagName then
+                intent={flag=flagName,beforeTotal=inventoryTotal(),direction=direction}
+                state.packAssetIntent=intent
+                save()
+            end
+            local before=tonumber(intent.beforeTotal) or inventoryTotal()
+            local detect=direction=="up" and turtle.detectUp or turtle.detect
+            local dig=direction=="up" and turtle.digUp or turtle.dig
+            local suck=direction=="up" and turtle.suckUp or turtle.suck
+            if detect() then
+                local empty=nil
+                for slot=1,16 do
+                    if turtle.getItemCount(slot)==0 then empty=slot break end
+                end
+                if not empty then return blocked("No empty slot is available to collect "..label) end
+                turtle.select(empty)
+                local ok,reason=dig()
+                if not ok then return blocked("Could not collect "..label..": "..tostring(reason or "dig failed")) end
+            end
+            for attempt=1,64 do
+                local moved=false
+                for slot=1,16 do
+                    turtle.select(slot)
+                    if suck() then moved=true break end
+                end
+                if not moved then break end
+            end
+            if inventoryTotal()<=before then
+                return blocked(label.." was not recovered into Miner-"..tostring(cfg.row).." inventory")
+            end
+            state[flagName]=true
+            state.packAssetIntent=nil
+            save()
+            return true
+        end
+
+        if state.packAssetsReady then
+            state.phase="RECALLED_PAUSED"
+            save()
+            return true
+        end
+        if not state.packAssetProgress then
+            local needed=group==1 and 3 or 4
+            if freeInventorySlots()<needed then
+                return blocked("Miner-"..tostring(cfg.row).." needs "..tostring(needed).." free slots for pack hardware")
+            end
+            if state.x~=cfg.row or state.y~=0 or state.z~=0 then
+                return blocked("Miner-"..tostring(cfg.row).." is not at its home row for pack hardware collection")
+            end
+            state.packAssetProgress=true
+            state.packAssetError=nil
+            state.phase="PACK_ASSETS"
+            save()
+        else
+            state.phase="PACK_ASSETS"
+            save()
+        end
+
+        if group==1 then
+            if not state.packAssetDump then
+                if not moveTo(3,0) or not moveTo(3,-3) or not moveTo(1,-3) or not face(DIR_N) then
+                    return blocked("Miner-2 could not route around Foreman-1's retained fuel chest")
+                end
+                if not collectAsset("packAssetDump","Foreman-1 dump Ender Chest","front") then return false end
+            end
+            if not moveTo(1,-2) or not face(DIR_N) then
+                return blocked("Miner-2 could not reach Foreman-1 from the south")
+            end
+            if not collectAsset("packAssetForeman","Foreman-1","front") then return false end
+            if not moveTo(1,-1) then return blocked("Miner-2 could not enter the Foreman-1 square") end
+            if not collectAsset("packAssetNavigator","GPS Navigator-1","up") then return false end
+            if not moveTo(1,0) or not moveTo(cfg.row,0) then
+                return blocked("Miner-2 could not return home after pack hardware collection")
+            end
+            state.packAssetFuelRetained=true
+        else
+            if not moveTo(cfg.row,-1) or not face(DIR_S) then
+                return blocked("Miner-"..tostring(cfg.row).." could not reach its fuel Ender Chest")
+            end
+            if not collectAsset("packAssetFuel","Foreman-"..tostring(group).." fuel Ender Chest","front") then return false end
+            if not moveTo(cfg.row,-2) or not face(DIR_W) then
+                return blocked("Miner-"..tostring(cfg.row).." could not reach its dump Ender Chest")
+            end
+            if not collectAsset("packAssetDump","Foreman-"..tostring(group).." dump Ender Chest","front") then return false end
+            if not moveTo(cfg.row,-1) or not face(DIR_W) then
+                return blocked("Miner-"..tostring(cfg.row).." could not reach Foreman-"..tostring(group))
+            end
+            if not collectAsset("packAssetForeman","Foreman-"..tostring(group),"front") then return false end
+            if not moveTo(cfg.row-1,-1) then
+                return blocked("Miner-"..tostring(cfg.row).." could not enter Foreman-"..tostring(group).." square")
+            end
+            if not collectAsset("packAssetNavigator","GPS Navigator-"..tostring(group),"up") then return false end
+            if not moveTo(cfg.row,-1) or not moveTo(cfg.row,0) then
+                return blocked("Miner-"..tostring(cfg.row).." could not return home after pack hardware collection")
+            end
+        end
+
+        if not face(DIR_N) then return blocked("Miner-"..tostring(cfg.row).." could not face north after pack hardware collection") end
+        state.packAssetsReady=true
+        state.packAssetsAcknowledged=nil
+        state.packAssetProgress=nil
+        state.packAssetIntent=nil
+        state.packAssetError=nil
+        state.phase="RECALLED_PAUSED"
+        save()
+        send(cfg.managerId,{
+            type="pack_assets_ready",role="miner",row=cfg.row,
+            packToken=state.packToken,foremanCollected=state.packAssetForeman==true,
+            navigatorCollected=state.packAssetNavigator==true,
+            dumpCollected=state.packAssetDump==true,fuelCollected=state.packAssetFuel==true,
+            x=state.x,y=state.y,z=state.z,dir=state.dir,session=cfg.session
+        })
+        sendState("Pack hardware secured for Foreman-"..tostring(group))
+        return true
+    end
+
+    collectPackedMiners=function()
+        if cfg.row~=WORKER_COUNT or state.recallMode~="PACK" or state.y~=0 then
+            return false
+        end
+
+        local function inventoryTotal()
+            local total=0
+            for slot=1,16 do total=total+turtle.getItemCount(slot) end
+            return total
+        end
+
+        local function sideInventoryTotal(side)
+            local items=scanInventory(side)
+            if type(items)~="table" then return nil end
+            local total=0
+            for _,item in pairs(items) do
+                total=total+tonumber(item.qty or item.size or 1)
+            end
+            return total
         end
 
         local function reportMissing(row)
@@ -2652,9 +2875,130 @@ local function runMiner(cfg)
             return false
         end
 
+        local function selectEmptySlot()
+            for slot=1,16 do
+                if turtle.getItemCount(slot)==0 then
+                    turtle.select(slot)
+                    return slot
+                end
+            end
+            return nil
+        end
+
+        local function moveGroundTo(tx,tz)
+            while state.z>tz do
+                if not face(DIR_S) then return false,"turn south failed" end
+                local ok,reason=attemptForward()
+                if not ok then return false,reason end
+            end
+            while state.z<tz do
+                if not face(DIR_N) then return false,"turn north failed" end
+                local ok,reason=attemptForward()
+                if not ok then return false,reason end
+            end
+            while state.x>tx do
+                if not face(DIR_W) then return false,"turn west failed" end
+                local ok,reason=attemptForward()
+                if not ok then return false,reason end
+            end
+            while state.x<tx do
+                if not face(DIR_E) then return false,"turn east failed" end
+                local ok,reason=attemptForward()
+                if not ok then return false,reason end
+            end
+            return true,nil
+        end
+
+        local function dropAllIntoFront()
+            for slot=1,16 do
+                if turtle.getItemCount(slot)>0 then
+                    turtle.select(slot)
+                    if not turtle.drop() then return false,slot end
+                end
+            end
+            return inventoryTotal()==0,nil
+        end
+
+        local function continueOverflowTrip()
+            local returnX=tonumber(state.packOverflowReturnX)
+            if not returnX or returnX<2 or returnX>WORKER_COUNT then
+                return packBlock("Miner-16 overflow return position is invalid")
+            end
+            local stage=state.packOverflowStage or "TO_SUPPLY"
+            if stage=="TO_SUPPLY" then
+                local ok,reason=moveGroundTo(state.x,-1)
+                if not ok then return packBlock("Miner-16 could not enter the pack overflow lane: "..tostring(reason)) end
+                ok,reason=moveGroundTo(0,-1)
+                if not ok then return packBlock("Miner-16 could not reach the Black Blue Blue supply chest overflow position: "..tostring(reason)) end
+                if not face(DIR_N) then return packBlock("Miner-16 could not face the supply chest from the overflow lane") end
+                if not wrapInventory("front") then return packBlock("Black Blue Blue supply chest is missing during pack overflow") end
+                local beforeSupply=sideInventoryTotal("front")
+                if beforeSupply==nil then return packBlock("Black Blue Blue supply chest could not be counted during pack overflow") end
+                state.packOverflowBeforeSupply=beforeSupply
+                state.packOverflowBeforeCargo=inventoryTotal()
+                state.packOverflowStage="DEPOSIT"
+                save()
+                stage="DEPOSIT"
+            end
+            if stage=="DEPOSIT" then
+                if not face(DIR_N) or not wrapInventory("front") then
+                    return packBlock("Black Blue Blue supply chest is unavailable during pack overflow deposit")
+                end
+                local cargo=tonumber(state.packOverflowBeforeCargo) or inventoryTotal()
+                local beforeSupply=tonumber(state.packOverflowBeforeSupply)
+                if not beforeSupply then return packBlock("Pack overflow supply baseline is missing") end
+                local ok,slot=dropAllIntoFront()
+                if not ok then return packBlock("Miner-16 could not deposit overflow inventory slot "..tostring(slot)) end
+                local afterSupply=sideInventoryTotal("front")
+                if afterSupply==nil or afterSupply<beforeSupply+cargo then
+                    return packBlock("Supply chest did not receive the complete Miner-16 overflow deposit")
+                end
+                state.packDepositedCount=(tonumber(state.packDepositedCount) or 0)+cargo
+                state.packSupplyCount=afterSupply
+                state.packOverflowStage="RETURN"
+                save()
+                stage="RETURN"
+            end
+            if stage=="RETURN" then
+                local ok,reason=moveGroundTo(returnX,-1)
+                if not ok then return packBlock("Miner-16 could not return through the pack overflow lane: "..tostring(reason)) end
+                ok,reason=moveGroundTo(returnX,0)
+                if not ok then return packBlock("Miner-16 could not return to the pack collection lane: "..tostring(reason)) end
+                if not face(DIR_W) then return packBlock("Miner-16 could not restore west-facing pack alignment") end
+                state.packOverflowTrip=nil
+                state.packOverflowReturnX=nil
+                state.packOverflowStage=nil
+                state.packOverflowBeforeSupply=nil
+                state.packOverflowBeforeCargo=nil
+                state.packError=nil
+                save()
+                return true
+            end
+            return true
+        end
+
+        local function startOverflowTrip()
+            if inventoryTotal()==0 then return true end
+            state.packOverflowTrip=true
+            state.packOverflowReturnX=state.x
+            state.packOverflowStage="TO_SUPPLY"
+            state.packOverflowBeforeSupply=nil
+            state.packOverflowBeforeCargo=nil
+            save()
+            return continueOverflowTrip()
+        end
+
+        if state.packOverflowTrip then
+            if not continueOverflowTrip() then return false end
+        end
+
+        if state.x<1 or state.x>WORKER_COUNT or state.z~=0 then
+            return packBlock("Miner-16 is outside the pack collection lane")
+        end
+
         if state.x==WORKER_COUNT and not state.packStepIntent then
-            if freeInventorySlots()<WORKER_COUNT-1 then
-                return packBlock("Miner-16 needs at least 15 free inventory slots before packing")
+            if (tonumber(state.packDepositedCount) or 0)==0 and inventoryTotal()>0 then
+                return packBlock("Miner-16 must complete the pre-pack dump before collecting the swarm")
             end
             if state.dir==DIR_N then
                 if not turnStep(false) then
@@ -2663,7 +3007,7 @@ local function runMiner(cfg)
             elseif state.dir~=DIR_W then
                 return packBlock("Miner-16 is not facing north at the start of pack collection")
             end
-        elseif state.dir~=DIR_W then
+        elseif state.dir~=DIR_W and state.x>1 then
             return packBlock("Miner-16 lost west-facing pack alignment")
         end
 
@@ -2673,13 +3017,19 @@ local function runMiner(cfg)
 
         while state.x>1 do
             local targetRow=state.x-1
+            local expected=isChestCollector(targetRow) and (targetRow==chestCollectorRow(1) and 4 or 5) or 1
+            if not state.packStepIntent and freeInventorySlots()<expected then
+                if not startOverflowTrip() then return false end
+            end
             if not state.packStepIntent then
+                if freeInventorySlots()<expected then
+                    return packBlock("Miner-16 still lacks inventory space after overflow deposit")
+                end
                 if not turtle.detect() then
                     return packBlock("Expected parked Miner-"..tostring(targetRow).." in the pack lane")
                 end
-                local before={}
-                for slot=1,16 do before[slot]=turtle.getItemCount(slot) end
-                state.packStepIntent={stage="DIGGING",targetRow=targetRow,before=before}
+                state.packStepIntent={stage="DIGGING",targetRow=targetRow,
+                    beforeTotal=inventoryTotal(),expected=expected}
                 save()
             end
 
@@ -2688,33 +3038,32 @@ local function runMiner(cfg)
             end
 
             if state.packStepIntent.stage=="DIGGING" then
-                local before=state.packStepIntent.before or {}
+                local before=tonumber(state.packStepIntent.beforeTotal) or inventoryTotal()
+                local required=tonumber(state.packStepIntent.expected) or expected
                 if turtle.detect() then
+                    if not selectEmptySlot() then return packBlock("Miner-16 has no slot for Miner-"..tostring(targetRow)) end
                     local dug,digError=turtle.dig()
                     if not dug then
                         return packBlock("Could not break parked Miner-"..tostring(targetRow)..
                             ": "..tostring(digError or "dig failed"))
                     end
                 end
-
-                local recovered=false
-                for slot=1,16 do
-                    if turtle.getItemCount(slot)>(tonumber(before[slot]) or 0) then recovered=true end
-                end
-                if not recovered then
-                    for attempt=1,3 do
-                        turtle.suck()
-                        for slot=1,16 do
-                            if turtle.getItemCount(slot)>(tonumber(before[slot]) or 0) then recovered=true end
-                        end
-                        if recovered then break end
-                        sleep(0.2)
+                for attempt=1,96 do
+                    local moved=false
+                    for slot=1,16 do
+                        turtle.select(slot)
+                        if turtle.suck() then moved=true break end
                     end
+                    if not moved then break end
                 end
-                if not recovered then reportMissing(targetRow) end
-
+                local recovered=inventoryTotal()-before
+                if recovered<required then
+                    reportMissing(targetRow)
+                    return packBlock("Miner-16 recovered "..tostring(recovered).."/"..tostring(required)..
+                        " required pack items from Miner-"..tostring(targetRow))
+                end
                 state.packStepIntent.stage="DUG"
-                state.packStepIntent.before=nil
+                state.packStepIntent.beforeTotal=nil
                 save()
             end
 
@@ -2760,6 +3109,32 @@ local function runMiner(cfg)
             end
         end
 
+        if not state.packDeposited then
+            if not face(DIR_N) then return packBlock("Miner-16 could not face north at the supply station") end
+            if not face(DIR_W) then return packBlock("Miner-16 could not face the Black Blue Blue supply chest") end
+            if not wrapInventory("front") then
+                return packBlock("Black Blue Blue supply chest is not left of Miner-1's position")
+            end
+            local supplyBefore=sideInventoryTotal("front")
+            local depositing=inventoryTotal()
+            if supplyBefore==nil then return packBlock("Black Blue Blue supply chest could not be counted before final deposit") end
+            if depositing<1 then return packBlock("Miner-16 has no final packed items to deposit") end
+            local ok,slot=dropAllIntoFront()
+            if not ok then return packBlock("Miner-16 could not deposit final inventory slot "..tostring(slot).." into the supply chest") end
+            local supplyAfter=sideInventoryTotal("front")
+            if supplyAfter==nil or supplyAfter<supplyBefore+depositing then
+                return packBlock("Supply chest item count did not increase by the full final Miner-16 deposit")
+            end
+            state.packDepositedCount=(tonumber(state.packDepositedCount) or 0)+depositing
+            state.packSupplyCount=supplyAfter
+            if state.packDepositedCount<30 then
+                return packBlock("Miner-16 verified only "..tostring(state.packDepositedCount).."/30 required pack items in the supply chest")
+            end
+            state.packDeposited=true
+            save()
+        end
+
+        if not face(DIR_N) then return packBlock("Miner-16 could not face north after depositing the packed swarm") end
         for attempt=1,5 do
             os.setComputerLabel(nil)
             if os.getComputerLabel()==nil then break end
@@ -2774,11 +3149,14 @@ local function runMiner(cfg)
         save()
         for i=1,5 do
             send(cfg.managerId,{type="pack_done",row=WORKER_COUNT,x=state.x,
-                collected=WORKER_COUNT-1,missing=state.packMissing,
+                collected=WORKER_COUNT-1,missing=state.packMissing,deposited=true,
+                depositedCount=state.packDepositedCount,supplyCount=state.packSupplyCount,
                 packToken=state.packToken,session=cfg.session})
             sleep(0.1)
         end
-        sendState("Pack complete; paused at Miner-1")
+        sendState("Pack complete; swarm deposited in supply chest")
+        sleep(0.2)
+        os.shutdown()
         return true
     end
 
@@ -2871,13 +3249,17 @@ local function runMiner(cfg)
         checkpoint()
 
         if state.phase=="PACK_DONE" then
-            while state.phase=="PACK_DONE" do
+            for i=1,5 do
                 send(cfg.managerId,{type="pack_done",row=WORKER_COUNT,x=state.x,
                     collected=WORKER_COUNT-1,missing=state.packMissing,
+                    deposited=state.packDeposited==true,
+                    depositedCount=state.packDepositedCount,supplyCount=state.packSupplyCount,
                     packToken=state.packToken,session=cfg.session})
-                sendState("Pack complete; paused at Miner-1")
-                sleep(3)
+                sleep(0.1)
             end
+            sendState("Pack complete; swarm deposited in supply chest")
+            sleep(0.2)
+            os.shutdown()
             return
         end
 
