@@ -184,6 +184,7 @@ local function runForeman(cfg)
         startMining=false,
         dockGranted=false,
         recallMode=nil,
+        packService=false,
         resume=false,
         advanceCancelled=false,
         chunkCommand=nil
@@ -1336,18 +1337,18 @@ local function runForeman(cfg)
             local units=tonumber(state.runtimeFuelUnits)
             if not kind or not units or selfCount(kind)<units then
                 if not atFuel() then return false end
-                if not returnBucketsAtFuel() then
-                    state.phase="WAITING_FUEL"
-                    saveState()
-                    sendState("Fuel chest cannot accept empty buckets")
-                    return false
-                end
                 local needed=math.max(1,MINER_FUEL_TARGET-(tonumber(req and req.fuel) or 0))
                 kind,units=loadFuelPacket(needed)
                 if not kind then
                     state.phase="WAITING_FUEL"
                     saveState()
                     sendState("Fuel chest needs lava, blaze rods, charcoal, or coal")
+                    return false
+                end
+                if not returnBucketsAtFuel() then
+                    state.phase="WAITING_FUEL"
+                    saveState()
+                    sendState("Fuel chest cannot accept empty buckets after releasing service fuel")
                     return false
                 end
                 state.runtimeFuelKind=kind
@@ -1407,8 +1408,10 @@ local function runForeman(cfg)
                             x=state.x,y=state.y,z=state.z})
                     elseif sender==cfg.managerId and message.type=="manager_job" and
                         message.session==cfg.session and message.foremanNumber==number and
-                        state.phase~="RECALLED_PAUSED" and not state.recallMode and
-                        not flags.recallMode then
+                        ((state.phase~="RECALLED_PAUSED" and not state.recallMode and
+                          not flags.recallMode) or
+                         (flags.packService and state.recallMode=="PACK" and
+                          not flags.recallMode)) then
                         upsertRequest({
                             type="service_arrived",
                             requestId=message.requestId,
@@ -1511,7 +1514,31 @@ local function runForeman(cfg)
                             flags.resume=false
                             flags.recallMode=message.mode
                         end
+                    elseif sender==cfg.managerId and message.session==cfg.session and message.type=="pack_service_begin" then
+                        if state.recallMode=="PACK" and (flags.packService or active or #queue>0 or
+                            state.phase=="PACK_SERVICE" or state.phase=="SERVICING" or
+                            state.phase=="RETURNING_AFTER_SERVICE" or state.phase=="SERVICE_UNLOAD_TRIP") then
+                            flags.packService=true
+                            send(cfg.managerId,{type="pack_service_ready",number=number,session=cfg.session})
+                        elseif state.setupDone and not state.advanceStage and not active and #queue==0 and
+                            state.x==cfg.homeX and state.y==0 and state.z==cfg.homeZ then
+                            flags.resume=false
+                            flags.recallMode=nil
+                            flags.packService=true
+                            state.recallMode="PACK"
+                            state.phase="PACK_SERVICE"
+                            state.packReady=nil
+                            state.packAcknowledged=nil
+                            saveState()
+                            checkpointForeman()
+                            send(cfg.managerId,{type="pack_service_ready",number=number,session=cfg.session})
+                            sendState("Pack dump service ready")
+                        else
+                            send(cfg.managerId,{type="pack_service_blocked",number=number,
+                                reason="Foreman is not safely parked for Pack dump service",session=cfg.session})
+                        end
                     elseif sender==cfg.managerId and message.session==cfg.session and message.type == "recall_command" then
+                        flags.packService=false
                         flags.resume=false
                         flags.recallMode = message.mode or "NORMAL"
                         if flags.recallMode=="NORMAL" or flags.recallMode=="DUMP" or
@@ -2776,14 +2803,6 @@ local function runForeman(cfg)
             return false
         end
 
-        if not returnBucketsAtFuel() then
-            state.phase="WAITING_FUEL"
-            state.setupBlockReason="Foreman-"..tostring(number).." fuel chest cannot accept empty buckets"
-            saveState()
-            sendState(state.setupBlockReason)
-            return false
-        end
-
         if turtle.getFuelLevel()~="unlimited" and
             turtle.getFuelLevel()<=FOREMAN_FUEL_LOW and
             not refuelAtFrontTo(FOREMAN_FUEL_TARGET) then
@@ -2798,6 +2817,13 @@ local function runForeman(cfg)
         if not kind then
             state.phase="WAITING_FUEL"
             state.setupBlockReason="Foreman-"..tostring(number).." fuel chest needs a usable lava bucket, blaze rod, charcoal, or coal for its next miner"
+            saveState()
+            sendState(state.setupBlockReason)
+            return false
+        end
+        if not returnBucketsAtFuel() then
+            state.phase="WAITING_FUEL"
+            state.setupBlockReason="Foreman-"..tostring(number).." fuel chest cannot accept empty buckets after releasing the next fuel packet"
             saveState()
             sendState(state.setupBlockReason)
             return false
@@ -3057,10 +3083,6 @@ local function runForeman(cfg)
             state.setupBlockReason="Master Foreman fuel chest is unavailable"
             return false
         end
-        if not returnBucketsAtFuel() then
-            state.setupBlockReason="Master Foreman could not return empty buckets to the fuel chest"
-            return false
-        end
         if turtle.getFuelLevel()~="unlimited" and
             turtle.getFuelLevel()<=FOREMAN_FUEL_LOW and
             not refuelAtFrontTo(FOREMAN_FUEL_TARGET,true) then
@@ -3070,6 +3092,10 @@ local function runForeman(cfg)
         local kind,units=loadFuelPacket(800,4)
         if not kind then
             state.setupBlockReason="Fuel chest needs four Navigator fuel packets"
+            return false
+        end
+        if not returnBucketsAtFuel() then
+            state.setupBlockReason="Master Foreman could not return empty buckets after releasing Navigator fuel"
             return false
         end
         state.navigatorFuelKind=kind
@@ -3154,7 +3180,7 @@ local function runForeman(cfg)
         if n~=1 then
             state.foremanFuelPackages=state.foremanFuelPackages or {}
             if not state.foremanFuelPackages[n] then
-                if not atFuel() or not returnBucketsAtFuel() then
+                if not atFuel() then
                     state.setupBlockReason="Fuel chest is unavailable for Foreman-" .. tostring(n)
                     state.phase="WAITING_SUPPLIES"
                     saveState()
@@ -3164,6 +3190,13 @@ local function runForeman(cfg)
                 local kind,units=loadFuelPacket(800)
                 if not kind then
                     state.setupBlockReason="Fuel chest needs fuel for Foreman-" .. tostring(n)
+                    state.phase="WAITING_SUPPLIES"
+                    saveState()
+                    sendState(state.setupBlockReason)
+                    return false
+                end
+                if not returnBucketsAtFuel() then
+                    state.setupBlockReason="Fuel chest cannot accept empty buckets after releasing Foreman-" .. tostring(n) .. " fuel"
                     state.phase="WAITING_SUPPLIES"
                     saveState()
                     sendState(state.setupBlockReason)
@@ -4132,6 +4165,7 @@ local function runForeman(cfg)
 
     local function recallForeman(mode)
         mode=mode or "NORMAL"
+        flags.packService=false
         if not applyManagerForemanPose() then
             sendState("Recall refused: " .. tostring(state.recoveryReason or "pose uncertain"))
             return false
