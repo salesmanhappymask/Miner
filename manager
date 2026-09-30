@@ -1496,7 +1496,7 @@ local function runRegionalManager()
                 send(sender,{type="pack_assets_collect",packToken=data.recall.packToken,session=data.session})
             elseif data.recall.state=="PACK_COLLECT" and sender==data.recall.targets.miners[WORKER_COUNT] and
                 now()>=(data.recall.collectAfter or 0) then
-                send(sender,{type="pack_collect",packToken=data.recall.packToken,session=data.session})
+                send(sender,{type="pack_collect",packToken=data.recall.packToken,cargoCounts=data.recall.packAssetCargo,session=data.session})
             end
         elseif data.recall.active then
             local n=message.role=="navigator" and tonumber(message.number) or nil
@@ -1988,6 +1988,7 @@ local function runRegionalManager()
             packAfterDump=options.packAfterDump==true and true or nil,
             packCollected=0,
             packMissing={},
+            packAssetCargo={},
             packError=nil,
             packDepositedCount=nil,
             packSupplyCount=nil,
@@ -2286,7 +2287,7 @@ local function runRegionalManager()
                     save()
                     local collectorId=data.recall.targets.miners[WORKER_COUNT]
                     if collectorId then
-                        send(collectorId,{type="pack_collect",packToken=data.recall.packToken,session=data.session})
+                        send(collectorId,{type="pack_collect",packToken=data.recall.packToken,cargoCounts=data.recall.packAssetCargo,session=data.session})
                     end
                     lastRecall=now()
                 end
@@ -3869,6 +3870,8 @@ local function runRegionalManager()
                         ((row==chestCollectorRow(1) and message.fuelRetained==true) or
                          (row~=chestCollectorRow(1) and message.fuelCollected==true)) then
                         data.recall.packAssetsReady[row]=true
+                        data.recall.packAssetCargo=data.recall.packAssetCargo or {}
+                        data.recall.packAssetCargo[row]=tonumber(message.cargoCount)
                         data.recall.packError=nil
                         save()
                         send(sender,{type="pack_assets_ack",packToken=data.recall.packToken,session=data.session})
@@ -4056,7 +4059,7 @@ local function runRegionalManager()
                     elseif data.recall.state=="PACK_COLLECT" and now()>=(data.recall.collectAfter or 0) then
                         local collectorId=data.recall.targets.miners[WORKER_COUNT]
                         if collectorId then
-                            send(collectorId,{type="pack_collect",packToken=data.recall.packToken,session=data.session})
+                            send(collectorId,{type="pack_collect",packToken=data.recall.packToken,cargoCounts=data.recall.packAssetCargo,session=data.session})
                         end
                     end
                 elseif data.recall.mode=="NORMAL" or data.recall.mode=="SHUTDOWN" then
