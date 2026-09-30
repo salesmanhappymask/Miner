@@ -146,35 +146,82 @@ local function runManagerSeedBootstrap()
         return true
     end
 
-    local function supplyReady()
+    local function frontInventorySize()
         local inv=wrapInventory("front")
-        if not inv then return false end
-        return frontCount("advanced_wireless_narcissistic_turtle")>=1 and
-            frontCount("floppy")>=5 and
-            frontCount("disk_drive")>=1 and
-            frontCount("lava_bucket")>=2
+        if not inv then return nil end
+        local ok,size=pcall(inv.getInventorySize)
+        if not ok then return nil end
+        return tonumber(size)
+    end
+
+    local function supplyChestPresent()
+        local size=frontInventorySize()
+        return size and size>16
+    end
+
+    local function waitSupplyChest(seconds)
+        local deadline=now()+(tonumber(seconds) or 5)
+        repeat
+            if supplyChestPresent() then return true end
+            sleep(0.2)
+        until now()>=deadline
+        return false
     end
 
     local function placeSupplyChest()
-        if wrapInventory("front") then return true end
-        if turtle.detect() then return false end
+        if waitSupplyChest(1) then return true end
+        if turtle.detect() then
+            local size=frontInventorySize()
+            if not size then
+                if waitSupplyChest(5) then return true end
+                return false
+            end
+            if size<=16 and not seed.masterSlot and not seed.driveSlot and not seed.rmLavaSlot and not seed.masterLavaSlot then
+                local empty=firstEmptySlot()
+                if not empty then return false end
+                turtle.select(empty)
+                if not turtle.dig() then return false end
+                sleep(0.2)
+            else
+                return false
+            end
+        end
         for slot=1,16 do
             if turtle.getItemCount(slot)>0 then
                 turtle.select(slot)
                 local okProbe,canFuel=pcall(turtle.refuel,0)
                 if not (okProbe and canFuel) then
+                    local before=turtle.getItemCount(slot)
                     local placed=turtle.place()
                     if placed then
-                        for attempt=1,8 do
-                            sleep(0.15)
-                            if wrapInventory("front") then return true end
+                        if waitSupplyChest(5) then
+                            seed.supplySourceSlot=slot
+                            saveSeed()
+                            return true
                         end
+                        local empty=firstEmptySlot()
+                        if empty then turtle.select(empty) end
                         turtle.dig()
+                        sleep(0.15)
                     end
                 end
             end
         end
         return false
+    end
+
+    local function ensurePulled(field,kind,label)
+        local existing=tonumber(seed[field])
+        if existing and existing>=1 and existing<=16 and turtle.getItemCount(existing)>0 then
+            return existing
+        end
+        local slot=pullOne(kind)
+        if not slot then
+            error("Black Blue Blue supply chest is missing "..label)
+        end
+        seed[field]=slot
+        saveSeed()
+        return slot
     end
 
     os.setComputerLabel("Regional Manager")
@@ -193,34 +240,30 @@ local function runManagerSeedBootstrap()
     end
 
     if seed.phase=="SUPPLY_PLACED" then
-        if not wrapInventory("front") then
-            error("Black Blue Blue supply chest was placed but is no longer directly north of the Regional Manager")
-        end
-        local ready=false
-        for attempt=1,20 do
-            if supplyReady() then
-                ready=true
-                break
+        if not waitSupplyChest(5) then
+            if not faceSeed(DIR_N) or not placeSupplyChest() then
+                error("Black Blue Blue supply chest is not directly north of the Regional Manager and could not be restored")
             end
-            sleep(0.25)
         end
-        if not ready then
-            error("Placed Black Blue Blue supply chest is missing the Master Foreman turtle, five disks, Disk Drive, or two lava buckets")
-        end
-        seed.masterSlot=pullOne("advanced_wireless_narcissistic_turtle")
-        seed.workerDiskSlots={}
-        for i=1,4 do seed.workerDiskSlots[i]=pullOne("floppy") end
-        seed.setupDiskSlot=pullOne("floppy")
-        seed.driveSlot=pullOne("disk_drive")
-        seed.rmLavaSlot=pullOne("lava_bucket")
-        seed.masterLavaSlot=pullOne("lava_bucket")
-        if not seed.masterSlot or not seed.setupDiskSlot or not seed.driveSlot or
-            not seed.rmLavaSlot or not seed.masterLavaSlot then
-            error("Regional Manager could not pull the complete bootstrap package")
-        end
+        seed.masterSlot=ensurePulled("masterSlot","foreman_turtle","an Advanced Wireless Foreman turtle")
+        seed.workerDiskSlots=seed.workerDiskSlots or {}
         for i=1,4 do
-            if not seed.workerDiskSlots[i] then error("Regional Manager could not pull all four worker disks") end
+            local field="workerDiskSlot"..tostring(i)
+            local remembered=tonumber(seed.workerDiskSlots[i]) or tonumber(seed[field])
+            if remembered and turtle.getItemCount(remembered)>0 then
+                seed.workerDiskSlots[i]=remembered
+            else
+                local slot=pullOne("floppy")
+                if not slot then error("Black Blue Blue supply chest is missing worker disk "..tostring(i).." of 4") end
+                seed.workerDiskSlots[i]=slot
+                seed[field]=slot
+                saveSeed()
+            end
         end
+        seed.setupDiskSlot=ensurePulled("setupDiskSlot","floppy","the Master Foreman setup disk")
+        seed.driveSlot=ensurePulled("driveSlot","disk_drive","a Disk Drive")
+        seed.rmLavaSlot=ensurePulled("rmLavaSlot","lava_bucket","the Regional Manager lava bucket")
+        seed.masterLavaSlot=ensurePulled("masterLavaSlot","lava_bucket","the Master Foreman lava bucket")
         seed.phase="SUPPLIES_PULLED"
         saveSeed()
     end
