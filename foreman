@@ -71,27 +71,86 @@ local function runForeman(cfg)
         end
     end
 
+    local function foremanRecoveryReasonIsPositional(reason)
+        reason=tostring(reason or "")
+        return reason=="" or reason:find("interrupted",1,true)~=nil or
+            reason:find("Position ambiguous",1,true)~=nil or
+            reason:find("Fuel differs",1,true)~=nil or
+            reason:find("GPS differs from saved pose",1,true)~=nil or
+            reason:find("GPS facing recovery",1,true)~=nil or
+            reason:find("possible world rollback",1,true)~=nil or
+            reason:find("Manager and local foreman positions disagree",1,true)~=nil
+    end
+
+    local function adoptPhysicalForemanPose(managerState,managerSeq)
+        if state.recallMode=="PACK" or state.advanceStage then return false end
+        local gx,gy,gz=locateWorldPose(2)
+        if not gx then return false end
+        local lx,ly,lz=worldToLocalPose(gx,gy,gz,state.chunkIndex,cfg.worldOrigin)
+        if lx==nil or lx<0 or lx>18 or lz< -2 or lz>15 or ly<0 or ly>1 then
+            return false
+        end
+        local candidate=loadWorldPoseCandidate(statePath,cfg.worldOrigin,gx,gy,gz)
+        state.x=lx
+        state.y=ly
+        state.z=lz
+        state.motionIntent=nil
+        state.verticalIntent=nil
+        state.turnIntent=nil
+        state.chunkMoveIntent=nil
+        local recoveredDir,reason=recoverFacingByGPS(state,cfg.worldOrigin)
+        if not recoveredDir then
+            state.recoveryReason=reason or "Could not recover Foreman facing after world rollback"
+            return false
+        end
+        state.dir=recoveredDir
+        state.seq=math.max(tonumber(state.seq) or 0,tonumber(managerSeq) or 0)+1
+        state.recoveryLocked=nil
+        state.recoveryReason=nil
+        if state.setupDone then
+            state.phase="IDLE"
+        elseif candidate and candidate.phase and candidate.phase~="RECOVERY_LOCK" then
+            state.phase=candidate.phase
+        elseif type(managerState)=="table" and managerState.phase and managerState.phase~="RECOVERY_LOCK" then
+            state.phase=managerState.phase
+        else
+            state.phase="WAITING_SETUP"
+        end
+        state.fuelWitness=turtle.getFuelLevel()
+        saveTableLight(statePath,state)
+        if debugLog then
+            debugLog("RECOVERY","Adopted physical GPS pose after server rollback Foreman-"..
+                tostring(number).." x="..tostring(state.x).." y="..tostring(state.y)..
+                " z="..tostring(state.z).." phase="..tostring(state.phase),"WARN")
+        end
+        return true
+    end
+
     local function recoverForemanState()
         local priorLock=state.recoveryLocked and state.recoveryReason or nil
         local hadPending=state.motionIntent or state.verticalIntent or state.turnIntent or state.chunkMoveIntent
+        local managerState,managerSeq=requestPoseBackup("foreman",2,cfg.session)
+        if not managerState then
+            managerState=bootManagerState
+            managerSeq=bootManagerSeq
+        end
         if state.chunkMoveIntent then
             resolveChunkMove(state,function()
                 saveTableLight(statePath,state)
             end,cfg.worldOrigin)
-            if state.chunkMoveIntent then return false end
+            if state.chunkMoveIntent and not foremanRecoveryReasonIsPositional(priorLock) then return false end
         end
         if state.turnIntent then
-            local recoveredDir,reason=recoverFacingByGPS(state,cfg.worldOrigin)
-            if not recoveredDir then
-                state.recoveryLocked=true
-                state.recoveryReason=reason or "Facing ambiguous after interrupted turn"
-                state.phase="RECOVERY_LOCK"
-                saveTableLight(statePath,state)
+            local recoveredDir=recoverFacingByGPS(state,cfg.worldOrigin)
+            if recoveredDir then
+                state.dir=recoveredDir
+                state.seq=math.max(tonumber(state.seq) or 0,tonumber(state.turnIntent.seq) or 0)
+                state.turnIntent=nil
+            elseif adoptPhysicalForemanPose(managerState,managerSeq) then
+                return true
+            else
                 return false
             end
-            state.dir=recoveredDir
-            state.seq=math.max(tonumber(state.seq) or 0,tonumber(state.turnIntent.seq) or 0)
-            state.turnIntent=nil
         end
 
         if state.motionIntent or state.verticalIntent then
@@ -108,6 +167,7 @@ local function runForeman(cfg)
                 moved=movementFromGPS(gpsIntent,state.chunkIndex,cfg.worldOrigin,2)
             end
             if moved==nil then
+                if adoptPhysicalForemanPose(managerState,managerSeq) then return true end
                 state.recoveryLocked=true
                 state.recoveryReason="Position ambiguous after interrupted foreman movement; waiting for recovery GPS"
                 state.phase="RECOVERY_LOCK"
@@ -131,6 +191,7 @@ local function runForeman(cfg)
         end
 
         if not foremanPoseValid() then
+            if adoptPhysicalForemanPose(managerState,managerSeq) then return true end
             state.recoveryLocked=true
             state.recoveryReason="Saved foreman pose is outside the operating area"
             state.phase="RECOVERY_LOCK"
@@ -138,7 +199,14 @@ local function runForeman(cfg)
             return false
         end
 
-        if priorLock and not hadPending and
+        if priorLock and not hadPending and foremanRecoveryReasonIsPositional(priorLock) then
+            local x,y,z=locateWorldPose(2)
+            if not x then return false end
+            if not poseMatchesWorld(state,cfg.worldOrigin,x,y,z) then
+                if adoptPhysicalForemanPose(managerState,managerSeq) then return true end
+                return false
+            end
+        elseif priorLock and not hadPending and
             not priorLock:find("Fuel differs",1,true) and
             not priorLock:find("GPS is unavailable",1,true) then
             local x,y,z=locateWorldPose(2)
@@ -153,6 +221,9 @@ local function runForeman(cfg)
 
         local verified,reason,witnessUpdated=verifyBootWitness(state,cfg.worldOrigin,hadPending and true or false)
         if not verified then
+            if foremanRecoveryReasonIsPositional(reason) and adoptPhysicalForemanPose(managerState,managerSeq) then
+                return true
+            end
             state.recoveryLocked=true
             state.recoveryReason=reason
             state.phase="RECOVERY_LOCK"
@@ -162,7 +233,7 @@ local function runForeman(cfg)
 
         state.recoveryLocked=nil
         state.recoveryReason=nil
-        if state.phase=="RECOVERY_LOCK" then state.phase="IDLE" end
+        if state.phase=="RECOVERY_LOCK" then state.phase=state.setupDone and "IDLE" or "WAITING_SETUP" end
         state.fuelWitness=turtle.getFuelLevel()
         saveTableLight(statePath,state)
         return true
@@ -5028,8 +5099,10 @@ local function runForeman(cfg)
     local function workLoop()
         local nextIdleFuelAttempt=0
         while state.recoveryLocked do
-            state.phase="RECOVERY_LOCK"
-            saveState()
+            if state.phase~="RECOVERY_LOCK" then
+                state.phase="RECOVERY_LOCK"
+                saveState()
+            end
             if recoverForemanState() then break end
             sendState("Movement recovery waiting: " .. tostring(state.recoveryReason or "pose uncertain"))
             sleep(2)

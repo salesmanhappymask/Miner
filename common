@@ -1,4 +1,4 @@
-VERSION = 145
+VERSION = 146
 PROTOCOL = "miner_swarm_v121"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
@@ -1309,6 +1309,42 @@ function poseMatchesWorld(state,origin,x,y,z)
     local ex,ey,ez=worldPose(state.x,state.y,state.z,state.chunkIndex,origin)
     if not ex then return nil end
     return math.abs(x-ex)<0.25 and math.abs(y-ey)<0.25 and math.abs(z-ez)<0.25
+end
+
+function worldToLocalPose(worldX,worldY,worldZ,chunkIndex,origin)
+    if type(origin)~="table" or type(worldX)~="number" or
+        type(worldY)~="number" or type(worldZ)~="number" then return nil end
+    if type(origin.x)~="number" or type(origin.y)~="number" or
+        type(origin.z)~="number" then return nil end
+    local function snap(value)
+        local rounded
+        if value>=0 then rounded=math.floor(value+0.5)
+        else rounded=math.ceil(value-0.5) end
+        if math.abs(value-rounded)>0.25 then return nil end
+        return rounded
+    end
+    local x=snap(worldX-origin.x)
+    local y=snap(worldY-origin.y)
+    local z=snap(origin.z-worldZ-16*(tonumber(chunkIndex) or 0))
+    if x==nil or y==nil or z==nil then return nil end
+    return x,y,z
+end
+
+function loadWorldPoseCandidate(path,origin,worldX,worldY,worldZ)
+    local files={path,path .. ".new",path .. ".bak"}
+    local chosen=nil
+    local generation=-1
+    for i=1,#files do
+        local value=decodeTable(files[i])
+        if value and poseMatchesWorld(value,origin,worldX,worldY,worldZ) then
+            local count=tonumber(value.__saveGeneration) or 0
+            if count>generation then
+                chosen=value
+                generation=count
+            end
+        end
+    end
+    return chosen
 end
 
 function movementFromGPS(intent,chunkIndex,origin,timeout)

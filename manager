@@ -1743,6 +1743,10 @@ local function runRegionalManager()
         end
     end
 
+    local function entryRecoveryLocked(entry)
+        return type(entry)=="table" and entry.state=="RECOVERY_LOCK"
+    end
+
     local function dispatchJobs()
         if data.advance then return end
         if type(data.foremanJobs)~="table" then
@@ -1809,8 +1813,10 @@ local function runRegionalManager()
                 local request=pending[i].request
                 local n=request.foremanNumber
                 local f=data.foremen[n]
+                local miner=data.miners[tonumber(request.row)]
 
-                if f and f.id and online(f,20) and not data.foremanJobs[n] then
+                if f and f.id and online(f,20) and not entryRecoveryLocked(f) and
+                    not entryRecoveryLocked(miner) and not data.foremanJobs[n] then
                     data.foremanJobs[n]={
                         requestId=requestId,
                         row=request.row,
@@ -1835,7 +1841,9 @@ local function runRegionalManager()
             local request=data.requests[job.requestId]
             local f=data.foremen[n]
 
-            if request and f and f.id and request.status~="COMPLETE" then
+            local miner=request and data.miners[tonumber(request.row)] or nil
+            if request and f and f.id and request.status~="COMPLETE" and
+                not entryRecoveryLocked(f) and not entryRecoveryLocked(miner) then
                 if not job.lastSend or now()-job.lastSend>=1 then
                     send(f.id,{
                         type="manager_job",

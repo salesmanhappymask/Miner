@@ -895,6 +895,7 @@ local function runMiner(cfg)
             resumePos=state.resumePos,
             resumeDir=state.resumeDir,
             complete=state.complete,
+            chunkIndex=state.chunkIndex,
             blockedDetail=state.blockedDetail,
             packError=state.packError,
             originEstablished=state.originEstablished==true,
@@ -915,8 +916,10 @@ local function runMiner(cfg)
             return false
         end
 
+        local previousChunk=tonumber(state.chunkIndex) or 0
         state=snapshot
         state.row=cfg.row
+        state.chunkIndex=tonumber(state.chunkIndex) or previousChunk
         state.seq=tonumber(state.seq) or 0
         state.x=tonumber(state.x)
         state.y=tonumber(state.y)
@@ -963,6 +966,7 @@ local function runMiner(cfg)
                      managerState.z~=state.z or managerState.dir~=state.dir)) then
                 state.recoveryLocked=true
                 state.recoveryReason="Manager and local miner positions disagree after reboot"
+                if state.phase~="RECOVERY_LOCK" then state.recoveryPhase=state.phase end
                 state.phase="RECOVERY_LOCK"
                 saveTableLight(path,state)
                 if debugLog then
@@ -1004,6 +1008,7 @@ local function runMiner(cfg)
             if moved==nil then
                 state.recoveryLocked=true
                 state.recoveryReason="Position ambiguous after interrupted movement; waiting for recovery GPS"
+                if state.phase~="RECOVERY_LOCK" then state.recoveryPhase=state.phase end
                 state.phase="RECOVERY_LOCK"
             else
                 local pose=moved and state.motionIntent.to or state.motionIntent.from
@@ -1030,6 +1035,7 @@ local function runMiner(cfg)
             else
                 state.recoveryLocked=true
                 state.recoveryReason=reason or "Facing ambiguous after interrupted turn"
+                if state.phase~="RECOVERY_LOCK" then state.recoveryPhase=state.phase end
                 state.phase="RECOVERY_LOCK"
             end
             saveTableLight(path,state)
@@ -1062,6 +1068,7 @@ local function runMiner(cfg)
     if not poseValid() and not state.recoveryLocked then
         state.recoveryLocked=true
         state.recoveryReason="Saved miner pose is outside its legal shaft"
+        if state.phase~="RECOVERY_LOCK" then state.recoveryPhase=state.phase end
         state.phase="RECOVERY_LOCK"
         saveTableLight(path,state)
     end
@@ -1077,6 +1084,7 @@ local function runMiner(cfg)
         if not verified then
             state.recoveryLocked=true
             state.recoveryReason=reason
+            if state.phase~="RECOVERY_LOCK" then state.recoveryPhase=state.phase end
             state.phase="RECOVERY_LOCK"
             saveTableLight(path,state)
         end
@@ -2539,45 +2547,162 @@ local function runMiner(cfg)
             reason:find("Facing ambiguous",1,true)~=nil or
             reason:find("Fuel differs",1,true)~=nil or
             reason:find("GPS position differs",1,true)~=nil or
+            reason:find("GPS differs from saved pose",1,true)~=nil or
+            reason:find("GPS facing recovery",1,true)~=nil or
+            reason:find("possible world rollback",1,true)~=nil or
             reason:find("Cannot resolve interrupted Miner-16 pack move",1,true)~=nil or
             reason:find("Cannot verify miner position against Regional Manager for recall",1,true)~=nil or
             reason:find("Manager and local miner positions disagree after reboot",1,true)~=nil
+    end
+
+    local function validRecoveryPhase(phase)
+        return phase=="MINING" or phase=="RETURNING_SERVICE" or
+            phase=="WAITING_SERVICE" or phase=="RETURNING_MINE" or
+            phase=="WAITING" or phase=="COMPLETE" or
+            phase=="RECALLED_PAUSED"
+    end
+
+    local function recoverPhaseFromAuthority(authority)
+        local phase=state.recoveryPhase
+        if not validRecoveryPhase(phase) and type(authority)=="table" then
+            phase=authority.phase
+        end
+        if not state.request and type(authority)=="table" and type(authority.request)=="table" then
+            state.request=authority.request
+        end
+        if type(authority)=="table" then
+            if type(authority.resumeX)=="number" then state.resumeX=authority.resumeX end
+            if type(authority.resumeY)=="number" then state.resumeY=authority.resumeY end
+            if type(authority.resumeZ)=="number" then state.resumeZ=authority.resumeZ end
+            if type(authority.resumeDir)=="number" then state.resumeDir=authority.resumeDir end
+        end
+        if state.request then
+            if state.x==cfg.homeX and state.y==cfg.homeY and state.z==cfg.homeZ then
+                return "WAITING_SERVICE"
+            end
+            return "RETURNING_SERVICE"
+        end
+        if phase=="RETURNING_MINE" then return phase end
+        if phase=="MINING" then return phase end
+        if phase=="RECALLED_PAUSED" and state.recallMode then return phase end
+        if state.complete then return "COMPLETE" end
+        if state.y<cfg.homeY or state.z>cfg.homeZ then return "MINING" end
+        return "WAITING"
+    end
+
+    local function adoptPhysicalMinerPose(authority,authoritySeq)
+        if state.recallMode=="PACK" or state.packAssetProgress or state.advanceStage or
+            state.chunkMoveIntent or state.packStepIntent or
+            state.phase=="PACK_COLLECT" or state.phase=="PACK_BLOCKED" or
+            state.phase=="PACK_DONE" then return false end
+        local gx,gy,gz=locateWorldPose(2)
+        if not gx then return false end
+        local lx,ly,lz=worldToLocalPose(gx,gy,gz,state.chunkIndex,cfg.worldOrigin)
+        if lx==nil or lx~=cfg.homeX or ly>cfg.homeY or
+            lz<cfg.shaftMinZ or lz>cfg.shaftMaxZ then
+            return false
+        end
+
+        local candidate=loadWorldPoseCandidate(path,cfg.worldOrigin,gx,gy,gz)
+        if candidate and candidate.row==cfg.row and candidate.phase~="RECOVERY_LOCK" then
+            if not state.request and type(candidate.request)=="table" then state.request=candidate.request end
+            if type(candidate.resumeX)=="number" then state.resumeX=candidate.resumeX end
+            if type(candidate.resumeY)=="number" then state.resumeY=candidate.resumeY end
+            if type(candidate.resumeZ)=="number" then state.resumeZ=candidate.resumeZ end
+            if type(candidate.resumeDir)=="number" then state.resumeDir=candidate.resumeDir end
+            if validRecoveryPhase(candidate.phase) then state.recoveryPhase=candidate.phase end
+        end
+        local semanticKnown=state.request~=nil or validRecoveryPhase(state.recoveryPhase) or
+            (type(authority)=="table" and validRecoveryPhase(authority.phase))
+        if not semanticKnown then return false end
+
+        state.x=lx
+        state.y=ly
+        state.z=lz
+        state.depth=-ly
+        state.pos=lz
+        state.motionIntent=nil
+        state.turnIntent=nil
+        state.chunkMoveIntent=nil
+        state.packStepIntent=nil
+
+        local recoveredDir,dirReason=recoverFacingByGPS(state,cfg.worldOrigin)
+        if not recoveredDir then
+            local phase=recoverPhaseFromAuthority(authority)
+            if phase=="MINING" and lz==cfg.shaftMinZ then
+                recoveredDir=DIR_N
+            elseif phase=="MINING" and lz==cfg.shaftMaxZ then
+                recoveredDir=DIR_S
+            else
+                state.recoveryReason=dirReason or "Could not recover miner facing after world rollback"
+                return false
+            end
+        end
+        state.dir=recoveredDir
+        state.phase=recoverPhaseFromAuthority(authority)
+        state.recoveryPhase=nil
+        state.recoveryLocked=nil
+        state.recoveryReason=nil
+        state.seq=math.max(tonumber(state.seq) or 0,tonumber(authoritySeq) or 0)+1
+        state.fuelWitness=turtle.getFuelLevel()
+        save()
+        checkpoint()
+        if debugLog then
+            debugLog("RECOVERY","Adopted physical GPS pose after server rollback row="..
+                tostring(cfg.row).." x="..tostring(state.x).." y="..tostring(state.y)..
+                " z="..tostring(state.z).." phase="..tostring(state.phase),"WARN")
+        end
+        return true
     end
 
     local function attemptMinerRecovery()
         local priorReason=state.recoveryLocked and state.recoveryReason or nil
         local hadPending=state.motionIntent or state.turnIntent or state.chunkMoveIntent or
             (state.packStepIntent and state.packStepIntent.stage=="MOVING")
-        if state.chunkMoveIntent then
-            resolveChunkMove(state,function() save() end,cfg.worldOrigin)
-            if state.chunkMoveIntent then return false end
+        local authority,authoritySeq=requestPoseBackup("miner",2,cfg.session)
+        if not authority then
+            authority=bootManagerState
+            authoritySeq=bootManagerSeq
         end
 
+        if state.chunkMoveIntent then
+            resolveChunkMove(state,function() save() end,cfg.worldOrigin)
+            if state.chunkMoveIntent and not minerRecoveryReasonIsPositional(priorReason) then return false end
+        end
+
+        local unresolvedMove=false
         if state.motionIntent then
             local intent=state.motionIntent
             local moved=movementFromFuel(intent.fuelBefore,turtle.getFuelLevel())
             if moved==nil then moved=movementFromGPS(intent,state.chunkIndex,cfg.worldOrigin,2) end
-            if moved==nil or type(intent.from)~="table" or type(intent.to)~="table" then return false end
-            local pose=moved and intent.to or intent.from
-            state.x=pose.x
-            state.y=pose.y
-            state.z=pose.z
-            state.dir=pose.dir
-            state.depth=-state.y
-            state.pos=state.z
-            if moved and tonumber(intent.seq) then state.seq=math.max(state.seq,tonumber(intent.seq)) end
-            state.motionIntent=nil
+            if moved==nil or type(intent.from)~="table" or type(intent.to)~="table" then
+                unresolvedMove=true
+            else
+                local pose=moved and intent.to or intent.from
+                state.x=pose.x
+                state.y=pose.y
+                state.z=pose.z
+                state.dir=pose.dir
+                state.depth=-state.y
+                state.pos=state.z
+                if moved and tonumber(intent.seq) then state.seq=math.max(state.seq,tonumber(intent.seq)) end
+                state.motionIntent=nil
+            end
         end
 
-        if state.turnIntent then
+        local unresolvedTurn=false
+        if state.turnIntent and not unresolvedMove then
             local recoveredDir=recoverFacingByGPS(state,cfg.worldOrigin)
-            if recoveredDir==nil then return false end
-            state.dir=recoveredDir
-            if tonumber(state.turnIntent.seq) then state.seq=math.max(state.seq,tonumber(state.turnIntent.seq)) end
-            state.turnIntent=nil
+            if recoveredDir==nil then
+                unresolvedTurn=true
+            else
+                state.dir=recoveredDir
+                if tonumber(state.turnIntent.seq) then state.seq=math.max(state.seq,tonumber(state.turnIntent.seq)) end
+                state.turnIntent=nil
+            end
         end
 
-        if state.packStepIntent and state.packStepIntent.stage=="MOVING" then
+        if state.packStepIntent and state.packStepIntent.stage=="MOVING" and not unresolvedMove then
             local moved=movementFromFuel(state.packStepIntent.fuelBefore,turtle.getFuelLevel())
             local fromX=tonumber(state.packStepIntent.fromX) or state.x
             local toX=tonumber(state.packStepIntent.toX) or (fromX-1)
@@ -2597,18 +2722,32 @@ local function runMiner(cfg)
             end
         end
 
+        if unresolvedMove or unresolvedTurn or state.chunkMoveIntent or
+            (state.recoveryLocked and minerRecoveryReasonIsPositional(priorReason)) then
+            if adoptPhysicalMinerPose(authority,authoritySeq) then return true end
+            return false
+        end
+
         if state.motionIntent or state.turnIntent or state.chunkMoveIntent then return false end
-        if not poseValid() then return false end
+        if not poseValid() then
+            if adoptPhysicalMinerPose(authority,authoritySeq) then return true end
+            return false
+        end
 
         if state.recoveryLocked then
             if not hadPending and not minerRecoveryReasonIsPositional(priorReason) then return false end
             local x,y,z=locateWorldPose(2)
-            if not x or not poseMatchesWorld(state,cfg.worldOrigin,x,y,z) then return false end
+            if not x then return false end
+            if not poseMatchesWorld(state,cfg.worldOrigin,x,y,z) then
+                if adoptPhysicalMinerPose(authority,authoritySeq) then return true end
+                return false
+            end
         end
 
         state.recoveryLocked=nil
         state.recoveryReason=nil
-        if state.phase=="RECOVERY_LOCK" then state.phase="WAITING" end
+        state.recoveryPhase=nil
+        if state.phase=="RECOVERY_LOCK" then state.phase=recoverPhaseFromAuthority(authority) end
         state.fuelWitness=turtle.getFuelLevel()
         save()
         checkpoint()
@@ -3777,8 +3916,11 @@ local function runMiner(cfg)
 
     local function workLoop()
         while state.recoveryLocked do
-            state.phase="RECOVERY_LOCK"
-            save()
+            if state.phase~="RECOVERY_LOCK" then
+                state.recoveryPhase=state.phase
+                state.phase="RECOVERY_LOCK"
+                save()
+            end
             if attemptMinerRecovery() then break end
             sendState("Movement recovery waiting: " .. tostring(state.recoveryReason or "pose uncertain"))
             sleep(2)
