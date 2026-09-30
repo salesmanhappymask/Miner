@@ -578,6 +578,20 @@ local function runRegionalManager()
 
     local seedConfig=loadTable("manager_seed.cfg")
     local data=loadTableLight("regional_manager.tmp")
+    local semanticBackup=loadTable("regional_manager.tmp.bak")
+    local function advancedPackState(value)
+        local recall=type(value)=="table" and value.recall or nil
+        if type(recall)~="table" or recall.mode~="PACK" then return false end
+        return recall.state=="PACK_RM_FINALIZE" or recall.state=="PACK_COMPLETE" or
+            (recall.state=="PACK_COLLECT" and (tonumber(recall.packCollected) or 0)>=WORKER_COUNT-1)
+    end
+    if advancedPackState(semanticBackup) and not advancedPackState(data) and
+        (not data or not data.session or not semanticBackup.session or data.session==semanticBackup.session) then
+        data=semanticBackup
+        data.version=VERSION
+        saveTableLight("regional_manager.tmp",data)
+        debugLog("RECOVERY","Promoted advanced PACK transaction from backup state","WARN")
+    end
     if not data and
         (fs.exists("regional_manager.tmp") or fs.exists("regional_manager.tmp.new") or
          fs.exists("regional_manager.tmp.bak")) then
@@ -1976,7 +1990,9 @@ local function runRegionalManager()
             debugLog("RECALL","Aborted chunk transition phase="..tostring(cancelledPhase)..
                 " target="..tostring(cancelledTarget).." for "..tostring(mode),"WARN")
         end
-        if data.recall.mode=="PACK" and data.recall.state=="PACK_COLLECT" then
+        if data.recall.mode=="PACK" and
+            (data.recall.state=="PACK_COLLECT" or data.recall.state=="PACK_RM_FINALIZE" or
+             data.recall.state=="PACK_COMPLETE") then
             return false
         end
         if data.recall.mode=="PACK" and data.recall.state=="PACK_CLEAR" and
@@ -2769,14 +2785,39 @@ local function runRegionalManager()
         end
 
         local function supplyStation()
+            local function supplyCandidate()
+                if not wrapInventory("front") then return false end
+                local total=packInventoryTotal("front")
+                if total==nil then return false end
+                local minimum=tonumber(data.recall.packSupplyCount) or tonumber(data.recall.packDepositedCount) or 1
+                return total>=math.max(1,minimum)
+            end
             local ok,reason=managerPackMoveTo(0,-1)
             if not ok then return false,"RM could not reach the supply station: "..tostring(reason) end
             ok,reason=managerPackFace(DIR_N)
             if not ok then return false,tostring(reason) end
-            if not wrapInventory("front") then
-                return false,"Black Blue Blue supply chest is not directly north of the RM"
+            if supplyCandidate() then return true,nil end
+
+            for _=1,3 do
+                ok,reason=managerPackTurnRight()
+                if not ok then return false,tostring(reason) end
+                if supplyCandidate() then
+                    if data.managerPose.dir==DIR_N then
+                        data.managerPose.x=0;data.managerPose.z=-1
+                    elseif data.managerPose.dir==DIR_E then
+                        data.managerPose.x=-1;data.managerPose.z=0
+                    elseif data.managerPose.dir==DIR_S then
+                        data.managerPose.x=0;data.managerPose.z=1
+                    else
+                        data.managerPose.x=1;data.managerPose.z=0
+                    end
+                    data.recall.packMoveIntent=nil
+                    save()
+                    flushManager(true)
+                    return true,nil
+                end
             end
-            return true,nil
+            return false,"Black Blue Blue supply chest could not be reacquired adjacent to the RM"
         end
 
         local stage=data.recall.packFinalizeStage or "SUPPLY"
@@ -3162,24 +3203,52 @@ local function runRegionalManager()
                     end
                 end
                 if not data.recall.packFuelChestDeposited then
-                    if not slot or turtle.getItemCount(slot)<1 then
-                        return packFinalizeBlocked("RM no longer has the witnessed Foreman-1 fuel chest item")
+                    local deposited=false
+                    if slot and turtle.getItemCount(slot)>0 then
+                        if not data.recall.packFuelChestDepositIntent then
+                            data.recall.packFuelChestDepositIntent={
+                                slot=slot,beforeSlotCount=turtle.getItemCount(slot),beforeFuelChestCount=fuelChests
+                            }
+                            save()
+                            flushManager(true)
+                        end
+                        turtle.select(slot)
+                        if turtle.drop(1) then
+                            local after=packInventoryCount("front","ender_fuel")
+                            local before=tonumber(data.recall.packFuelChestDepositIntent.beforeFuelChestCount) or fuelChests
+                            deposited=after and after>=before+1
+                            fuelChests=after or fuelChests
+                        end
                     end
-                    if not data.recall.packFuelChestDepositIntent then
-                        data.recall.packFuelChestDepositIntent={
-                            slot=slot,beforeSlotCount=turtle.getItemCount(slot),beforeFuelChestCount=fuelChests
-                        }
-                        save()
-                        flushManager(true)
+
+                    if not deposited and fuelChests<FOREMAN_COUNT then
+                        local setupSlot=seedConfig and tonumber(seedConfig.setupDiskSlot)
+                        for candidate=1,16 do
+                            if candidate~=setupSlot and turtle.getItemCount(candidate)>0 and fuelChests<FOREMAN_COUNT then
+                                local before=packInventoryCount("front","ender_fuel")
+                                if before==nil then
+                                    return packFinalizeBlocked("Black Blue Blue supply chest became unreadable during recovered-cargo deposit")
+                                end
+                                turtle.select(candidate)
+                                if turtle.drop(1) then
+                                    local after=packInventoryCount("front","ender_fuel")
+                                    if after==nil then
+                                        return packFinalizeBlocked("Black Blue Blue supply chest became unreadable during recovered-cargo deposit")
+                                    end
+                                    fuelChests=after
+                                    if after>before then
+                                        deposited=true
+                                        data.recall.packFuelChestSlot=nil
+                                        data.recall.packFuelChestDepositIntent=nil
+                                        break
+                                    end
+                                end
+                            end
+                        end
                     end
-                    turtle.select(slot)
-                    if not turtle.drop(1) then
-                        return packFinalizeBlocked("RM could not place the witnessed Foreman-1 fuel chest into the supply chest")
-                    end
-                    local after=packInventoryCount("front","ender_fuel")
-                    local before=tonumber(data.recall.packFuelChestDepositIntent.beforeFuelChestCount) or fuelChests
-                    if after==nil or after<before+1 then
-                        return packFinalizeBlocked("Supply chest did not register Foreman-1's fuel Ender Chest")
+
+                    if not deposited and fuelChests<FOREMAN_COUNT then
+                        return packFinalizeBlocked("Supply chest still lacks Foreman-1's recovered fuel Ender Chest after depositing RM pack cargo")
                     end
                     data.recall.packFuelChestDeposited=true
                     data.recall.packFuelChestDepositIntent=nil
@@ -3223,30 +3292,37 @@ local function runRegionalManager()
                 end
                 if not data.recall.packSetupDiskDeposited then
                     local preferred=seedConfig and tonumber(seedConfig.setupDiskSlot)
-                    local slot=preferred and turtle.getItemCount(preferred)>0 and preferred or nil
-                    if not slot then
-                        local candidates={}
-                        for i=1,16 do
-                            if turtle.getItemCount(i)>0 then candidates[#candidates+1]=i end
+                    local slots={}
+                    if preferred and turtle.getItemCount(preferred)>0 then slots[#slots+1]=preferred end
+                    for i=1,16 do
+                        if i~=preferred and turtle.getItemCount(i)>0 then slots[#slots+1]=i end
+                    end
+                    local deposited=false
+                    for _,slot in ipairs(slots) do
+                        local before=packInventoryCount("front","floppy")
+                        if before==nil then
+                            return packFinalizeBlocked("Black Blue Blue supply chest became unreadable during setup-disk deposit")
                         end
-                        if #candidates==1 then slot=candidates[1] end
+                        data.recall.packSetupDiskDepositIntent={
+                            slot=slot,beforeSlotCount=turtle.getItemCount(slot),beforeFloppyCount=before
+                        }
+                        save()
+                        flushManager(true)
+                        turtle.select(slot)
+                        if turtle.drop(1) then
+                            local after=packInventoryCount("front","floppy")
+                            if after==nil then
+                                return packFinalizeBlocked("Black Blue Blue supply chest became unreadable during setup-disk deposit")
+                            end
+                            floppyCount=after
+                            if after>before then
+                                deposited=true
+                                break
+                            end
+                        end
                     end
-                    if not slot then
-                        return packFinalizeBlocked("RM cannot identify the witnessed Master Foreman setup-disk slot")
-                    end
-                    data.recall.packSetupDiskDepositIntent={
-                        slot=slot,beforeSlotCount=turtle.getItemCount(slot),beforeFloppyCount=floppyCount
-                    }
-                    save()
-                    flushManager(true)
-                    turtle.select(slot)
-                    if not turtle.drop(1) then
-                        return packFinalizeBlocked("RM could not place the Master Foreman setup disk into the supply chest")
-                    end
-                    local after=packInventoryCount("front","floppy")
-                    local before=tonumber(data.recall.packSetupDiskDepositIntent.beforeFloppyCount) or floppyCount
-                    if after==nil or after<before+1 then
-                        return packFinalizeBlocked("Supply chest did not receive the Master Foreman setup disk")
+                    if not deposited then
+                        return packFinalizeBlocked("Supply chest did not receive the Master Foreman setup disk from RM pack cargo")
                     end
                     data.recall.packSetupDiskDeposited=true
                     data.recall.packSetupDiskDepositIntent=nil
