@@ -86,10 +86,13 @@ end
 local running = shell.getRunningProgram() or ""
 local fromDisk = running:match("^/?disk/") ~= nil
 local autoReboot=false
+local preserveState=false
 local explicitRole=nil
 for _,arg in ipairs(args) do
     if arg=="--reboot" or arg=="--auto-reboot" then
         autoReboot=true
+    elseif arg=="--preserve-state" then
+        preserveState=true
     elseif not explicitRole then
         explicitRole=normalize(arg)
     end
@@ -317,7 +320,7 @@ saveConfig(role)
 if fs.exists(stageDir) then fs.delete(stageDir) end
 if fs.exists(backupDir) then fs.delete(backupDir) end
 
-if anchor then
+if anchor and preserveState then
     writeFile("world_anchor", textutils.serialize(anchor))
 end
 writeFile("update.new", updaterSource)
@@ -331,6 +334,58 @@ if readFile("update") ~= updaterSource then
 end
 if fs.exists("update.old") then fs.delete("update.old") end
 
+local function clearEphemeral()
+    local targets={"logs","diagnostics.txt",".runtime_crash_count"}
+    for _,name in ipairs(fs.list("")) do
+        if name:match("_error%.log$") then targets[#targets+1]=name end
+    end
+    for _,name in ipairs(targets) do
+        if fs.exists(name) then
+            local ok,err=pcall(fs.delete,name)
+            if not ok or fs.exists(name) then
+                error("Update installed, but could not clear stale diagnostic file " .. tostring(name) .. (err and (": " .. tostring(err)) or ""))
+            end
+        end
+    end
+end
+
+local function cleanReset()
+    local keep={
+        startup=true,
+        common=true,
+        prep=true,
+        push=true,
+        pushlogs=true,
+        version=true,
+        update=true,
+        [CONFIG]=true
+    }
+    keep[role == "manager" and "manager" or "foreman"]=true
+    if role=="master" then keep.world_anchor=true end
+
+    local failures={}
+    for _,name in ipairs(fs.list("")) do
+        local mounted=name=="rom" or name:match("^disk%d*$")
+        if not keep[name] and not mounted then
+            local ok,err=pcall(fs.delete,name)
+            if not ok or fs.exists(name) then
+                failures[#failures+1]=name .. (err and (": " .. tostring(err)) or "")
+            end
+        end
+    end
+    if #failures>0 then
+        error("Update installed, but clean reset could not remove: " .. table.concat(failures, ", "))
+    end
+    if anchor then
+        writeFile("world_anchor", textutils.serialize(anchor))
+    end
+end
+
+clearEphemeral()
+if not preserveState then
+    cleanReset()
+end
+
 if role == "manager" then
     os.setComputerLabel("Regional Manager")
 else
@@ -340,7 +395,11 @@ end
 print("")
 print("Update complete.")
 print("Installed version " .. version .. " for " .. roleName(role) .. ".")
-print("The permanent updater was refreshed and saved role/state files were preserved.")
+if preserveState then
+    print("The permanent updater was refreshed, runtime state was preserved, and stale logs were cleared.")
+else
+    print("The permanent updater was refreshed and the turtle was reset to a clean " .. roleName(role) .. " default.")
+end
 if autoReboot then
     print("Rebooting into the updated release...")
     sleep(1)

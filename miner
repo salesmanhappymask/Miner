@@ -1731,6 +1731,99 @@ local function runMiner(cfg)
     local function runChunkMove(target)
         if state.recoveryLocked or state.recallMode or not state.complete or
             state.x~=cfg.row or state.y~=0 or state.z<0 or state.z>16 then return false end
+
+        local function frontSupplyInventory()
+            local inv=wrapInventory("front")
+            if not inv then return nil end
+            local ok,size=pcall(inv.getInventorySize)
+            size=ok and tonumber(size) or nil
+            if not size or size<=16 then return nil end
+            return inv
+        end
+
+        local function changedSlot(before)
+            local best=nil
+            local delta=0
+            for slot=1,16 do
+                local change=turtle.getItemCount(slot)-(tonumber(before[slot]) or 0)
+                if change>delta then
+                    best=slot
+                    delta=change
+                end
+            end
+            return best,delta
+        end
+
+        if cfg.row==1 and state.chunkIndex<target then
+            if state.supplyChestTarget and tonumber(state.supplyChestTarget)~=target then
+                sendState("Supply chest move target does not match the requested chunk")
+                return false
+            end
+            state.supplyChestTarget=target
+            if not state.supplyChestCarried then
+                if not face(DIR_W) then
+                    sendState("Miner-1 could not face the supply chest")
+                    return false
+                end
+                local intent=state.supplyChestIntent
+                if not intent then
+                    if not frontSupplyInventory() then
+                        sendState("Black Blue Blue supply chest is not left of Miner-1 before chunk travel")
+                        return false
+                    end
+                    if freeInventorySlots()<1 then
+                        sendState("Miner-1 needs one free slot to move the Black Blue Blue supply chest")
+                        return false
+                    end
+                    local before={}
+                    for slot=1,16 do before[slot]=turtle.getItemCount(slot) end
+                    intent={before=before,target=target}
+                    state.supplyChestIntent=intent
+                    save()
+                end
+
+                local slot,delta=changedSlot(intent.before or {})
+                if not slot or delta<1 then
+                    if not frontSupplyInventory() then
+                        sendState("Black Blue Blue supply chest disappeared before Miner-1 could collect it")
+                        return false
+                    end
+                    local preferred=nil
+                    for i=1,16 do
+                        if turtle.getItemCount(i)==0 then preferred=i break end
+                    end
+                    if not preferred then
+                        sendState("Miner-1 has no free slot for the Black Blue Blue supply chest")
+                        return false
+                    end
+                    turtle.select(preferred)
+                    local dug,digError=turtle.dig()
+                    if not dug then
+                        sendState("Miner-1 could not collect the Black Blue Blue supply chest: "..tostring(digError or "dig failed"))
+                        return false
+                    end
+                    slot,delta=changedSlot(intent.before or {})
+                    if not slot or delta<1 then
+                        turtle.select(preferred)
+                        turtle.suck()
+                        slot,delta=changedSlot(intent.before or {})
+                    end
+                end
+                if not slot or delta<1 then
+                    sendState("Miner-1 broke the Black Blue Blue supply chest but did not recover its item")
+                    return false
+                end
+                state.supplyChestSlot=slot
+                state.supplyChestCarried=true
+                state.supplyChestIntent=nil
+                save()
+            end
+            if not face(DIR_N) then
+                sendState("Miner-1 could not face north after collecting the supply chest")
+                return false
+            end
+        end
+
         state.advanceStage="MOVE"
         state.phase="ADVANCE_MOVE"
         save()
@@ -1749,13 +1842,49 @@ local function runMiner(cfg)
             sendState(reason)
             return false
         end
+
+        if cfg.row==1 and tonumber(state.supplyChestTarget)==target then
+            if not face(DIR_W) then
+                sendState("Miner-1 could not face the new supply-chest position")
+                return false
+            end
+            local placed=frontSupplyInventory()~=nil
+            if not placed then
+                local slot=tonumber(state.supplyChestSlot)
+                if not state.supplyChestCarried or not slot or turtle.getItemCount(slot)<1 then
+                    sendState("Miner-1 no longer has the Black Blue Blue supply chest after chunk travel")
+                    return false
+                end
+                turtle.select(slot)
+                if not turtle.place() then
+                    sendState("Miner-1 could not place the Black Blue Blue supply chest at the new chunk")
+                    return false
+                end
+                placed=frontSupplyInventory()~=nil
+            end
+            if not placed then
+                sendState("Miner-1 could not verify the Black Blue Blue supply chest at the new chunk")
+                return false
+            end
+            state.supplyChestCarried=nil
+            state.supplyChestSlot=nil
+            state.supplyChestIntent=nil
+            state.supplyChestTarget=nil
+            save()
+            if not face(DIR_N) then
+                sendState("Miner-1 could not restore its north-facing chunk position")
+                return false
+            end
+        end
+
         state.advanceStage="WAIT"
         state.phase="ADVANCE_WAIT"
         state.resumeZ=0
         save()
         checkpoint()
         advanceAck("MOVE_M",target)
-        sendState("Waiting for next chunk release")
+        sendState(cfg.row==1 and "Supply chest moved; waiting for next chunk release" or
+            "Waiting for next chunk release")
         return true
     end
 
@@ -1768,7 +1897,8 @@ local function runMiner(cfg)
                 sendState("Chest collection blocked; check lane and inventory")
             end
         elseif command.stage=="MOVE_M" then
-            if state.chunkIndex>=command.target then
+            local supplyPending=cfg.row==1 and tonumber(state.supplyChestTarget)==tonumber(command.target)
+            if state.chunkIndex>=command.target and not supplyPending then
                 advanceAck("MOVE_M",command.target)
             elseif not runChunkMove(command.target) then
                 if not flags.recallMode and not flags.advanceCancelled then

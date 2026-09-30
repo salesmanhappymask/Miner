@@ -4750,6 +4750,7 @@ local function runForeman(cfg)
         if not cfg.master or state.installerConsolidationDone then return true end
         if not state.miningStarted or not state.setupDone then return false end
         if state.recallMode or flags.recallMode then return false end
+        if state.installerSupplyRetryAt and now()<state.installerSupplyRetryAt then return false end
 
         state.installerConsolidationStep=tonumber(state.installerConsolidationStep) or 4
         if not state.installerConsolidationStartedAt then
@@ -4833,6 +4834,7 @@ local function runForeman(cfg)
             saveState()
             if not goTo(0,-1) or not faceTracked(DIR_N) or not wrapInventory("front") then
                 state.setupBlockReason="Foreman-1 cannot access the Black Blue Blue supply chest for installer return"
+                state.installerSupplyRetryAt=now()+5
                 saveState()
                 sendState(state.setupBlockReason)
                 return false
@@ -4862,6 +4864,7 @@ local function runForeman(cfg)
             end
             state.installerConsolidationDone=true
             state.installerConsolidationStep=0
+            state.installerSupplyRetryAt=nil
             state.setupBlockReason=nil
             saveState()
             if not returnHome() then return false end

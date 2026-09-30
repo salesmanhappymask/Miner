@@ -3283,6 +3283,9 @@ local function runRegionalManager()
         if not data.paired then return blocked("RM pairing incomplete") end
         if not data.commissioningComplete then return blocked("Commissioning incomplete") end
         if not data.swarmStarted then return blocked("Mining not released") end
+        if not data.installerConsolidationComplete then
+            return blocked("Waiting for Foreman-1 to return installer disks and Disk Drives to the supply chest")
+        end
         local pending,active,blockedCount=countRequests()
         if pending>0 or active>0 or blockedCount>0 then
             return blocked(string.format("Service requests P%d A%d B%d",pending,active,blockedCount))
