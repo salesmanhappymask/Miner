@@ -195,10 +195,12 @@ local function prepareFreshRoot()
         [CONFIG]=true
     }
     if role=="master" then keep.world_anchor=true end
+    local rootDrive=fs.getDrive("")
     local failures={}
     for _,name in ipairs(fs.list("")) do
-        local mounted=name=="rom" or name:match("^disk%d*$")
-        if not keep[name] and not mounted then
+        local okDrive,drive=pcall(fs.getDrive,name)
+        local writableRoot=okDrive and drive==rootDrive
+        if writableRoot and not keep[name] then
             local ok,err=pcall(fs.delete,name)
             if not ok or fs.exists(name) then
                 failures[#failures+1]=name .. (err and (": " .. tostring(err)) or "")
@@ -206,7 +208,7 @@ local function prepareFreshRoot()
         end
     end
     if #failures>0 then
-        error("Fresh update could not clear old root files: " .. table.concat(failures, ", "))
+        error("Fresh update could not clear old writable root files: " .. table.concat(failures, ", "))
     end
 end
 
@@ -288,28 +290,36 @@ writeFile(fs.combine(stageDir, "version"), version)
 writeFile(fs.combine(stageDir, "update"), updaterSource)
 
 if not preserveState then
-    local failures={}
-    for _,name in ipairs(fs.list("")) do
-        local mounted=name=="rom" or name:match("^disk%d*$")
-        if name~=stageDir and not mounted then
-            local ok,err=pcall(fs.delete,name)
-            if not ok or fs.exists(name) then
-                failures[#failures+1]=name .. (err and (": " .. tostring(err)) or "")
-            end
-        end
-    end
-    if #failures>0 then
-        error("Fresh update could not clear old root files: " .. table.concat(failures, ", "))
-    end
-
-    local installOrder={"update","startup","common","prep","push","pushlogs",role == "manager" and "manager" or "foreman","version"}
+    local installOrder={"startup","common","prep","push","pushlogs",role == "manager" and "manager" or "foreman","version"}
     for _,name in ipairs(installOrder) do
         local stagedPath=fs.combine(stageDir,name)
         if not fs.exists(stagedPath) then
             error("Fresh update staging lost " .. name)
         end
+        if fs.exists(name) then fs.delete(name) end
         fs.move(stagedPath,name)
     end
+
+    writeFile("update.new", updaterSource)
+    if fs.exists("update.old") then fs.delete("update.old") end
+    local movedOld=false
+    if fs.exists("update") then
+        fs.move("update","update.old")
+        movedOld=true
+    end
+    local okUpdater,updaterErr=pcall(fs.move,"update.new","update")
+    if not okUpdater or not fs.exists("update") then
+        if fs.exists("update") then fs.delete("update") end
+        if movedOld and fs.exists("update.old") then fs.move("update.old","update") end
+        error("Fresh update updater self-refresh failed: " .. tostring(updaterErr))
+    end
+    if readFile("update") ~= updaterSource then
+        if fs.exists("update") then fs.delete("update") end
+        if movedOld and fs.exists("update.old") then fs.move("update.old","update") end
+        error("Fresh update updater verification failed; previous updater restored")
+    end
+    if fs.exists("update.old") then fs.delete("update.old") end
+
     saveConfig(role)
     if role=="master" and anchor then
         writeFile("world_anchor", textutils.serialize(anchor))
@@ -323,9 +333,6 @@ if not preserveState then
     end
     if readFile("version") ~= version then
         error("Fresh update verification failed: version")
-    end
-    if readFile("update") ~= updaterSource then
-        error("Fresh update verification failed: update")
     end
     local verifyConfig=loadConfig()
     if not verifyConfig or verifyConfig.role~=role then
@@ -341,7 +348,7 @@ if not preserveState then
     print("")
     print("Update complete.")
     print("Installed version " .. version .. " for " .. roleName(role) .. ".")
-    print("The turtle root was wiped completely before the fresh runtime was installed.")
+    print("The turtle writable root was wiped before the fresh runtime was installed.")
     if autoReboot then
         print("Rebooting into the updated release...")
         sleep(1)
