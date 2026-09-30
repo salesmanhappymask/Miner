@@ -224,7 +224,8 @@ local function runForeman(cfg)
         packService=false,
         resume=false,
         advanceCancelled=false,
-        chunkCommand=nil
+        chunkCommand=nil,
+        installerChainCommand=nil
     }
     local dock = nil
     if number == 1 then
@@ -328,6 +329,7 @@ local function runForeman(cfg)
             queue=#queue + (active and 1 or 0),
             setupDone=state.setupDone and true or false,
             miningStarted=state.miningStarted and true or false,
+            installerConsolidationDone=state.installerConsolidationDone and true or false,
             recovery=state.recoveryReason,
             message=message or "",
             setupMissing=state.setupBlockReason or false,
@@ -1307,9 +1309,12 @@ local function runForeman(cfg)
         for slot=1,16 do
             local item=selfItem(slot)
             local reserved=number==1 and state.bootstrapDrivePending and state.bootstrapDriveSlot==slot
+            local installerResource=not state.installerConsolidationDone and item and
+                (matchesItem(item,"disk_drive") or matchesItem(item,"floppy"))
 
             local fuelItem=matchesItem(item,"lava_bucket")
-            if item and not reserved and not matchesItem(item,"empty_bucket") and not fuelItem then
+            if item and not reserved and not installerResource and
+                not matchesItem(item,"empty_bucket") and not fuelItem then
                 turtle.select(slot)
 
                 while turtle.getItemCount(slot)>0 do
@@ -1537,6 +1542,20 @@ local function runForeman(cfg)
                         commissionWave[message.number] = nil
                         saveState()
                         pushInbox(sender,message)
+                    elseif sender==cfg.controller and message.session==cfg.session and
+                        message.type=="installer_chain_prepare" and tonumber(message.number)==number then
+                        flags.installerChainCommand={
+                            action="receive",
+                            expected=tonumber(message.expected),
+                            token=message.token
+                        }
+                    elseif sender==cfg.controller and message.session==cfg.session and
+                        message.type=="installer_chain_donate" and tonumber(message.number)==number then
+                        flags.installerChainCommand={
+                            action="donate",
+                            amount=tonumber(message.amount),
+                            token=message.token
+                        }
                     elseif sender==cfg.managerId and message.session==cfg.session and
                         message.type=="chunk_command" then
                         local target=tonumber(message.chunkIndex)
@@ -2815,40 +2834,6 @@ local function runForeman(cfg)
                     sendState("Dump ender chest cannot accept unused solid fuel")
                     return false
                 end
-            end
-        end
-
-        while selfCountExcluding("disk_drive",reserved)>0 do
-            local slot=selfFindSlotExcluding("disk_drive",reserved)
-
-            if not slot then
-                break
-            end
-
-            turtle.select(slot)
-
-            if not turtle.drop() then
-                state.phase="DOCK_BLOCKED"
-                saveState()
-                sendState("Cannot return operational Disk Drive")
-                return false
-            end
-        end
-
-        while selfCount("floppy")>0 do
-            local slot=selfFindSlot("floppy")
-
-            if not slot then
-                break
-            end
-
-            turtle.select(slot)
-
-            if not turtle.drop() then
-                state.phase="DOCK_BLOCKED"
-                saveState()
-                sendState("Cannot return floppy")
-                return false
             end
         end
 
@@ -4648,6 +4633,246 @@ local function runForeman(cfg)
         return true
     end
 
+    local function installerDropKind(kind,amount)
+        local remaining=tonumber(amount) or 0
+        for slot=1,16 do
+            if remaining<=0 then break end
+            local item=selfItem(slot)
+            if item and matchesItem(item,kind) then
+                turtle.select(slot)
+                local before=turtle.getItemCount(slot)
+                local requested=math.min(remaining,before)
+                if requested>0 then
+                    if not turtle.drop(requested) then return false end
+                    local moved=before-turtle.getItemCount(slot)
+                    if moved<=0 then return false end
+                    remaining=remaining-moved
+                end
+            end
+        end
+        return remaining<=0
+    end
+
+    local function installerFrontCount(kind)
+        local items=scanInventory("front")
+        if type(items)~="table" then return nil end
+        local total=0
+        for _,item in pairs(items) do
+            if matchesItem(item,kind) then
+                total=total+tonumber(item.qty or item.size or 1)
+            end
+        end
+        return total
+    end
+
+    local function runInstallerChainCommand(command)
+        if type(command)~="table" or state.recallMode or flags.recallMode then return false end
+        local token=command.token
+        if command.action=="receive" then
+            local expected=tonumber(command.expected) or 0
+            state.phase="INSTALLER_HANDOFF_RECEIVE"
+            saveState()
+            if not goTo(cfg.rowEnd,cfg.homeZ) or not faceTracked(DIR_E) then
+                send(cfg.controller,{type="installer_handoff_blocked",number=number,
+                    reason="receiver could not reach fourth-miner handoff position",token=token,
+                    session=cfg.session})
+                return false
+            end
+            send(cfg.controller,{type="installer_handoff_ready",number=number,
+                expected=expected,token=token,session=cfg.session})
+            local deadline=now()+20
+            while now()<deadline and not flags.recallMode do
+                if selfCount("disk_drive")>=expected and selfCount("floppy")>=expected then
+                    if not returnHome() then return false end
+                    send(cfg.controller,{type="installer_handoff_received",number=number,
+                        driveCount=selfCount("disk_drive"),diskCount=selfCount("floppy"),
+                        token=token,session=cfg.session})
+                    return true
+                end
+                sleep(0.1)
+            end
+            state.phase="INSTALLER_HANDOFF_BLOCKED"
+            saveState()
+            send(cfg.controller,{type="installer_handoff_blocked",number=number,
+                reason="receiver did not receive expected installer resources",token=token,
+                session=cfg.session})
+            return false
+        elseif command.action=="donate" then
+            local amount=tonumber(command.amount) or 0
+            if amount<1 then return false end
+            state.phase="INSTALLER_HANDOFF_DONATE"
+            saveState()
+            if not returnHome() or not faceTracked(DIR_W) then
+                send(cfg.controller,{type="installer_handoff_blocked",number=number,
+                    reason="donor could not reach idle handoff position",token=token,
+                    session=cfg.session})
+                return false
+            end
+            if selfCount("disk_drive")<amount or selfCount("floppy")<amount then
+                send(cfg.controller,{type="installer_handoff_blocked",number=number,
+                    reason="donor is missing installer resources",token=token,
+                    session=cfg.session})
+                return false
+            end
+            if not installerDropKind("disk_drive",amount) or not installerDropKind("floppy",amount) then
+                state.phase="INSTALLER_HANDOFF_BLOCKED"
+                saveState()
+                send(cfg.controller,{type="installer_handoff_blocked",number=number,
+                    reason="donor could not transfer installer resources",token=token,
+                    session=cfg.session})
+                return false
+            end
+            state.installerConsolidationDone=true
+            saveState()
+            if not returnHome() then return false end
+            send(cfg.controller,{type="installer_handoff_donated",number=number,
+                amount=amount,token=token,session=cfg.session})
+            return true
+        end
+        return false
+    end
+
+    local function waitInstallerMessage(kind,numberExpected,token,timeout)
+        local deadline=now()+(timeout or 20)
+        while now()<deadline do
+            local _,message=waitInbox(function(sender,m)
+                return type(m)=="table" and m.type==kind and
+                    tonumber(m.number)==tonumber(numberExpected) and
+                    m.token==token and m.session==cfg.session
+            end,0.5)
+            if message then return message end
+            if flags.recallMode then return nil end
+        end
+        return nil
+    end
+
+    local function masterInstallerConsolidation()
+        if not cfg.master or state.installerConsolidationDone then return true end
+        if not state.miningStarted or not state.setupDone then return false end
+        if state.recallMode or flags.recallMode then return false end
+
+        state.installerConsolidationStep=tonumber(state.installerConsolidationStep) or 4
+        if not state.installerConsolidationStartedAt then
+            state.installerConsolidationStartedAt=now()
+            saveState()
+        end
+        if now()-state.installerConsolidationStartedAt<1 then return false end
+
+        for donor=state.installerConsolidationStep,3,-1 do
+            local receiver=donor-1
+            local donorId=cfg.foremen and cfg.foremen[donor]
+            local receiverId=cfg.foremen and cfg.foremen[receiver]
+            if not donorId or not receiverId then
+                state.phase="INSTALLER_HANDOFF_BLOCKED"
+                state.setupBlockReason="Installer handoff peer IDs are incomplete"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            local amount=5-donor
+            local expected=amount+1
+            local token=tostring(id)..":"..tostring(donor)..":"..tostring(state.seq)..":"..tostring(math.floor(now()*20))
+            send(receiverId,{type="installer_chain_prepare",number=receiver,
+                expected=expected,token=token,session=cfg.session})
+            if not waitInstallerMessage("installer_handoff_ready",receiver,token,12) then
+                state.phase="INSTALLER_HANDOFF_BLOCKED"
+                state.setupBlockReason="Foreman-"..tostring(receiver).." did not reach installer handoff position"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            local alreadyReceived=waitInstallerMessage("installer_handoff_received",receiver,token,0.3)
+            if not alreadyReceived then
+                send(donorId,{type="installer_chain_donate",number=donor,
+                    amount=amount,token=token,session=cfg.session})
+                if not waitInstallerMessage("installer_handoff_received",receiver,token,12) then
+                    state.phase="INSTALLER_HANDOFF_BLOCKED"
+                    state.setupBlockReason="Foreman-"..tostring(receiver).." did not confirm installer resources from Foreman-"..tostring(donor)
+                    saveState()
+                    sendState(state.setupBlockReason)
+                    return false
+                end
+            end
+            state.installerConsolidationStep=donor-1
+            saveState()
+        end
+
+        if state.installerConsolidationStep==2 then
+            local donor=2
+            local donorId=cfg.foremen and cfg.foremen[donor]
+            if not donorId then return false end
+            state.phase="INSTALLER_HANDOFF_RECEIVE"
+            saveState()
+            if not goTo(cfg.rowEnd,cfg.homeZ) or not faceTracked(DIR_E) then
+                state.setupBlockReason="Foreman-1 could not reach its fourth-miner installer handoff position"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            local token=tostring(id)..":2:"..tostring(state.seq)..":"..tostring(math.floor(now()*20))
+            if selfCount("disk_drive")<4 or selfCount("floppy")<4 then
+                send(donorId,{type="installer_chain_donate",number=2,
+                    amount=3,token=token,session=cfg.session})
+            end
+            local deadline=now()+12
+            while now()<deadline and (selfCount("disk_drive")<4 or selfCount("floppy")<4) do sleep(0.1) end
+            if selfCount("disk_drive")<4 or selfCount("floppy")<4 then
+                state.phase="INSTALLER_HANDOFF_BLOCKED"
+                state.setupBlockReason="Foreman-1 did not receive all four installer sets"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            if not returnHome() then return false end
+            state.installerConsolidationStep=1
+            saveState()
+        end
+
+        if state.installerConsolidationStep==1 then
+            state.phase="INSTALLER_RETURN_SUPPLY"
+            saveState()
+            if not goTo(0,-1) or not faceTracked(DIR_N) or not wrapInventory("front") then
+                state.setupBlockReason="Foreman-1 cannot access the Black Blue Blue supply chest for installer return"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            local driveBefore=installerFrontCount("disk_drive")
+            local diskBefore=installerFrontCount("floppy")
+            if driveBefore==nil or diskBefore==nil then return false end
+            if selfCount("disk_drive")<4 or selfCount("floppy")<4 then
+                state.setupBlockReason="Foreman-1 does not hold all four installer sets"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            if not installerDropKind("disk_drive",4) or not installerDropKind("floppy",4) then
+                state.setupBlockReason="Foreman-1 could not return all installer resources to the supply chest"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            local driveAfter=installerFrontCount("disk_drive")
+            local diskAfter=installerFrontCount("floppy")
+            if driveAfter==nil or diskAfter==nil or driveAfter<driveBefore+4 or diskAfter<diskBefore+4 then
+                state.setupBlockReason="Supply chest did not verify all four returned installer sets"
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+            state.installerConsolidationDone=true
+            state.installerConsolidationStep=0
+            state.setupBlockReason=nil
+            saveState()
+            if not returnHome() then return false end
+            send(cfg.managerId,{type="installer_consolidation_complete",drives=4,disks=4,
+                session=cfg.session})
+            sendState("Installer disks and drives consolidated in supply chest")
+            return true
+        end
+        return state.installerConsolidationDone and true or false
+    end
+
     local function chunkAck(stage,target)
         send(cfg.managerId,{type="chunk_ack",role="foreman",number=number,
             stage=stage,chunkIndex=target,session=cfg.session,
@@ -4956,6 +5181,19 @@ local function runForeman(cfg)
                 if mode=="NORMAL" or mode=="SHUTDOWN" or mode=="PACK" then
                     recallForeman(mode)
                 end
+            end
+
+            if state.phase~="RECALLED_PAUSED" and flags.installerChainCommand and
+                not active and #queue==0 and not state.advanceStage then
+                local command=flags.installerChainCommand
+                flags.installerChainCommand=nil
+                runInstallerChainCommand(command)
+            end
+
+            if state.phase~="RECALLED_PAUSED" and cfg.master and state.miningStarted and
+                not state.installerConsolidationDone and not active and #queue==0 and
+                not state.advanceStage and not flags.installerChainCommand then
+                masterInstallerConsolidation()
             end
 
             if state.phase=="RECALLED_PAUSED" then

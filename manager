@@ -621,6 +621,7 @@ local function runRegionalManager()
             foremanJobs={},
             commissioningComplete=false,
             swarmStarted=false,
+            installerConsolidationComplete=false,
             gpsReady=false,
             worldOrigin=(seedConfig and seedConfig.worldOrigin) or {x=0,y=0,z=0},
             minerSetupApproved=false,
@@ -701,6 +702,7 @@ local function runRegionalManager()
     data.blockedHistory=data.blockedHistory or {}
     data.commissioningComplete=data.commissioningComplete and true or false
     data.swarmStarted=data.swarmStarted and true or false
+    data.installerConsolidationComplete=data.installerConsolidationComplete and true or false
     data.recall=data.recall or {
         state="NORMAL",
         mode=nil,
@@ -2011,6 +2013,10 @@ local function runRegionalManager()
                 print("Pack blocked: commissioning is incomplete")
                 return false
             end
+            if not data.installerConsolidationComplete then
+                print("Pack blocked: Foreman installer disks/drives have not been consolidated")
+                return false
+            end
             for row=1,WORKER_COUNT do
                 if not targets.miners[row] then
                     print("Pack blocked: Miner-" .. tostring(row) .. " is not registered")
@@ -2093,6 +2099,11 @@ local function runRegionalManager()
 
     local function startPackFromHome()
         if data.advance then return false end
+        if not data.installerConsolidationComplete then
+            chunkBlockReason="Pack requires Foreman installer disks/drives to be consolidated first"
+            save()
+            return false
+        end
         local r=data.recall or {}
         local targets=r.targets or {miners={},foremen={},navigators={}}
         for row=1,WORKER_COUNT do
@@ -3098,37 +3109,31 @@ local function runRegionalManager()
             if not ok then return packFinalizeBlocked(reason) end
             local floppyCount=packInventoryCount("front","floppy")
             if floppyCount==nil then return packFinalizeBlocked("Black Blue Blue supply chest is unreadable before setup-disk deposit") end
-            if not data.recall.packSetupDiskDeposited then
+            if floppyCount<5 and not data.recall.packSetupDiskDeposited then
                 local preferred=seedConfig and tonumber(seedConfig.setupDiskSlot)
-                local slot=managerFindOwnItem("setup_floppy",preferred)
-                if not slot and preferred and turtle.getItemCount(preferred)>0 and
-                    matchesItem(managerOwnItem(preferred),"floppy") then
-                    slot=preferred
+                if not preferred or turtle.getItemCount(preferred)<1 then
+                    return packFinalizeBlocked("RM reserved setup-disk slot is empty; supply chest has "..tostring(floppyCount).."/5 disks")
                 end
-                if slot then
-                    local before=floppyCount
-                    data.recall.packSetupDiskDepositStarted=true
-                    save()
-                    flushManager(true)
-                    turtle.select(slot)
-                    local amount=turtle.getItemCount(slot)
-                    if not turtle.drop(amount) then
-                        return packFinalizeBlocked("RM could not place the Master Foreman setup disk into the supply chest")
-                    end
-                    floppyCount=packInventoryCount("front","floppy")
-                    if floppyCount==nil or floppyCount<before+amount then
-                        return packFinalizeBlocked("Supply chest did not receive the Master Foreman setup disk")
-                    end
-                    data.recall.packSetupDiskDeposited=true
-                    save()
-                    flushManager(true)
-                elseif data.recall.packSetupDiskDepositStarted and floppyCount>0 then
-                    data.recall.packSetupDiskDeposited=true
-                    save()
-                    flushManager(true)
-                else
-                    return packFinalizeBlocked("RM no longer has the Master Foreman setup disk")
+                local before=floppyCount
+                data.recall.packSetupDiskDepositStarted=true
+                data.recall.packSetupDiskSlot=preferred
+                save()
+                flushManager(true)
+                turtle.select(preferred)
+                if not turtle.drop(1) then
+                    return packFinalizeBlocked("RM could not place the Master Foreman setup disk into the supply chest")
                 end
+                floppyCount=packInventoryCount("front","floppy")
+                if floppyCount==nil or floppyCount<before+1 then
+                    return packFinalizeBlocked("Supply chest did not receive the Master Foreman setup disk")
+                end
+                data.recall.packSetupDiskDeposited=true
+                save()
+                flushManager(true)
+            elseif floppyCount>=5 then
+                data.recall.packSetupDiskDeposited=true
+                save()
+                flushManager(true)
             end
             data.recall.packFinalizeStage="VERIFY"
             data.recall.packError=nil
@@ -3141,28 +3146,28 @@ local function runRegionalManager()
             local ok,reason=supplyStation()
             if not ok then return packFinalizeBlocked(reason) end
             local checks={
-                {"turtle",WORKER_COUNT+FOREMAN_COUNT+NAVIGATOR_COUNT,"packed turtles"},
-                {"ender_dump",FOREMAN_COUNT,"dump Ender Chests"},
-                {"ender_fuel",FOREMAN_COUNT,"fuel Ender Chests"},
+                {"advanced_wireless_mining_turtle",20,"Advanced Wireless Mining Turtles"},
+                {"ender_dump",4,"white-white-white Ender Chests"},
+                {"ender_fuel",4,"white-white-blue Ender Chests"},
+                {"advanced_wireless_narcissistic_turtle",4,"Narcissistic Wireless Foreman turtles"},
                 {"chunk_loader",2,"Chunk Loaders"},
-                {"lava_bucket",2,"full lava buckets"},
-                {"floppy",1,"Master Foreman setup disk"}
+                {"floppy",5,"disks"},
+                {"disk_drive",4,"Disk Drives"},
+                {"lava_bucket",2,"full lava buckets"}
             }
             local missing={}
             local total=packInventoryTotal("front")
             if total==nil then return packFinalizeBlocked("Black Blue Blue supply chest is unreadable during final verification") end
-            if not data.recall.packDepositedCount or tonumber(data.recall.packDepositedCount)<32 then
-                missing[#missing+1]="Miner-16 verified deposit count "..tostring(data.recall.packDepositedCount or 0).."/32"
-            end
-            if data.recall.packSupplyCount and total<tonumber(data.recall.packSupplyCount) then
-                missing[#missing+1]="total deposited items "..tostring(total).."/"..tostring(data.recall.packSupplyCount)
-            end
+            local expectedTotal=45
             for _,entry in ipairs(checks) do
                 local count=packInventoryCount("front",entry[1])
                 if count==nil then return packFinalizeBlocked("Black Blue Blue supply chest is unreadable during final verification") end
-                if count<entry[2] then
+                if count~=entry[2] then
                     missing[#missing+1]=entry[3].." "..tostring(count).."/"..tostring(entry[2])
                 end
+            end
+            if total~=expectedTotal then
+                missing[#missing+1]="total packed items "..tostring(total).."/"..tostring(expectedTotal)
             end
             if #missing>0 then
                 return packFinalizeBlocked("Supply chest verification failed: "..table.concat(missing,", "))
@@ -3766,6 +3771,12 @@ local function runRegionalManager()
                         })
                     end
 
+                elseif message.type=="installer_consolidation_complete" and sender==data.masterForemanId and
+                    message.session==data.session then
+                    data.installerConsolidationComplete=true
+                    save()
+                    flushManager(true)
+
                 elseif message.type=="commissioning_complete" and sender==data.masterForemanId and
                     message.session==data.session then
                     data.commissioningComplete=true
@@ -3788,6 +3799,9 @@ local function runRegionalManager()
 
                     if message.role=="foreman" and message.number then
                         mergeStatusEntry(data.foremen,tonumber(message.number),sender,message)
+                        if tonumber(message.number)==1 and message.installerConsolidationDone then
+                            data.installerConsolidationComplete=true
+                        end
                     elseif message.role=="miner" and message.row then
                         mergeStatusEntry(data.miners,tonumber(message.row),sender,message)
                     elseif message.role=="navigator" and message.number then
