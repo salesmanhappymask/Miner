@@ -3061,38 +3061,56 @@ local function runMiner(cfg)
             return false
         end
 
+        local function itemDetail(slot)
+            if turtle.getItemCount(slot)<=0 then return nil end
+            if turtle.getItemDetail then
+                local ok,item=pcall(turtle.getItemDetail,slot)
+                if ok and item then return item end
+            end
+            return selfItem(slot)
+        end
+
+        local function stackKey(item)
+            if not item then return nil end
+            local name=tostring(item.name or item.id or item.display_name or item.displayName or "")
+            local damage=tostring(item.damage or item.dmg or item.itemDamage or
+                item.damageValue or item.metadata or item.meta or "")
+            return name.."|"..damage
+        end
+
         local function compactInventory()
             local selected=turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
-            for source=16,2,-1 do
+            local firstByKey={}
+            for source=1,16 do
                 if turtle.getItemCount(source)>0 then
-                    for target=1,source-1 do
-                        if turtle.getItemCount(target)>0 then
-                            turtle.select(source)
-                            turtle.transferTo(target)
-                            if turtle.getItemCount(source)==0 then break end
-                        end
+                    local key=stackKey(itemDetail(source))
+                    local target=key and firstByKey[key] or nil
+                    if target and target~=source then
+                        turtle.select(source)
+                        turtle.transferTo(target)
+                    end
+                    if turtle.getItemCount(source)>0 and key and not firstByKey[key] then
+                        firstByKey[key]=source
                     end
                 end
             end
             local target=1
-            while target<=16 and turtle.getItemCount(target)>0 do target=target+1 end
-            if target<=16 then
-                for source=target+1,16 do
-                    if turtle.getItemCount(source)>0 then
-                        while target<source and turtle.getItemCount(target)>0 do target=target+1 end
-                        if target<source then
-                            turtle.select(source)
-                            turtle.transferTo(target)
-                        end
-                    end
-                end
+            while target<=16 do
+                while target<=16 and turtle.getItemCount(target)>0 do target=target+1 end
+                if target>16 then break end
+                local source=target+1
+                while source<=16 and turtle.getItemCount(source)==0 do source=source+1 end
+                if source>16 then break end
+                turtle.select(source)
+                turtle.transferTo(target)
+                target=target+1
             end
             turtle.select(selected)
             return freeInventorySlots()
         end
 
-        local function selectEmptySlot()
-            compactInventory()
+        local function selectEmptySlot(doCompact)
+            if doCompact~=false then compactInventory() end
             for slot=1,16 do
                 if turtle.getItemCount(slot)==0 then
                     turtle.select(slot)
@@ -3100,6 +3118,20 @@ local function runMiner(cfg)
                 end
             end
             return nil
+        end
+
+        local function selectMinerStackOrEmpty()
+            for slot=1,16 do
+                if turtle.getItemCount(slot)>0 and turtle.getItemCount(slot)<64 then
+                    local item=itemDetail(slot)
+                    if item and (matchesItem(item,"advanced_wireless_mining_turtle") or
+                        matchesItem(item,"wireless_mining_turtle")) then
+                        turtle.select(slot)
+                        return slot
+                    end
+                end
+            end
+            return selectEmptySlot(false)
         end
 
         local function moveGroundTo(tx,tz)
@@ -3242,9 +3274,9 @@ local function runMiner(cfg)
                 cargoExpected=targetRow==chestCollectorRow(1) and 3 or 4
             end
             local expected=cargoExpected+1
-            if not state.packStepIntent then compactInventory() end
             if not state.packStepIntent and freeInventorySlots()<expected then
-                if not startOverflowTrip() then return false end
+                compactInventory()
+                if freeInventorySlots()<expected and not startOverflowTrip() then return false end
             end
             if not state.packStepIntent then
                 if freeInventorySlots()<expected then
@@ -3276,14 +3308,18 @@ local function runMiner(cfg)
                 end
                 local recoveredCargo=inventoryTotal()-before
                 while recoveredCargo<requiredCargo do
-                    if not selectEmptySlot() then
-                        return packBlock("Miner-16 has no slot while draining Miner-"..tostring(targetRow))
+                    if not selectEmptySlot(false) then
+                        compactInventory()
+                        if not selectEmptySlot(false) then
+                            return packBlock("Miner-16 has no slot while draining Miner-"..tostring(targetRow))
+                        end
                     end
                     local moved=turtle.suck()
                     if not moved then break end
-                    compactInventory()
                     recoveredCargo=inventoryTotal()-before
                 end
+                compactInventory()
+                recoveredCargo=inventoryTotal()-before
                 if recoveredCargo<requiredCargo then
                     reportMissing(targetRow)
                     return packBlock("Miner-16 drained "..tostring(recoveredCargo).."/"..
@@ -3303,27 +3339,31 @@ local function runMiner(cfg)
                     save()
                 end
                 if turtle.detect() then
-                    if not selectEmptySlot() then return packBlock("Miner-16 has no slot for Miner-"..tostring(targetRow)) end
+                    if not selectMinerStackOrEmpty() then
+                        compactInventory()
+                        if not selectMinerStackOrEmpty() then
+                            return packBlock("Miner-16 has no slot for Miner-"..tostring(targetRow))
+                        end
+                    end
                     local dug,digError=turtle.dig()
                     if not dug then
                         return packBlock("Could not break parked Miner-"..tostring(targetRow)..
                             ": "..tostring(digError or "dig failed"))
                     end
-                    compactInventory()
-                end
-                for attempt=1,96 do
-                    local moved=false
-                    for slot=1,16 do
-                        turtle.select(slot)
-                        if turtle.suck() then
-                            moved=true
-                            compactInventory()
-                            break
-                        end
-                    end
-                    if not moved then break end
                 end
                 local recovered=inventoryTotal()-before
+                if recovered<1 then
+                    for attempt=1,4 do
+                        if not selectMinerStackOrEmpty() then break end
+                        if turtle.suck() then
+                            recovered=inventoryTotal()-before
+                            if recovered>=1 then break end
+                        end
+                        sleep(0.05)
+                    end
+                end
+                compactInventory()
+                recovered=inventoryTotal()-before
                 if recovered<1 then
                     reportMissing(targetRow)
                     return packBlock("Miner-16 did not recover the Miner-"..tostring(targetRow)..
