@@ -1461,8 +1461,10 @@ local function runMiner(cfg)
         return false
     end
 
+    local orientationMovementActive=false
+
     local function beginTranslation(kind,toX,toY,toZ)
-        if state.y==cfg.homeY and not verifySurfaceGps() then return nil end
+        if state.y==cfg.homeY and not orientationMovementActive and not verifySurfaceGps() then return nil end
         local chestMove=state.advanceStage=="CHEST" and
             toX==cfg.row and toY==0 and toZ>=-2 and toZ<=0
         local packAssetMove=state.packAssetProgress and state.recallMode=="PACK" and
@@ -1473,7 +1475,11 @@ local function runMiner(cfg)
             state.y==0 and toY==0 and state.x>=0 and state.x<=WORKER_COUNT and
             state.z>=-1 and state.z<=0 and toX>=0 and toX<=WORKER_COUNT and
             toZ>=-1 and toZ<=0
-        if not chestMove and not packAssetMove and not packOverflowMove and
+        local orientationMove=orientationMovementActive and
+            toX>=1 and toX<=WORKER_COUNT and
+            toY>=cfg.homeY and toY<=cfg.homeY+1 and
+            toZ>=0 and toZ<=15
+        if not chestMove and not packAssetMove and not packOverflowMove and not orientationMove and
             (toX~=cfg.row or toY>0 or toZ<0 or toZ>15) then
             state.recoveryLocked=true
             state.recoveryReason="Movement would leave assigned miner shaft"
@@ -1797,22 +1803,26 @@ local function runMiner(cfg)
         if state.recallMode or state.advanceStage or state.complete or
             (state.phase~="WAITING" and state.phase~="RECOVERY_LOCK") then
             result.reason="Miner is not safely parked for pre-mining orientation correction"
-        elseif command.action=="forward" then
-            if attemptForward() then result.ok=true else result.reason="Miner could not make peer-check forward move" end
-        elseif command.action=="check" then
-            local ok,reason=orientationPeerCheck(command.expectRight,command.expectLeft,command.confirm~=false)
-            result.ok=ok and true or false
-            result.reason=reason
-        elseif command.action=="home" then
-            local ok,reason=orientationReturnHome()
-            result.ok=ok and true or false
-            result.reason=reason
-        elseif command.action=="gps_repair" then
-            local ok,reason=orientationGpsRepair()
-            result.ok=ok and true or false
-            result.reason=reason
         else
-            result.reason="Unknown orientation command"
+            orientationMovementActive=true
+            if command.action=="forward" then
+                if attemptForward() then result.ok=true else result.reason="Miner could not make peer-check forward move" end
+            elseif command.action=="check" then
+                local ok,reason=orientationPeerCheck(command.expectRight,command.expectLeft,command.confirm~=false)
+                result.ok=ok and true or false
+                result.reason=reason
+            elseif command.action=="home" then
+                local ok,reason=orientationReturnHome()
+                result.ok=ok and true or false
+                result.reason=reason
+            elseif command.action=="gps_repair" then
+                local ok,reason=orientationGpsRepair()
+                result.ok=ok and true or false
+                result.reason=reason
+            else
+                result.reason="Unknown orientation command"
+            end
+            orientationMovementActive=false
         end
         state.orientationLastToken=command.token
         state.orientationLastResult=result
