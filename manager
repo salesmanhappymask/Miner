@@ -156,7 +156,7 @@ local function runManagerSeedBootstrap()
     end
 
     local function placeSupplyChest()
-        if wrapInventory("front") then return supplyReady() end
+        if wrapInventory("front") then return true end
         if turtle.detect() then return false end
         for slot=1,16 do
             if turtle.getItemCount(slot)>0 then
@@ -165,8 +165,10 @@ local function runManagerSeedBootstrap()
                 if not (okProbe and canFuel) then
                     local placed=turtle.place()
                     if placed then
-                        sleep(0.2)
-                        if wrapInventory("front") then return supplyReady() end
+                        for attempt=1,8 do
+                            sleep(0.15)
+                            if wrapInventory("front") then return true end
+                        end
                         turtle.dig()
                     end
                 end
@@ -184,15 +186,26 @@ local function runManagerSeedBootstrap()
         end
         if not faceSeed(DIR_N) then error("Regional Manager could not face north") end
         if not placeSupplyChest() then
-            error("Place the Black Blue Blue supply Ender Chest in the Regional Manager inventory and verify its bootstrap contents")
+            error("Place the Black Blue Blue supply Ender Chest in the Regional Manager inventory or directly north of it")
         end
         seed.phase="SUPPLY_PLACED"
         saveSeed()
     end
 
     if seed.phase=="SUPPLY_PLACED" then
-        if not supplyReady() then
-            error("Black Blue Blue supply chest is missing the Master Foreman turtle, five disks, Disk Drive, or two lava buckets")
+        if not wrapInventory("front") then
+            error("Black Blue Blue supply chest was placed but is no longer directly north of the Regional Manager")
+        end
+        local ready=false
+        for attempt=1,20 do
+            if supplyReady() then
+                ready=true
+                break
+            end
+            sleep(0.25)
+        end
+        if not ready then
+            error("Placed Black Blue Blue supply chest is missing the Master Foreman turtle, five disks, Disk Drive, or two lava buckets")
         end
         seed.masterSlot=pullOne("advanced_wireless_narcissistic_turtle")
         seed.workerDiskSlots={}
