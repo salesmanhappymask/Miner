@@ -190,6 +190,168 @@ local function runManagerSeedBootstrap()
         return true
     end
 
+    local function seedPlacementPresent(side,inspectFn,detectFn)
+        local kind=peripheral.getType(side)
+        if kind then return true end
+        if inspectFn then
+            local ok,present=pcall(inspectFn)
+            if ok then return present==true end
+        end
+        if detectFn then
+            local ok,present=pcall(detectFn)
+            if ok then return present==true end
+        end
+        return false
+    end
+
+    local function sitePrepDiscardDebris()
+        local baseline=seed.sitePrepInventoryBaseline
+        if type(baseline)~="table" then return true end
+        local previous=turtle.getSelectedSlot()
+        for slot=1,16 do
+            local base=tonumber(baseline[slot]) or 0
+            local count=turtle.getItemCount(slot)
+            local excess=count-base
+            if excess>0 then
+                turtle.select(slot)
+                local ok=turtle.dropDown(excess)
+                if not ok then ok=turtle.dropUp(excess) end
+                if not ok then ok=turtle.drop(excess) end
+                if not ok then
+                    turtle.select(previous)
+                    return false,"Regional Manager could not discard site-preparation debris from slot "..tostring(slot)
+                end
+            end
+        end
+        turtle.select(previous)
+        return true
+    end
+
+    local function sitePrepClearSide(side,digFn,inspectFn,detectFn,label)
+        local kind=peripheral.getType(side)
+        if kind then return false,tostring(label).." is occupied by protected peripheral "..tostring(kind) end
+        for attempt=1,4 do
+            pcall(digFn)
+            sleep(0.05)
+            local debrisOk,debrisReason=sitePrepDiscardDebris()
+            if not debrisOk then return false,debrisReason end
+            kind=peripheral.getType(side)
+            if kind then return false,tostring(label).." became occupied by protected peripheral "..tostring(kind) end
+            if not seedPlacementPresent(side,inspectFn,detectFn) then return true end
+        end
+        return false,tostring(label).." could not be cleared"
+    end
+
+    local function sitePrepClearVertical()
+        local ok,reason=sitePrepClearSide("top",turtle.digUp,turtle.inspectUp,turtle.detectUp,"Site-preparation block above the RM")
+        if not ok then return false,reason end
+        return sitePrepClearSide("bottom",turtle.digDown,turtle.inspectDown,turtle.detectDown,"Site-preparation block below the RM")
+    end
+
+    local function sitePrepClearFront()
+        local kind=peripheral.getType("front")
+        local okId,id=pcall(peripheral.call,"front","getID")
+        if kind or (okId and tonumber(id)) then
+            return false,"Site-preparation path is occupied by a protected block"
+        end
+        for attempt=1,4 do
+            pcall(turtle.dig)
+            pcall(turtle.attack)
+            sleep(0.05)
+            local debrisOk,debrisReason=sitePrepDiscardDebris()
+            if not debrisOk then return false,debrisReason end
+            kind=peripheral.getType("front")
+            okId,id=pcall(peripheral.call,"front","getID")
+            if kind or (okId and tonumber(id)) then
+                return false,"Site-preparation path became occupied by a protected block"
+            end
+            if not seedPlacementPresent("front",turtle.inspect,turtle.detect) then return true end
+        end
+        return false,"Site-preparation path could not be cleared"
+    end
+
+    local function sitePrepStepForward()
+        local ok,reason=sitePrepClearFront()
+        if not ok then return false,reason end
+        local moved,moveReason=forwardSeed()
+        if not moved then return false,moveReason end
+        ok,reason=sitePrepClearVertical()
+        if not ok then return false,reason end
+        return true
+    end
+
+    local function sitePrepMoveTo(tx,tz)
+        while seed.x<tx do
+            if not faceSeed(DIR_E) then return false,"Regional Manager could not face east during site preparation" end
+            local ok,reason=sitePrepStepForward()
+            if not ok then return false,reason end
+        end
+        while seed.x>tx do
+            if not faceSeed(DIR_W) then return false,"Regional Manager could not face west during site preparation" end
+            local ok,reason=sitePrepStepForward()
+            if not ok then return false,reason end
+        end
+        while seed.z<tz do
+            if not faceSeed(DIR_N) then return false,"Regional Manager could not face north during site preparation" end
+            local ok,reason=sitePrepStepForward()
+            if not ok then return false,reason end
+        end
+        while seed.z>tz do
+            if not faceSeed(DIR_S) then return false,"Regional Manager could not face south during site preparation" end
+            local ok,reason=sitePrepStepForward()
+            if not ok then return false,reason end
+        end
+        return true
+    end
+
+    local function runSitePreparation()
+        if type(seed.sitePrepInventoryBaseline)~="table" then
+            seed.sitePrepInventoryBaseline={}
+            for slot=1,16 do seed.sitePrepInventoryBaseline[slot]=turtle.getItemCount(slot) end
+            seed.sitePrepOrigin={x=seed.x,y=seed.y,z=seed.z,dir=seed.dir}
+            seed.sitePrepWaypoint=1
+            saveSeed()
+        end
+        local origin=seed.sitePrepOrigin or {}
+        if tonumber(origin.x)~=0 or tonumber(origin.y)~=0 or tonumber(origin.z)~=-1 then
+            return false,"Regional Manager site-preparation origin is invalid"
+        end
+        local ok,reason=sitePrepClearVertical()
+        if not ok then return false,reason end
+        local waypoints={
+            {x=0,z=0},
+            {x=16,z=0},
+            {x=16,z=-1},
+            {x=0,z=-1},
+            {x=0,z=-2},
+            {x=16,z=-2},
+            {x=6,z=-2},
+            {x=6,z=-3},
+            {x=0,z=-3},
+            {x=0,z=-1},
+        }
+        local index=tonumber(seed.sitePrepWaypoint) or 1
+        while index<=#waypoints do
+            local target=waypoints[index]
+            ok,reason=sitePrepMoveTo(target.x,target.z)
+            if not ok then return false,reason end
+            index=index+1
+            seed.sitePrepWaypoint=index
+            saveSeed()
+        end
+        ok,reason=sitePrepDiscardDebris()
+        if not ok then return false,reason end
+        if seed.x~=0 or seed.y~=0 or seed.z~=-1 then
+            return false,"Regional Manager did not return to its starting square after site preparation"
+        end
+        if not faceSeed(DIR_N) then return false,"Regional Manager could not restore north-facing setup orientation" end
+        seed.sitePrepComplete=true
+        seed.sitePrepWaypoint=nil
+        seed.sitePrepInventoryBaseline=nil
+        saveSeed()
+        return true
+    end
+
     local function frontInventorySize()
         local inv=wrapInventory("front")
         if not inv then return nil end
@@ -278,8 +440,24 @@ local function runManagerSeedBootstrap()
     show("Preparing autonomous deployment")
 
     if seed.phase=="START" then
-        if seed.x~=0 or seed.z~=-1 then
+        if seed.x~=0 or seed.y~=0 or seed.z~=-1 then
             error("Regional Manager seed pose is not at the Foreman-1 starting square")
+        end
+        seed.phase="SITE_PREP"
+        saveSeed()
+    end
+
+    if seed.phase=="SITE_PREP" then
+        show("Clearing the quarry deployment site")
+        local ok,reason=runSitePreparation()
+        if not ok then error(reason or "Regional Manager could not prepare the quarry deployment site") end
+        seed.phase="SITE_READY"
+        saveSeed()
+    end
+
+    if seed.phase=="SITE_READY" then
+        if seed.x~=0 or seed.y~=0 or seed.z~=-1 then
+            error("Regional Manager is not back at its starting square after site preparation")
         end
         if not faceSeed(DIR_N) then error("Regional Manager could not face north") end
         if not placeSupplyChest() then
