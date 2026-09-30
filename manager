@@ -726,6 +726,25 @@ local function runRegionalManager()
     data.recall.packReady=data.recall.packReady or {}
     data.recall.packAssetsReady=data.recall.packAssetsReady or {}
 
+    if savedManagerVersion==138 and data.recall.state=="PACK_RM_FINALIZE" and
+        data.recall.packFinalizeStage=="FUEL" and data.recall.packFuelChestCollected and
+        type(data.recall.packLavaSlots)=="table" and #data.recall.packLavaSlots==0 and
+        data.recall.packError=="RM no longer has the required full lava bucket after fuel-chest recovery" then
+        local fuelSlot=tonumber(data.recall.packFuelChestSlot)
+        local recovered={}
+        if fuelSlot and fuelSlot>1 then
+            for slot=1,fuelSlot-1 do
+                if turtle.getItemCount(slot)>0 then recovered[#recovered+1]=slot end
+                if #recovered>=2 then break end
+            end
+        end
+        if #recovered>=2 then
+            data.recall.packLavaSlots={recovered[1],recovered[2]}
+            data.recall.packError=nil
+            saveTableLight("regional_manager.tmp",data)
+        end
+    end
+
     for _,registry in ipairs({data.nodes,data.foremen,data.miners,data.navigators}) do
         for _,entry in pairs(registry) do
             if type(entry)=="table" then
@@ -3056,21 +3075,30 @@ local function runRegionalManager()
             if lava==nil then return packFinalizeBlocked("Black Blue Blue supply chest is unreadable during lava deposit") end
             while lava<2 do
                 local slot=nil
-                while #data.recall.packLavaSlots>0 and not slot do
-                    local candidate=table.remove(data.recall.packLavaSlots,1)
-                    if turtle.getItemCount(candidate)>0 and
-                        matchesItem(managerOwnItem(candidate),"lava_bucket") then
+                local trackedIndex=nil
+                for index,candidate in ipairs(data.recall.packLavaSlots) do
+                    candidate=tonumber(candidate)
+                    if candidate and turtle.getItemCount(candidate)>0 then
                         slot=candidate
+                        trackedIndex=index
+                        break
                     end
                 end
-                if not slot then slot=managerFindOwnItem("lava_bucket") end
                 if not slot then
-                    return packFinalizeBlocked("RM no longer has the required full lava bucket after fuel-chest recovery")
+                    return packFinalizeBlocked("RM witnessed the required lava bucket during recovery, but its recorded slot is now empty")
                 end
-                ok,reason=managerDropTrackedSlot(slot,"lava_bucket","a full lava bucket")
-                if not ok then return packFinalizeBlocked(reason) end
+                local beforeLava=lava
+                local beforeSlot=turtle.getItemCount(slot)
+                turtle.select(slot)
+                if not turtle.drop(1) then
+                    return packFinalizeBlocked("RM could not place a witnessed full lava bucket into the supply chest")
+                end
                 lava=packInventoryCount("front","lava_bucket")
                 if lava==nil then return packFinalizeBlocked("Black Blue Blue supply chest is unreadable after lava deposit") end
+                if lava<beforeLava+1 or turtle.getItemCount(slot)>=beforeSlot then
+                    return packFinalizeBlocked("Supply chest did not confirm the witnessed lava-bucket transfer")
+                end
+                table.remove(data.recall.packLavaSlots,trackedIndex)
                 save()
                 flushManager(true)
             end
@@ -3183,21 +3211,39 @@ local function runRegionalManager()
         if stage=="COLLECT" then
             local ok,reason=supplyStation()
             if not ok then return packFinalizeBlocked(reason) end
-            local slot=managerEmptySlot()
-            if not slot then return packFinalizeBlocked("RM has no free slot for the Black Blue Blue supply chest") end
+            local capture=managerEmptySlot()
+            if not capture then return packFinalizeBlocked("RM has no free slot for the Black Blue Blue supply chest") end
             if not wrapInventory("front") then return packFinalizeBlocked("Black Blue Blue supply chest is missing before collection") end
-            turtle.select(slot)
-            local before=turtle.getItemCount(slot)
+            local beforeSlots={}
+            for i=1,16 do beforeSlots[i]=turtle.getItemCount(i) end
+            turtle.select(capture)
             local dug,digError=turtle.dig()
             if not dug then return packFinalizeBlocked("RM could not collect the Black Blue Blue supply chest: "..tostring(digError or "dig failed")) end
-            if turtle.getItemCount(slot)<=before then
-                turtle.suck()
+            local recovered=nil
+            local delta=0
+            for i=1,16 do
+                local change=turtle.getItemCount(i)-(tonumber(beforeSlots[i]) or 0)
+                if change>delta then
+                    recovered=i
+                    delta=change
+                end
             end
-            if turtle.getItemCount(slot)<=before then
+            if not recovered or delta<1 then
+                turtle.select(capture)
+                turtle.suck()
+                for i=1,16 do
+                    local change=turtle.getItemCount(i)-(tonumber(beforeSlots[i]) or 0)
+                    if change>delta then
+                        recovered=i
+                        delta=change
+                    end
+                end
+            end
+            if not recovered or delta<1 then
                 return packFinalizeBlocked("RM broke the supply chest but could not recover the chest item")
             end
             data.recall.packFinalizeStage="DONE"
-            data.recall.packSupplySlot=slot
+            data.recall.packSupplySlot=recovered
             data.recall.packError=nil
             save()
             flushManager(true)
