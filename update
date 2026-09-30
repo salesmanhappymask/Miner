@@ -258,25 +258,64 @@ for _, name in ipairs(files) do
 end
 writeFile(fs.combine(stageDir, "version"), version)
 
-local rootDrive=fs.getDrive("")
-for _, path in ipairs(fs.list("")) do
-    if path ~= "update" and path ~= stageDir and fs.getDrive(path)==rootDrive then
-        fs.delete(path)
+local backupDir = ".update_backup"
+if fs.exists(backupDir) then fs.delete(backupDir) end
+fs.makeDir(backupDir)
+
+local managed = {}
+for _, name in ipairs(files) do managed[#managed+1] = name end
+managed[#managed+1] = "version"
+
+for _, name in ipairs(managed) do
+    if fs.exists(name) then
+        fs.move(name, fs.combine(backupDir, name))
     end
+end
+
+local committed = {}
+local okCommit, commitErr = pcall(function()
+    for _, name in ipairs(files) do
+        fs.move(fs.combine(stageDir, name), name)
+        committed[#committed+1] = name
+    end
+    fs.move(fs.combine(stageDir, "version"), "version")
+    committed[#committed+1] = "version"
+end)
+
+local function restoreManagedFiles()
+    for _, name in ipairs(managed) do
+        if fs.exists(name) then fs.delete(name) end
+        local backup = fs.combine(backupDir, name)
+        if fs.exists(backup) then fs.move(backup, name) end
+    end
+end
+
+if not okCommit then
+    restoreManagedFiles()
+    if fs.exists(stageDir) then fs.delete(stageDir) end
+    if fs.exists(backupDir) then fs.delete(backupDir) end
+    error("Update commit failed and previous runtime files were restored: " .. tostring(commitErr))
+end
+
+for _, name in ipairs(files) do
+    if readFile(name) ~= staged[name] then
+        restoreManagedFiles()
+        if fs.exists(stageDir) then fs.delete(stageDir) end
+        if fs.exists(backupDir) then fs.delete(backupDir) end
+        error("Final verification failed: " .. name .. "; previous runtime files restored")
+    end
+end
+if readFile("version") ~= version then
+    restoreManagedFiles()
+    if fs.exists(stageDir) then fs.delete(stageDir) end
+    if fs.exists(backupDir) then fs.delete(backupDir) end
+    error("Final verification failed: version; previous runtime files restored")
 end
 
 saveConfig(role)
 
-for _, name in ipairs(files) do
-    fs.move(fs.combine(stageDir, name), name)
-end
-fs.move(fs.combine(stageDir, "version"), "version")
 if fs.exists(stageDir) then fs.delete(stageDir) end
-
-for _, name in ipairs(files) do
-    if readFile(name) ~= staged[name] then error("Final verification failed: " .. name) end
-end
-if readFile("version") ~= version then error("Final verification failed: version") end
+if fs.exists(backupDir) then fs.delete(backupDir) end
 
 if anchor then
     writeFile("world_anchor", textutils.serialize(anchor))
@@ -301,7 +340,7 @@ end
 print("")
 print("Update complete.")
 print("Installed version " .. version .. " for " .. roleName(role) .. ".")
-print("The permanent updater was refreshed and the saved role was preserved.")
+print("The permanent updater was refreshed and saved role/state files were preserved.")
 if autoReboot then
     print("Rebooting into the updated release...")
     sleep(1)
