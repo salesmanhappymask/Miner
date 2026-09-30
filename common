@@ -1,5 +1,5 @@
-VERSION = 120
-PROTOCOL = "miner_swarm_v120"
+VERSION = 121
+PROTOCOL = "miner_swarm_v121"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -132,7 +132,7 @@ function now()
     return os.clock()
 end
 
-DEBUG_PROTOCOL = "miner_swarm_debug_v120"
+DEBUG_PROTOCOL = "miner_swarm_debug_v121"
 DEBUG_LOG_DIR = "logs"
 DEBUG_LOG_MAX = 65536
 DEBUG_ERROR_LOG_MAX = 16384
@@ -1264,7 +1264,7 @@ function resolveChunkMove(state,save,origin)
             end
         end
     end
-    if moved==nil and not origin then
+    if moved==nil and not gpsDisagreed then
         local fuel=turtle.getFuelLevel()
         moved=movementFromFuel(intent.fuelBefore,fuel)
     end
@@ -1292,22 +1292,113 @@ function movementFromFuel(before,after)
     return nil
 end
 
+function locateWorldPose(timeout)
+    if not gps or not gps.locate then return nil end
+    local ok,x,y,z=pcall(gps.locate,timeout or 2,false)
+    if not ok or type(x)~="number" or type(y)~="number" or type(z)~="number" then
+        return nil
+    end
+    return x,y,z
+end
+
+function poseMatchesWorld(state,origin,x,y,z)
+    if not origin or type(state)~="table" then return nil end
+    if type(state.x)~="number" or type(state.y)~="number" or type(state.z)~="number" then return nil end
+    local ex,ey,ez=worldPose(state.x,state.y,state.z,state.chunkIndex,origin)
+    if not ex then return nil end
+    return math.abs(x-ex)<0.25 and math.abs(y-ey)<0.25 and math.abs(z-ez)<0.25
+end
+
+function movementFromGPS(intent,chunkIndex,origin,timeout)
+    if type(intent)~="table" or type(intent.from)~="table" or
+        type(intent.to)~="table" or not origin then return nil end
+    local x,y,z=locateWorldPose(timeout or 2)
+    if not x then return nil end
+    local fx,fy,fz=worldPose(intent.from.x,intent.from.y,intent.from.z,chunkIndex,origin)
+    local tx,ty,tz=worldPose(intent.to.x,intent.to.y,intent.to.z,chunkIndex,origin)
+    if not fx or not tx then return nil end
+    if math.abs(x-tx)<0.25 and math.abs(y-ty)<0.25 and math.abs(z-tz)<0.25 then return true end
+    if math.abs(x-fx)<0.25 and math.abs(y-fy)<0.25 and math.abs(z-fz)<0.25 then return false end
+    return nil
+end
+
+local function directionFromWorldDelta(dx,dz)
+    if math.abs(dx)<0.25 and math.abs(dz+1)<0.25 then return DIR_N end
+    if math.abs(dx-1)<0.25 and math.abs(dz)<0.25 then return DIR_E end
+    if math.abs(dx)<0.25 and math.abs(dz-1)<0.25 then return DIR_S end
+    if math.abs(dx+1)<0.25 and math.abs(dz)<0.25 then return DIR_W end
+    return nil
+end
+
+function recoverFacingByGPS(state,origin)
+    if not turtle or not origin or type(state)~="table" then return nil,"GPS facing recovery unavailable" end
+    local ex,ey,ez=worldPose(state.x,state.y,state.z,state.chunkIndex,origin)
+    if not ex then return nil,"GPS facing recovery has no world anchor" end
+    local x,y,z=locateWorldPose(2)
+    if not x then return nil,"GPS unavailable for facing recovery" end
+    if math.abs(y-ey)>0.25 then return nil,"GPS facing recovery found an unexpected height" end
+    local dx=x-ex
+    local dz=z-ez
+    if math.abs(dx)>0.25 or math.abs(dz)>0.25 then
+        local dir=directionFromWorldDelta(dx,dz)
+        if not dir then return nil,"GPS facing recovery found an unexpected position" end
+        if not turtle.back() then return nil,"GPS facing recovery could not return from an interrupted probe" end
+        local rx,ry,rz=locateWorldPose(2)
+        if not rx or math.abs(rx-ex)>=0.25 or math.abs(ry-ey)>=0.25 or math.abs(rz-ez)>=0.25 then
+            return nil,"GPS facing recovery could not verify its return position"
+        end
+        return dir
+    end
+    for attempt=1,4 do
+        local bx,by,bz=locateWorldPose(1)
+        if not bx then return nil,"GPS unavailable during facing recovery" end
+        if turtle.forward() then
+            local ax,ay,az=locateWorldPose(2)
+            if not ax then
+                if not turtle.back() then return nil,"GPS failed during facing recovery and the probe could not retreat" end
+                return nil,"GPS unavailable after facing recovery probe"
+            end
+            local dir=directionFromWorldDelta(ax-bx,az-bz)
+            if not turtle.back() then return nil,"Facing recovery probe could not return to its starting tile" end
+            local rx,ry,rz=locateWorldPose(2)
+            if not rx or math.abs(rx-ex)>=0.25 or math.abs(ry-ey)>=0.25 or math.abs(rz-ez)>=0.25 then
+                return nil,"Facing recovery probe return position did not verify"
+            end
+            if dir then return dir end
+            return nil,"Facing recovery probe produced an invalid displacement"
+        end
+        if not turtle.turnRight() then return nil,"Facing recovery could not rotate for another probe" end
+    end
+    return nil,"Facing recovery could not find an open adjacent tile"
+end
+
 function verifyBootWitness(state,origin,hadIntent)
     local fuel=turtle.getFuelLevel()
-    if not hadIntent and type(state.fuelWitness)=="number" and
-        type(fuel)=="number" and fuel~=state.fuelWitness then
-        return false,"Fuel differs from saved pose after reboot; possible world rollback"
-    end
+    local fuelMismatch=not hadIntent and type(state.fuelWitness)=="number" and
+        type(fuel)=="number" and fuel~=state.fuelWitness
     if not origin or type(state.x)~="number" or
         type(state.y)~="number" or type(state.z)~="number" or
-        not gps or not gps.locate then return true end
-    local ok,x,y,z=pcall(gps.locate,2,false)
-    if not ok or type(x)~="number" or type(y)~="number" or
-        type(z)~="number" then return true end
+        not gps or not gps.locate then
+        if fuelMismatch then
+            return false,"Fuel differs from saved pose after reboot; possible world rollback"
+        end
+        return true
+    end
+    local x,y,z=locateWorldPose(2)
+    if not x then
+        if fuelMismatch then
+            return false,"Fuel differs from saved pose and GPS is unavailable after reboot"
+        end
+        return true
+    end
     local ex,ey,ez=worldPose(state.x,state.y,state.z,state.chunkIndex,origin)
     if ex and (math.abs(x-ex)>0.25 or math.abs(y-ey)>0.25 or
         math.abs(z-ez)>0.25) then
         return false,"GPS differs from saved pose after reboot; possible world rollback"
+    end
+    if fuelMismatch then
+        state.fuelWitness=fuel
+        return true,nil,true
     end
     return true
 end

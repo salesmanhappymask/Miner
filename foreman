@@ -71,49 +71,51 @@ local function runForeman(cfg)
         end
     end
 
-    if state.motionIntent or state.verticalIntent or state.turnIntent then
-        local monitorState,monitorSeq=bootManagerState,bootManagerSeq
-        local intent=state.motionIntent or state.verticalIntent or state.turnIntent
-        local intentSeq=tonumber(intent.seq) or (state.seq+1)
-        if not monitorState or tonumber(monitorSeq or monitorState.seq or 0)<intentSeq then
-            monitorState,monitorSeq=requestPoseBackup("foreman",5,cfg.session)
+    local function recoverForemanState()
+        local priorLock=state.recoveryLocked and state.recoveryReason or nil
+        local hadPending=state.motionIntent or state.verticalIntent or state.turnIntent or state.chunkMoveIntent
+        if state.chunkMoveIntent then
+            resolveChunkMove(state,function()
+                saveTableLight(statePath,state)
+            end,cfg.worldOrigin)
+            if state.chunkMoveIntent then return false end
+        end
+        if state.turnIntent then
+            local recoveredDir,reason=recoverFacingByGPS(state,cfg.worldOrigin)
+            if not recoveredDir then
+                state.recoveryLocked=true
+                state.recoveryReason=reason or "Facing ambiguous after interrupted turn"
+                state.phase="RECOVERY_LOCK"
+                saveTableLight(statePath,state)
+                return false
+            end
+            state.dir=recoveredDir
+            state.seq=math.max(tonumber(state.seq) or 0,tonumber(state.turnIntent.seq) or 0)
+            state.turnIntent=nil
         end
 
-        local expectedMove=state.motionIntent and state.motionIntent.to
-        local monitorFits=monitorState and
-            ((expectedMove and monitorState.x==expectedMove.x and
-                monitorState.y==expectedMove.y and monitorState.z==expectedMove.z and
-                monitorState.dir==expectedMove.dir) or
-             (state.verticalIntent and monitorState.x==state.x and
-                monitorState.z==state.z and monitorState.y==state.verticalIntent.to and
-                monitorState.dir==state.dir))
-
-        if monitorFits and not state.turnIntent and
-            tonumber(monitorSeq or monitorState.seq or 0)==intentSeq and
-            movementFromFuel(intent.fuelBefore,turtle.getFuelLevel())==true then
-            state=monitorState
-            state.motionIntent=nil
-            state.verticalIntent=nil
-            state.turnIntent=nil
-            saveTableLight(statePath,state)
-        elseif state.turnIntent then
-            state.recoveryLocked=true
-            state.recoveryReason="Facing ambiguous after interrupted turn"
-            state.phase="RECOVERY_LOCK"
-            saveTableLight(statePath,state)
-        else
+        if state.motionIntent or state.verticalIntent then
             local moveIntent=state.motionIntent or state.verticalIntent
-            local fuelNow=turtle.getFuelLevel()
-            local fuelBefore=moveIntent.fuelBefore
-            local moved=nil
-
-            moved=movementFromFuel(fuelBefore,fuelNow)
-
+            local moved=movementFromFuel(moveIntent.fuelBefore,turtle.getFuelLevel())
+            if moved==nil then
+                local gpsIntent=moveIntent
+                if state.verticalIntent then
+                    gpsIntent={
+                        from={x=state.x,y=state.verticalIntent.from,z=state.z},
+                        to={x=state.x,y=state.verticalIntent.to,z=state.z}
+                    }
+                end
+                moved=movementFromGPS(gpsIntent,state.chunkIndex,cfg.worldOrigin,2)
+            end
             if moved==nil then
                 state.recoveryLocked=true
-                state.recoveryReason="Position ambiguous after interrupted foreman movement"
+                state.recoveryReason="Position ambiguous after interrupted foreman movement; waiting for recovery GPS"
                 state.phase="RECOVERY_LOCK"
-            elseif state.motionIntent then
+                saveTableLight(statePath,state)
+                return false
+            end
+            local intentSeq=tonumber(moveIntent.seq) or ((tonumber(state.seq) or 0)+1)
+            if state.motionIntent then
                 local pose=moved and state.motionIntent.to or state.motionIntent.from
                 state.x=pose.x
                 state.z=pose.z
@@ -126,15 +128,48 @@ local function runForeman(cfg)
                 if moved then state.seq=intentSeq end
                 state.verticalIntent=nil
             end
-            saveTableLight(statePath,state)
         end
+
+        if not foremanPoseValid() then
+            state.recoveryLocked=true
+            state.recoveryReason="Saved foreman pose is outside the operating area"
+            state.phase="RECOVERY_LOCK"
+            saveTableLight(statePath,state)
+            return false
+        end
+
+        if priorLock and not hadPending and
+            not priorLock:find("Fuel differs",1,true) and
+            not priorLock:find("GPS is unavailable",1,true) then
+            local x,y,z=locateWorldPose(2)
+            if not x or not poseMatchesWorld(state,cfg.worldOrigin,x,y,z) then
+                state.recoveryLocked=true
+                state.recoveryReason=priorLock
+                state.phase="RECOVERY_LOCK"
+                saveTableLight(statePath,state)
+                return false
+            end
+        end
+
+        local verified,reason,witnessUpdated=verifyBootWitness(state,cfg.worldOrigin,hadPending and true or false)
+        if not verified then
+            state.recoveryLocked=true
+            state.recoveryReason=reason
+            state.phase="RECOVERY_LOCK"
+            saveTableLight(statePath,state)
+            return false
+        end
+
+        state.recoveryLocked=nil
+        state.recoveryReason=nil
+        if state.phase=="RECOVERY_LOCK" then state.phase="IDLE" end
+        state.fuelWitness=turtle.getFuelLevel()
+        saveTableLight(statePath,state)
+        return true
     end
 
-    if not foremanPoseValid() then
-        state.recoveryLocked=true
-        state.recoveryReason="Saved foreman pose is outside the operating area"
-        state.phase="RECOVERY_LOCK"
-        saveTableLight(statePath,state)
+    if state.motionIntent or state.verticalIntent or state.turnIntent or state.recoveryLocked then
+        recoverForemanState()
     end
 
     if bootHadIntent and not state.recoveryLocked and
@@ -144,11 +179,13 @@ local function runForeman(cfg)
         saveTableLight(statePath,state)
     end
     if not state.recoveryLocked then
-        local verified,reason=verifyBootWitness(state,cfg.worldOrigin,bootHadIntent)
+        local verified,reason,witnessUpdated=verifyBootWitness(state,cfg.worldOrigin,bootHadIntent)
         if not verified then
             state.recoveryLocked=true
             state.recoveryReason=reason
             state.phase="RECOVERY_LOCK"
+            saveTableLight(statePath,state)
+        elseif witnessUpdated then
             saveTableLight(statePath,state)
         end
     end
@@ -4689,13 +4726,12 @@ local function runForeman(cfg)
 
     local function workLoop()
         local nextIdleFuelAttempt=0
-        if state.recoveryLocked then
+        while state.recoveryLocked do
             state.phase="RECOVERY_LOCK"
             saveState()
-            while true do
-                sendState("Movement locked: " .. tostring(state.recoveryReason or "pose uncertain"))
-                sleep(5)
-            end
+            if recoverForemanState() then break end
+            sendState("Movement recovery waiting: " .. tostring(state.recoveryReason or "pose uncertain"))
+            sleep(2)
         end
 
         checkpointForeman()
@@ -5002,7 +5038,39 @@ local function runForeman(cfg)
         end
     end
 
-    parallel.waitForAny(networkLoop, workLoop)
+    local gpsModemSide=nil
+    local gpsModem=nil
+    for _,side in ipairs(SIDES) do
+        if peripheral.getType(side)=="modem" then
+            local ok,wireless=pcall(peripheral.call,side,"isWireless")
+            if ok and wireless then
+                gpsModemSide=side
+                gpsModem=peripheral.wrap(side)
+                break
+            end
+        end
+    end
+    if gpsModem then gpsModem.open(gps.CHANNEL_GPS) end
+
+    local function recoveryGpsLoop()
+        if not gpsModem then
+            while true do sleep(60) end
+        end
+        while true do
+            local event={os.pullEvent("modem_message")}
+            if event[2]==gpsModemSide and event[3]==gps.CHANNEL_GPS and event[5]=="PING" then
+                local stable=not state.recoveryLocked and not state.motionIntent and
+                    not state.verticalIntent and not state.turnIntent and
+                    not state.chunkMoveIntent and foremanPoseValid()
+                if stable then
+                    local x,y,z=worldPose(state.x,state.y,state.z,state.chunkIndex,cfg.worldOrigin)
+                    if x then gpsModem.transmit(event[4],gps.CHANNEL_GPS,{x,y,z}) end
+                end
+            end
+        end
+    end
+
+    parallel.waitForAny(networkLoop, workLoop, recoveryGpsLoop)
 end
 
 

@@ -34,6 +34,7 @@ local function runNavigator(cfg)
     end
 
     state.chunkIndex=tonumber(state.chunkIndex) or 0
+    state.seq=tonumber(state.seq) or 0
     cfg.loaderExpected=tonumber(cfg.number)==1 or tonumber(cfg.number)==3
     state.loaderExpected=cfg.loaderExpected and true or false
     state.loaderPlaced=state.loaderPlaced and true or false
@@ -110,58 +111,132 @@ local function runNavigator(cfg)
         if not saveTableLight(statePath,state) then error("Navigator move recovery write failed") end
     end,cfg.worldOrigin)
 
-    if state.motionIntent then
-        local intent=state.motionIntent
-        local before=intent.fuelBefore
-        local current=turtle.getFuelLevel()
-        local moved=movementFromFuel(before,current)
-        if moved~=nil and
-            type(intent.from)=="table" and type(intent.to)=="table" then
+    local function navigatorPoseValid()
+        return type(state.x)=="number" and type(state.y)=="number" and
+            type(state.z)=="number" and type(state.dir)=="number" and
+            state.x>=-2 and state.x<=19 and state.z>=-2 and
+            state.z<=(state.chunkTravel and 31 or 16) and state.y>=0 and
+            state.y<=18 and state.dir>=0 and state.dir<=3
+    end
+
+    local function navigatorSnapshot()
+        local raw=textutils.serialize(state)
+        local snapshot=textutils.unserialize(raw)
+        snapshot.motionIntent=nil
+        snapshot.turnIntent=nil
+        snapshot.chunkMoveIntent=nil
+        snapshot.loaderIntent=nil
+        return snapshot
+    end
+
+    local function checkpointNavigator()
+        checkpointPose("navigator",state.seq,navigatorSnapshot(),cfg.session)
+    end
+
+    local function attemptNavigatorRecovery()
+        local priorLock=state.recoveryLocked and state.recoveryReason or nil
+        local hadPending=state.motionIntent or state.turnIntent or state.chunkMoveIntent
+        if state.chunkMoveIntent then
+            resolveChunkMove(state,function() save() end,cfg.worldOrigin)
+            if state.chunkMoveIntent then return false end
+        end
+        if state.motionIntent then
+            local intent=state.motionIntent
+            local moved=movementFromFuel(intent.fuelBefore,turtle.getFuelLevel())
+            if moved==nil then
+                moved=movementFromGPS(intent,state.chunkIndex,cfg.worldOrigin,2)
+            end
+            if moved==nil or type(intent.from)~="table" or type(intent.to)~="table" then
+                state.recoveryLocked=true
+                state.recoveryReason="Navigator interrupted move is waiting for recovery GPS"
+                save()
+                return false
+            end
             local pose=moved and intent.to or intent.from
             state.x=pose.x
             state.y=pose.y
             state.z=pose.z
+            if moved and tonumber(intent.seq) then state.seq=math.max(state.seq,tonumber(intent.seq)) end
             state.motionIntent=nil
-            save()
-        else
-            state.recoveryLocked=true
-            state.recoveryReason="Navigator interrupted move has an uncertain position"
-            save()
         end
-    end
-    if state.turnIntent then
-        state.recoveryLocked=true
-        state.recoveryReason="Navigator interrupted turn has an uncertain direction"
-        save()
-    end
-    if type(state.x)~="number" or type(state.y)~="number" or
-        type(state.z)~="number" or type(state.dir)~="number" or
-        state.x< -2 or state.x>19 or state.z< -2 or state.z>(state.chunkTravel and 31 or 16) or
-        state.y<0 or state.y>18 or state.dir<0 or state.dir>3 then
-        state.recoveryLocked=true
-        state.recoveryReason="Navigator saved pose is outside its operating area"
-        save()
-    end
 
-    if not state.recoveryLocked then
-        local verified,reason=verifyBootWitness(state,cfg.worldOrigin,bootHadIntent)
+        if state.turnIntent then
+            local recoveredDir,reason=recoverFacingByGPS(state,cfg.worldOrigin)
+            if not recoveredDir then
+                state.recoveryLocked=true
+                state.recoveryReason=reason or "Navigator interrupted turn has an uncertain direction"
+                save()
+                return false
+            end
+            state.dir=recoveredDir
+            if tonumber(state.turnIntent.seq) then state.seq=math.max(state.seq,tonumber(state.turnIntent.seq)) end
+            state.turnIntent=nil
+        end
+
+        if not navigatorPoseValid() then
+            state.recoveryLocked=true
+            state.recoveryReason="Navigator saved pose is outside its operating area"
+            save()
+            return false
+        end
+
+        if priorLock and not hadPending then
+            if priorLock:find("Chunk Loader",1,true) then return false end
+            if not priorLock:find("Fuel differs",1,true) and
+                not priorLock:find("GPS is unavailable",1,true) then
+                local x,y,z=locateWorldPose(2)
+                if not x or not poseMatchesWorld(state,cfg.worldOrigin,x,y,z) then
+                    state.recoveryLocked=true
+                    state.recoveryReason=priorLock
+                    save()
+                    return false
+                end
+            end
+        end
+
+        local verified,reason,witnessUpdated=verifyBootWitness(state,cfg.worldOrigin,hadPending and true or false)
         if not verified then
             state.recoveryLocked=true
             state.recoveryReason=reason
+            save()
+            return false
+        end
+
+        state.recoveryLocked=nil
+        state.recoveryReason=nil
+        state.navigationError=nil
+        state.fuelWitness=turtle.getFuelLevel()
+        save()
+        checkpointNavigator()
+        return true
+    end
+
+    if state.motionIntent or state.turnIntent or state.recoveryLocked then
+        attemptNavigatorRecovery()
+    else
+        local verified,reason,witnessUpdated=verifyBootWitness(state,cfg.worldOrigin,bootHadIntent)
+        if not verified then
+            state.recoveryLocked=true
+            state.recoveryReason=reason
+            save()
+        elseif witnessUpdated then
             save()
         end
     end
 
     local function turnRight()
         if state.recoveryLocked or deploymentRecall then return false end
-        state.turnIntent={from=state.dir,to=(state.dir+1)%4}
+        local intent={seq=state.seq+1,from=state.dir,to=(state.dir+1)%4}
+        state.turnIntent=intent
         save()
         if not turtle.turnRight() then
             state.turnIntent=nil
             save()
             return false
         end
-        state.dir=state.turnIntent.to
+        state.dir=intent.to
+        state.seq=intent.seq
+        checkpointNavigator()
         state.turnIntent=nil
         save()
         return true
@@ -245,6 +320,7 @@ local function runNavigator(cfg)
         local attempts=0
         while attempts<20 do
             local intent={
+                seq=state.seq+1,
                 kind=kind,
                 fuelBefore=turtle.getFuelLevel(),
                 from={x=state.x,y=state.y,z=state.z},
@@ -260,8 +336,10 @@ local function runNavigator(cfg)
                 state.x=tx
                 state.y=ty
                 state.z=tz
-                state.motionIntent=nil
+                state.seq=intent.seq
                 state.navigationError=nil
+                checkpointNavigator()
+                state.motionIntent=nil
                 save()
                 return true
             end
@@ -635,6 +713,11 @@ local function runNavigator(cfg)
 
     local function recallNavigator(mode)
         mode=mode or "NORMAL"
+        if state.recoveryLocked and not attemptNavigatorRecovery() then
+            state.navigationError=state.recoveryReason or "Navigator recovery is not complete"
+            save()
+            return false
+        end
         if mode=="PACK" then state.packPending=nil end
         if state.loaderExpected and state.loaderPlaced then
             local recovered,reason=retrieveChunkLoader()
@@ -771,7 +854,6 @@ local function runNavigator(cfg)
             x=state.x,y=state.y,z=state.z,
             message=state.recoveryReason,session=cfg.session
         })
-        error(state.recoveryReason)
     end
 
     if not ensureManagerRegistration(cfg) then
@@ -1025,16 +1107,18 @@ local function runNavigator(cfg)
 
     local function sendNavigatorStatus()
         local message=state.recalled and "Navigator recalled" or "GPS host active"
+        if state.recoveryLocked then message=state.recoveryReason or "Navigator recovery waiting" end
         if state.navigationError then message=state.navigationError end
-        status("navigator",state.chunkTravel and "CHUNK_MOVING" or
-            (state.recalled and "RECALLED_PAUSED" or "GPS_HOST"),{
+        status("navigator",state.recoveryLocked and "RECOVERY_LOCK" or
+            (state.chunkTravel and "CHUNK_MOVING" or
+            (state.recalled and "RECALLED_PAUSED" or "GPS_HOST")),{
             number=cfg.number,
             x=state.x,
             y=state.y,
             z=state.z,
             chunkIndex=state.chunkIndex,
             fuel=turtle.getFuelLevel(),
-            gpsHost=not state.recalled and not state.chunkTravel,
+            gpsHost=not state.recoveryLocked and not state.recalled and not state.chunkTravel,
             modemSide=modemSide,
             loaderExpected=state.loaderExpected and true or false,
             loaderPlaced=state.loaderPlaced and true or false,
@@ -1154,7 +1238,8 @@ local function runNavigator(cfg)
             local replyChannel=event[4]
             local message=event[5]
 
-            if side==modemSide and channel==gps.CHANNEL_GPS and message=="PING" and not state.recalled then
+            if side==modemSide and channel==gps.CHANNEL_GPS and message=="PING" and
+                not state.recoveryLocked and not state.recalled then
                 local x,y,z=worldPose(state.x,state.y,state.z,state.chunkIndex,
                     cfg.worldOrigin)
                 if x then modem.transmit(replyChannel,gps.CHANNEL_GPS,{x,y,z}) end
@@ -1243,7 +1328,7 @@ local function runNavigator(cfg)
                                     local replyChannel=ev[4]
                                     local payload=ev[5]
                                     if side==modemSide and channel==gps.CHANNEL_GPS and
-                                        payload=="PING" and not state.recalled then
+                                        payload=="PING" and not state.recoveryLocked and not state.recalled then
                                         local x,y,z=worldPose(state.x,state.y,state.z,
                                             state.chunkIndex,cfg.worldOrigin)
                                         if x then
@@ -1372,6 +1457,7 @@ local function runNavigator(cfg)
                 end
             end
         elseif event[1]=="timer" and event[2]==timer then
+            if state.recoveryLocked then attemptNavigatorRecovery() end
             sendNavigatorStatus()
             sendDeploymentAck()
             if state.packReady and not state.packAcknowledged then
