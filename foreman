@@ -1529,6 +1529,7 @@ local function runForeman(cfg)
                             if state.miningStarted then
                                 send(sender,{type="start_mining"})
                             end
+                            pushInbox(sender,message)
                         end
                     elseif message.type == "commission_done" and cfg.master and message.number then
                         state.groupsCommissioned = state.groupsCommissioned or {}
@@ -2685,6 +2686,26 @@ local function runForeman(cfg)
                 saveState()
                 sendState("Waiting for Miner-" .. tostring(row) .. " standby confirmation")
                 warning=now()
+            end
+        end
+
+        if not progress.runtimeReady then
+            warning=now()
+            while not progress.runtimeReady do
+                if flags.recallMode then return false end
+                local _,reply=waitInbox(function(sender,m)
+                    return sender==workerId and type(m)=="table" and
+                        m.type=="miner_runtime_ready" and tonumber(m.row)==tonumber(row)
+                end,0.5)
+                if reply then
+                    progress.runtimeReady=true
+                    saveState()
+                elseif now()-warning>=10 then
+                    state.phase="WAITING_MINER_RUNTIME"
+                    saveState()
+                    sendState("Waiting for Miner-" .. tostring(row) .. " post-deployment runtime")
+                    warning=now()
+                end
             end
         end
 
