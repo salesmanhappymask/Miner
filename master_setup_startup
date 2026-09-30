@@ -1,4 +1,4 @@
-local VERSION=141
+local VERSION=142
 local SEED_PROTOCOL="miner_swarm_seed_v121"
 
 local function writeFile(path,data)

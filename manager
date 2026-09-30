@@ -726,6 +726,15 @@ local function runRegionalManager()
     data.recall.packReady=data.recall.packReady or {}
     data.recall.packAssetsReady=data.recall.packAssetsReady or {}
 
+    if data.recall.state=="PACK_COMPLETE" and not data.recall.active then
+        print("Previous Pack It Up completed. Resetting and updating Regional Manager before startup...")
+        if shell.run("update","manager") then
+            os.shutdown()
+            return
+        end
+        error("Pack complete clean update failed; retry when network access is available")
+    end
+
     if savedManagerVersion==138 and data.recall.state=="PACK_RM_FINALIZE" and
         data.recall.packFinalizeStage=="FUEL" and data.recall.packFuelChestCollected and
         type(data.recall.packLavaSlots)=="table" and #data.recall.packLavaSlots==0 and
@@ -3256,6 +3265,13 @@ local function runRegionalManager()
             data.recall.packError=nil
             save()
             flushManager(true)
+            print("Pack complete. Resetting and updating Regional Manager...")
+            local updated=shell.run("update","manager")
+            if not updated then
+                print("Pack complete, but Regional Manager clean update failed. It will retry on next boot.")
+                os.shutdown()
+                return false
+            end
             os.shutdown()
             return true
         end

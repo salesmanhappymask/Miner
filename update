@@ -189,6 +189,31 @@ if role == "master" then
     end
 end
 
+local function prepareFreshRoot()
+    local keep={
+        update=true,
+        [CONFIG]=true
+    }
+    if role=="master" then keep.world_anchor=true end
+    local failures={}
+    for _,name in ipairs(fs.list("")) do
+        local mounted=name=="rom" or name:match("^disk%d*$")
+        if not keep[name] and not mounted then
+            local ok,err=pcall(fs.delete,name)
+            if not ok or fs.exists(name) then
+                failures[#failures+1]=name .. (err and (": " .. tostring(err)) or "")
+            end
+        end
+    end
+    if #failures>0 then
+        error("Fresh update could not clear old root files: " .. table.concat(failures, ", "))
+    end
+end
+
+if not preserveState then
+    prepareFreshRoot()
+end
+
 local files = {"startup", "common", "prep", "push", "pushlogs", role == "manager" and "manager" or "foreman"}
 local staged = {}
 local updaterSource
@@ -260,6 +285,72 @@ for _, name in ipairs(files) do
     writeFile(fs.combine(stageDir, name), staged[name])
 end
 writeFile(fs.combine(stageDir, "version"), version)
+writeFile(fs.combine(stageDir, "update"), updaterSource)
+
+if not preserveState then
+    local failures={}
+    for _,name in ipairs(fs.list("")) do
+        local mounted=name=="rom" or name:match("^disk%d*$")
+        if name~=stageDir and not mounted then
+            local ok,err=pcall(fs.delete,name)
+            if not ok or fs.exists(name) then
+                failures[#failures+1]=name .. (err and (": " .. tostring(err)) or "")
+            end
+        end
+    end
+    if #failures>0 then
+        error("Fresh update could not clear old root files: " .. table.concat(failures, ", "))
+    end
+
+    local installOrder={"update","startup","common","prep","push","pushlogs",role == "manager" and "manager" or "foreman","version"}
+    for _,name in ipairs(installOrder) do
+        local stagedPath=fs.combine(stageDir,name)
+        if not fs.exists(stagedPath) then
+            error("Fresh update staging lost " .. name)
+        end
+        fs.move(stagedPath,name)
+    end
+    saveConfig(role)
+    if role=="master" and anchor then
+        writeFile("world_anchor", textutils.serialize(anchor))
+    end
+    if fs.exists(stageDir) then fs.delete(stageDir) end
+
+    for _, name in ipairs(files) do
+        if readFile(name) ~= staged[name] then
+            error("Fresh update verification failed: " .. name)
+        end
+    end
+    if readFile("version") ~= version then
+        error("Fresh update verification failed: version")
+    end
+    if readFile("update") ~= updaterSource then
+        error("Fresh update verification failed: update")
+    end
+    local verifyConfig=loadConfig()
+    if not verifyConfig or verifyConfig.role~=role then
+        error("Fresh update verification failed: updater role")
+    end
+
+    if role == "manager" then
+        os.setComputerLabel("Regional Manager")
+    else
+        os.setComputerLabel("Foreman-1")
+    end
+
+    print("")
+    print("Update complete.")
+    print("Installed version " .. version .. " for " .. roleName(role) .. ".")
+    print("The turtle root was wiped completely before the fresh runtime was installed.")
+    if autoReboot then
+        print("Rebooting into the updated release...")
+        sleep(1)
+        os.reboot()
+    end
+    print("No program was launched and the turtle was not rebooted.")
+    print("Run startup or reboot when you are ready to start the quarry software.")
+    return
+end
 
 local backupDir = ".update_backup"
 if fs.exists(backupDir) then fs.delete(backupDir) end
