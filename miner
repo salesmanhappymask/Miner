@@ -788,6 +788,17 @@ local function runMiner(cfg)
         saveTableLight(path,state)
     end
 
+    local function packAssetPoseValid(x,y,z)
+        if not (state.packAssetProgress and state.recallMode=="PACK" and isChestCollector(cfg.row)) then
+            return false
+        end
+        local group=math.floor((cfg.row-1)/4)+1
+        if group==1 then
+            return x>=1 and x<=3 and y==0 and z>=-3 and z<=0
+        end
+        return x>=cfg.row-1 and x<=cfg.row and y==0 and z>=-2 and z<=0
+    end
+
     local function poseValid()
         if state.advanceStage=="CHEST" then
             local collector=chestCollectorRow(math.floor((cfg.row-1)/4)+1)
@@ -801,15 +812,9 @@ local function runMiner(cfg)
                 state.y==0 and state.x==cfg.row and state.z>=0 and state.z<=16
         end
         if state.packAssetProgress and state.recallMode=="PACK" and isChestCollector(cfg.row) then
-            local group=math.floor((cfg.row-1)/4)+1
-            if group==1 then
-                return state.originEstablished==true and cfg.orientationCalibrated==true and
-                    state.x>=1 and state.x<=3 and state.y==0 and state.z>=-3 and state.z<=0 and
-                    state.dir>=DIR_N and state.dir<=DIR_W
-            end
             return state.originEstablished==true and cfg.orientationCalibrated==true and
-                state.x>=cfg.row-1 and state.x<=cfg.row and state.y==0 and
-                state.z>=-2 and state.z<=0 and state.dir>=DIR_N and state.dir<=DIR_W
+                packAssetPoseValid(state.x,state.y,state.z) and
+                state.dir>=DIR_N and state.dir<=DIR_W
         end
         if cfg.row==WORKER_COUNT and (state.phase=="PACK_COLLECT" or state.phase=="PACK_BLOCKED" or state.phase=="PACK_DONE") then
             local overflow=state.packOverflowTrip==true
@@ -1040,6 +1045,17 @@ local function runMiner(cfg)
         state.recoveryLocked=false
         state.recoveryReason=nil
         state.phase="ADVANCE_CHEST"
+        saveTableLight(path,state)
+    end
+
+    if state.recoveryLocked and
+        state.recoveryReason=="Movement would leave assigned miner shaft" and
+        state.packAssetProgress and state.recallMode=="PACK" and
+        isChestCollector(cfg.row) and cfg.row~=WORKER_COUNT and
+        packAssetPoseValid(state.x,state.y,state.z) and not state.motionIntent then
+        state.recoveryLocked=false
+        state.recoveryReason=nil
+        state.phase="RECALLED_PAUSED"
         saveTableLight(path,state)
     end
 
@@ -1429,7 +1445,10 @@ local function runMiner(cfg)
         if state.y==cfg.homeY and not verifySurfaceGps() then return nil end
         local chestMove=state.advanceStage=="CHEST" and
             toX==cfg.row and toY==0 and toZ>=-2 and toZ<=0
-        if not chestMove and (toX~=cfg.row or toY>0 or toZ<0 or toZ>15) then
+        local packAssetMove=state.packAssetProgress and state.recallMode=="PACK" and
+            isChestCollector(cfg.row) and cfg.row~=WORKER_COUNT and
+            packAssetPoseValid(state.x,state.y,state.z) and packAssetPoseValid(toX,toY,toZ)
+        if not chestMove and not packAssetMove and (toX~=cfg.row or toY>0 or toZ<0 or toZ>15) then
             state.recoveryLocked=true
             state.recoveryReason="Movement would leave assigned miner shaft"
             state.phase="RECOVERY_LOCK"
