@@ -5210,9 +5210,10 @@ local function runMaster()
         error("Master Foreman could not register with Regional Manager")
     end
 
-    os.setComputerLabel("Foreman-1")
-
     local state=loadTableLight("foreman1.tmp")
+    if not (state and state.recallMode=="PACK" and state.packReady) then
+        os.setComputerLabel("Foreman-1")
+    end
 
     if not state and newMaster then
         saveTableLight("foreman1.tmp",{

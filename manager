@@ -1867,10 +1867,20 @@ local function runRegionalManager()
     end
 
     local function sendPackClear()
-        local collectorId=data.recall.targets and data.recall.targets.miners and
-            data.recall.targets.miners[WORKER_COUNT]
-        for _,id in pairs(data.recall.targets.miners or {}) do
+        local targets=data.recall.targets or {}
+        local collectorId=targets.miners and targets.miners[WORKER_COUNT]
+        for _,id in pairs(targets.miners or {}) do
             if id~=collectorId and not data.recall.packReady[id] then
+                send(id,{type="pack_clear",packToken=data.recall.packToken,session=data.session})
+            end
+        end
+        for _,id in pairs(targets.foremen or {}) do
+            if id and not data.recall.packReady[id] then
+                send(id,{type="pack_clear",packToken=data.recall.packToken,session=data.session})
+            end
+        end
+        for _,id in pairs(targets.navigators or {}) do
+            if id and not data.recall.packReady[id] then
                 send(id,{type="pack_clear",packToken=data.recall.packToken,session=data.session})
             end
         end
@@ -2219,8 +2229,20 @@ local function runRegionalManager()
                 local ready=0
                 local expectedReady=0
                 local collectorId=data.recall.targets.miners[WORKER_COUNT]
-                for _,id in pairs(data.recall.targets.miners) do
+                for _,id in pairs(data.recall.targets.miners or {}) do
                     if id~=collectorId then
+                        expectedReady=expectedReady+1
+                        if data.recall.packReady[id] then ready=ready+1 end
+                    end
+                end
+                for _,id in pairs(data.recall.targets.foremen or {}) do
+                    if id then
+                        expectedReady=expectedReady+1
+                        if data.recall.packReady[id] then ready=ready+1 end
+                    end
+                end
+                for _,id in pairs(data.recall.targets.navigators or {}) do
+                    if id then
                         expectedReady=expectedReady+1
                         if data.recall.packReady[id] then ready=ready+1 end
                     end
@@ -3572,11 +3594,20 @@ local function runRegionalManager()
                 elseif message.type=="pack_ready" and message.session==data.session and
                     data.recall.mode=="PACK" and tonumber(message.packToken)==tonumber(data.recall.packToken) and
                     (data.recall.state=="PACK_CLEAR" or data.recall.state=="PACK_ASSETS") then
-                    local index=tonumber(message.row)
-                    local poseValid=message.role=="miner" and index and index~=WORKER_COUNT and
-                        message.x==index and message.y==0 and message.z==0 and message.dir==DIR_N
-                    if poseValid and message.labelCleared==true and registeredNodeSender("miner",index,sender) and
-                        sender~=data.recall.targets.miners[WORKER_COUNT] then
+                    local role=message.role
+                    local index=role=="miner" and tonumber(message.row) or tonumber(message.number)
+                    local poseValid=false
+                    if role=="miner" and index and index~=WORKER_COUNT then
+                        poseValid=message.x==index and message.y==0 and message.z==0 and message.dir==DIR_N and
+                            sender~=data.recall.targets.miners[WORKER_COUNT]
+                    elseif role=="foreman" and index and FOREMAN_IDLE[index] then
+                        local idle=FOREMAN_IDLE[index]
+                        poseValid=message.x==idle.x and message.y==idle.y and message.z==idle.z and message.dir==DIR_N
+                    elseif role=="navigator" and index and NAVIGATOR_RECALL[index] then
+                        local idle=NAVIGATOR_RECALL[index]
+                        poseValid=message.x==idle.x and message.y==idle.y and message.z==idle.z and message.dir==DIR_N
+                    end
+                    if poseValid and message.labelCleared==true and registeredNodeSender(role,index,sender) then
                         data.recall.packReady[sender]=true
                         save()
                         send(sender,{type="pack_ready_ack",packToken=data.recall.packToken,session=data.session})
