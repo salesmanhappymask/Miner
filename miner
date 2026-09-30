@@ -1101,7 +1101,8 @@ local function runMiner(cfg)
         packCollect=false,
         packAssets=false,
         newForeman=nil,
-        advanceCommand=nil
+        advanceCommand=nil,
+        orientationCommand=nil
     }
     local lastStatus = 0
     local lastRequest = 0
@@ -1148,6 +1149,7 @@ local function runMiner(cfg)
             packError=state.packError,
             blockedDetail=state.blockedDetail,
             complete=state.complete and true or false,
+            orientationVerified=state.preMiningOrientationVerified and true or false,
             recovery=state.recoveryReason,
             message=message or "",
             session=cfg.session
@@ -1204,6 +1206,12 @@ local function runMiner(cfg)
                             flags.refuelNow = true
                             state.runtimeFuelKind=message.fuelKind
                             save()
+                        elseif message.type=="orientation_command" and message.session==cfg.session then
+                            if state.orientationLastToken==message.token and type(state.orientationLastResult)=="table" then
+                                send(cfg.foremanId,state.orientationLastResult)
+                            else
+                                flags.orientationCommand=message
+                            end
                         end
                     elseif message.type=="maintenance_clear_label" and
                         message.session==cfg.session then
@@ -1612,6 +1620,204 @@ local function runMiner(cfg)
                 if not turnStep(true) then return false end
             end
         end
+        return true
+    end
+
+    local function orientationFrontComputerId()
+        local ok,id=pcall(peripheral.call,"front","getID")
+        if ok then return tonumber(id) end
+        return nil
+    end
+
+    local function orientationAdoptGpsPose()
+        local gx,gy,gz=locateWorldPose(2)
+        if not gx then return false,"GPS unavailable during orientation correction" end
+        local lx,ly,lz=worldToLocalPose(gx,gy,gz,state.chunkIndex,cfg.worldOrigin)
+        if lx==nil then return false,"GPS orientation correction could not map the miner position" end
+        state.x=lx
+        state.y=ly
+        state.z=lz
+        state.depth=-ly
+        state.pos=lz
+        state.motionIntent=nil
+        state.turnIntent=nil
+        save()
+        return true
+    end
+
+    local function orientationClearFront()
+        local kind=peripheral.getType("front")
+        local okId,id=pcall(peripheral.call,"front","getID")
+        if kind or (okId and tonumber(id)) then
+            return false,"Orientation correction path is occupied by a protected block"
+        end
+        pcall(turtle.dig)
+        pcall(turtle.attack)
+        sleep(0.05)
+        kind=peripheral.getType("front")
+        okId,id=pcall(peripheral.call,"front","getID")
+        if kind or (okId and tonumber(id)) or turtle.detect() then
+            return false,"Orientation correction could not clear its horizontal path"
+        end
+        return true
+    end
+
+    local function orientationMoveHorizontal(tx,tz)
+        while state.x<tx do
+            if not face(DIR_E) then return false,"Could not face east during orientation correction" end
+            local ok,reason=orientationClearFront()
+            if not ok then return false,reason end
+            if not attemptForward() then return false,"Could not move east during orientation correction" end
+        end
+        while state.x>tx do
+            if not face(DIR_W) then return false,"Could not face west during orientation correction" end
+            local ok,reason=orientationClearFront()
+            if not ok then return false,reason end
+            if not attemptForward() then return false,"Could not move west during orientation correction" end
+        end
+        while state.z<tz do
+            if not face(DIR_N) then return false,"Could not face north during orientation correction" end
+            local ok,reason=orientationClearFront()
+            if not ok then return false,reason end
+            if not attemptForward() then return false,"Could not move north during orientation correction" end
+        end
+        while state.z>tz do
+            if not face(DIR_S) then return false,"Could not face south during orientation correction" end
+            local ok,reason=orientationClearFront()
+            if not ok then return false,reason end
+            if not attemptForward() then return false,"Could not move south during orientation correction" end
+        end
+        return true
+    end
+
+    local function orientationGpsRepair()
+        local ok,reason=orientationAdoptGpsPose()
+        if not ok then return false,reason end
+        while state.y<cfg.homeY+1 do
+            local kind=peripheral.getType("top")
+            if kind then return false,"GPS orientation correction is blocked above by "..tostring(kind) end
+            pcall(turtle.digUp)
+            if turtle.detectUp() then return false,"GPS orientation correction could not clear above the miner" end
+            if not attemptUp() then return false,"GPS orientation correction could not move above the miner line" end
+        end
+        if state.y~=cfg.homeY+1 then
+            return false,"GPS orientation correction reached an unexpected height"
+        end
+        for i=1,4 do
+            local kind=peripheral.getType("front")
+            local okId,id=pcall(peripheral.call,"front","getID")
+            if not kind and not (okId and tonumber(id)) then
+                pcall(turtle.dig)
+                pcall(turtle.attack)
+            end
+            if not turnStep(true) then return false,"GPS orientation correction could not clear its probe layer" end
+        end
+        ok,reason=orientationAdoptGpsPose()
+        if not ok then return false,reason end
+        local recoveredDir,dirReason=recoverFacingByGPS(state,cfg.worldOrigin)
+        if not recoveredDir then return false,dirReason or "GPS could not determine miner facing" end
+        state.dir=recoveredDir
+        save()
+        ok,reason=orientationMoveHorizontal(cfg.homeX,cfg.homeZ)
+        if not ok then return false,reason end
+        if not face(DIR_N) then return false,"GPS orientation correction could not establish north" end
+        while state.y>cfg.homeY do
+            local kind=peripheral.getType("bottom")
+            if kind then return false,"GPS orientation correction is blocked below by "..tostring(kind) end
+            pcall(turtle.digDown)
+            if turtle.detectDown() then return false,"GPS orientation correction could not clear the home column" end
+            if not attemptDown() then return false,"GPS orientation correction could not return to miner height" end
+        end
+        if state.x~=cfg.homeX or state.y~=cfg.homeY or state.z~=cfg.homeZ then
+            return false,"GPS orientation correction did not return to the miner idle square"
+        end
+        if not face(DIR_N) then return false,"GPS orientation correction could not finish north-facing" end
+        state.dir=DIR_N
+        state.orientationCalibrated=true
+        state.orientationAnchor="FOREMAN_BACK"
+        state.preMiningOrientationVerified=true
+        state.recoveryLocked=nil
+        state.recoveryReason=nil
+        cfg.orientationCalibrated=true
+        cfg.orientationAnchor="FOREMAN_BACK"
+        saveTable("node.cfg",cfg)
+        save()
+        checkpoint()
+        return true
+    end
+
+    local function orientationPeerCheck(expectRight,expectLeft,confirm)
+        if not turnStep(true) then return false,"Could not turn right for peer orientation check" end
+        local right=orientationFrontComputerId()~=nil
+        if not turnStep(false) then return false,"Could not restore after right peer check" end
+        if not turnStep(false) then return false,"Could not turn left for peer orientation check" end
+        local left=orientationFrontComputerId()~=nil
+        if not turnStep(true) then return false,"Could not restore after left peer check" end
+        if right~=(expectRight and true or false) or left~=(expectLeft and true or false) then
+            return false,"Peer geometry did not identify north"
+        end
+        if confirm then
+            local ok,reason=orientationAdoptGpsPose()
+            if not ok then return false,reason end
+            state.dir=DIR_N
+            state.orientationCalibrated=true
+            state.orientationAnchor="FOREMAN_BACK"
+            state.preMiningOrientationVerified=true
+            cfg.orientationCalibrated=true
+            cfg.orientationAnchor="FOREMAN_BACK"
+            saveTable("node.cfg",cfg)
+            save()
+            checkpoint()
+        end
+        return true
+    end
+
+    local function orientationReturnHome()
+        local ok,reason=orientationAdoptGpsPose()
+        if not ok then return false,reason end
+        if state.y~=cfg.homeY then return false,"Peer orientation check left the miner at an unexpected height" end
+        ok,reason=orientationMoveHorizontal(cfg.homeX,cfg.homeZ)
+        if not ok then return false,reason end
+        if not face(DIR_N) then return false,"Could not finish peer orientation check north-facing" end
+        return true
+    end
+
+    local function processOrientationCommand()
+        local command=flags.orientationCommand
+        if not command then return false end
+        flags.orientationCommand=nil
+        local result={
+            type="orientation_result",
+            row=cfg.row,
+            token=command.token,
+            action=command.action,
+            ok=false,
+            session=cfg.session
+        }
+        if state.recallMode or state.advanceStage or state.complete or
+            (state.phase~="WAITING" and state.phase~="RECOVERY_LOCK") then
+            result.reason="Miner is not safely parked for pre-mining orientation correction"
+        elseif command.action=="forward" then
+            if attemptForward() then result.ok=true else result.reason="Miner could not make peer-check forward move" end
+        elseif command.action=="check" then
+            local ok,reason=orientationPeerCheck(command.expectRight,command.expectLeft,command.confirm~=false)
+            result.ok=ok and true or false
+            result.reason=reason
+        elseif command.action=="home" then
+            local ok,reason=orientationReturnHome()
+            result.ok=ok and true or false
+            result.reason=reason
+        elseif command.action=="gps_repair" then
+            local ok,reason=orientationGpsRepair()
+            result.ok=ok and true or false
+            result.reason=reason
+        else
+            result.reason="Unknown orientation command"
+        end
+        state.orientationLastToken=command.token
+        state.orientationLastResult=result
+        save()
+        send(cfg.foremanId,result)
         return true
     end
 
@@ -3916,6 +4122,10 @@ local function runMiner(cfg)
 
     local function workLoop()
         while state.recoveryLocked do
+            if flags.orientationCommand then
+                processOrientationCommand()
+                if not state.recoveryLocked then break end
+            end
             if state.phase~="RECOVERY_LOCK" then
                 state.recoveryPhase=state.phase
                 state.phase="RECOVERY_LOCK"
@@ -3994,7 +4204,9 @@ local function runMiner(cfg)
         end
 
         while state.phase=="WAITING" and not flags.start do
-            if flags.recallMode then
+            if flags.orientationCommand then
+                processOrientationCommand()
+            elseif flags.recallMode then
                 if not handleRecallRequest() then return end
             elseif flags.resume then
                 flags.resume=false
@@ -4046,7 +4258,9 @@ local function runMiner(cfg)
             save()
 
             while not flags.start do
-                if flags.recallMode then
+                if flags.orientationCommand then
+                    processOrientationCommand()
+                elseif flags.recallMode then
                     if not handleRecallRequest() then return end
                 elseif flags.resume then
                     flags.resume=false

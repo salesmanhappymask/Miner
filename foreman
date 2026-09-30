@@ -401,6 +401,7 @@ local function runForeman(cfg)
             setupDone=state.setupDone and true or false,
             miningStarted=state.miningStarted and true or false,
             installerConsolidationDone=state.installerConsolidationDone and true or false,
+            orientationCheckDone=state.orientationCheckDone and true or false,
             recovery=state.recoveryReason,
             message=message or "",
             setupMissing=state.setupBlockReason or false,
@@ -1635,6 +1636,9 @@ local function runForeman(cfg)
                             end
                             pushInbox(sender,message)
                         end
+                    elseif message.type=="orientation_result" and message.row and assignedRow(message.row) and
+                        message.session==cfg.session then
+                        pushInbox(sender,message)
                     elseif message.type == "commission_done" and cfg.master and message.number then
                         state.groupsCommissioned = state.groupsCommissioned or {}
                         state.groupsCommissioned[message.number] = true
@@ -2684,23 +2688,35 @@ local function runForeman(cfg)
         saveState()
         if not progress.fuelHanded then
             if progress.fuelTransferPending then
-                state.phase="WAITING_FUEL"
-                saveState()
-                sendState("Miner-" .. tostring(row) .. " fuel transfer was interrupted; inspect inventory")
-                return false
+                if selfCount(setupKind)>=setupUnits then
+                    progress.fuelTransferPending=nil
+                    saveState()
+                elseif frontComputerId()==workerId then
+                    progress.fuelHanded=true
+                    progress.fuelTransferPending=nil
+                    progress.bucketsBefore=selfCount("empty_bucket")
+                    saveState()
+                else
+                    state.phase="WAITING_FUEL"
+                    saveState()
+                    sendState("Miner-" .. tostring(row) .. " fuel transfer recovery cannot verify the recipient")
+                    return false
+                end
             end
-            progress.fuelTransferPending=true
-            saveState()
-            if not selfDropKind(setupKind,setupUnits) then
-                state.phase="WAITING_FUEL"
+            if not progress.fuelHanded then
+                progress.fuelTransferPending=true
                 saveState()
-                sendState("Miner-" .. tostring(row) .. " fuel transfer incomplete; inspect inventory")
-                return false
+                if not selfDropKind(setupKind,setupUnits) then
+                    state.phase="WAITING_FUEL"
+                    saveState()
+                    sendState("Miner-" .. tostring(row) .. " fuel transfer incomplete; retrying from physical inventory")
+                    return false
+                end
+                progress.fuelHanded=true
+                progress.fuelTransferPending=nil
+                progress.bucketsBefore=selfCount("empty_bucket")
+                saveState()
             end
-            progress.fuelHanded=true
-            progress.fuelTransferPending=nil
-            progress.bucketsBefore=selfCount("empty_bucket")
-            saveState()
         end
         if setupKind=="lava_bucket" and
             selfCount("empty_bucket")<(progress.bucketsBefore or 0)+setupUnits and
@@ -2960,6 +2976,110 @@ local function runForeman(cfg)
         return exitDockHome()
     end
 
+    local function minerOrientationCommand(row,action,step,expectRight,expectLeft,confirm)
+        local minerId=state.minerIds and state.minerIds[row]
+        if not minerId then return false,"Miner-"..tostring(row).." is not registered for orientation verification" end
+        local token=tostring(cfg.session)..":orient:"..tostring(number)..":"..tostring(state.orientationCheckToken or 0)..":"..tostring(step)
+        local packet={
+            type="orientation_command",
+            action=action,
+            token=token,
+            row=row,
+            expectRight=expectRight,
+            expectLeft=expectLeft,
+            confirm=confirm,
+            session=cfg.session
+        }
+        local deadline=now()+12
+        local lastSend=0
+        repeat
+            if now()-lastSend>=1 then
+                send(minerId,packet)
+                lastSend=now()
+            end
+            local _,reply=waitInbox(function(sender,m)
+                return sender==minerId and type(m)=="table" and m.type=="orientation_result" and
+                    m.token==token and tonumber(m.row)==tonumber(row)
+            end,0.5)
+            if reply then
+                if reply.ok then return true end
+                return false,reply.reason or ("Miner-"..tostring(row).." orientation command failed")
+            end
+        until now()>=deadline
+        return false,"Miner-"..tostring(row).." did not answer orientation command "..tostring(action)
+    end
+
+    local function repairAssignedMinerOrientation(reason)
+        state.phase="VERIFYING_ORIENTATION"
+        state.setupBlockReason=reason or "Peer orientation check requires GPS correction"
+        saveState()
+        sendState(state.setupBlockReason)
+        local step=100
+        for row=cfg.rowStart,cfg.rowEnd do
+            local ok,repairReason=minerOrientationCommand(row,"gps_repair",step,nil,nil,true)
+            step=step+1
+            if not ok then
+                state.phase="WAITING_ORIENTATION"
+                state.setupBlockReason="Miner-"..tostring(row).." GPS orientation correction failed: "..tostring(repairReason)
+                saveState()
+                sendState(state.setupBlockReason)
+                return false
+            end
+        end
+        state.orientationCheckDone=true
+        state.orientationCheckStarted=nil
+        state.setupBlockReason=nil
+        state.phase="COMMISSIONING"
+        saveState()
+        sendState("All assigned miners corrected north by GPS")
+        return true
+    end
+
+    local function verifyAssignedMinerOrientation()
+        if state.orientationCheckDone then return true end
+        state.orientationCheckToken=(tonumber(state.orientationCheckToken) or 0)+1
+        local resumed=state.orientationCheckStarted and true or false
+        state.orientationCheckStarted=true
+        state.phase="VERIFYING_ORIENTATION"
+        saveState()
+        if resumed then
+            return repairAssignedMinerOrientation("Orientation verification was interrupted; correcting all four miners by GPS")
+        end
+        local r1=cfg.rowStart
+        local r2=r1+1
+        local r3=r1+2
+        local r4=r1+3
+        local sequence={
+            {r1,"forward",1},
+            {r2,"check",2,true,false,true},
+            {r2,"forward",3},
+            {r1,"check",4,true,false,true},
+            {r1,"home",5},
+            {r3,"check",6,true,false,true},
+            {r3,"forward",7},
+            {r2,"check",8,true,false,true},
+            {r2,"home",9},
+            {r4,"forward",10},
+            {r3,"check",11,true,false,true},
+            {r4,"check",12,false,true,true},
+            {r3,"home",13},
+            {r4,"home",14},
+        }
+        for _,entry in ipairs(sequence) do
+            local ok,why=minerOrientationCommand(entry[1],entry[2],entry[3],entry[4],entry[5],entry[6])
+            if not ok then
+                return repairAssignedMinerOrientation("Peer orientation verification failed: "..tostring(why))
+            end
+        end
+        state.orientationCheckDone=true
+        state.orientationCheckStarted=nil
+        state.setupBlockReason=nil
+        state.phase="COMMISSIONING"
+        saveState()
+        sendState("All assigned miners physically confirmed north")
+        return true
+    end
+
     local function loadCommissionFuel()
         state.commissionedRows = state.commissionedRows or {}
 
@@ -2975,7 +3095,15 @@ local function runForeman(cfg)
         end
 
         if state.commissionFuelLoaded then
-            return true
+            local loadedKind=state.commissionFuelKind
+            local loadedUnits=tonumber(state.commissionFuelUnits) or 0
+            if loadedKind and loadedUnits>0 and selfCount(loadedKind)>=loadedUnits then
+                return true
+            end
+            state.commissionFuelLoaded=false
+            state.commissionFuelKind=nil
+            state.commissionFuelUnits=nil
+            saveState()
         end
 
         if not atFuel() then
@@ -2996,10 +3124,29 @@ local function runForeman(cfg)
             return false
         end
 
-        local kind,units=loadFuelPacket(MINER_FUEL_TARGET,1)
-        if not kind then
+        local kind,units
+        for attempt=1,5 do
+            kind,units=loadFuelPacket(MINER_FUEL_TARGET,1)
+            if kind and units and selfCount(kind)>=units then break end
+            kind=nil
+            units=nil
+            if frontFuelCount("lava_bucket")>0 then
+                local slot=selfTargetSlot("lava_bucket")
+                if slot then
+                    turtle.select(slot)
+                    local before=turtle.getItemCount(slot)
+                    if turtle.suck(1) and turtle.getItemCount(slot)>before and selfCount("lava_bucket")>0 then
+                        kind="lava_bucket"
+                        units=1
+                        break
+                    end
+                end
+            end
+            sleep(0.2)
+        end
+        if not kind or not units or selfCount(kind)<units then
             state.phase="WAITING_FUEL"
-            state.setupBlockReason="Foreman-"..tostring(number).." fuel chest needs a usable lava bucket, blaze rod, charcoal, or coal for its next miner"
+            state.setupBlockReason="Foreman-"..tostring(number).." could not acquire the physical startup fuel packet for its next miner"
             saveState()
             sendState(state.setupBlockReason)
             return false
@@ -3142,6 +3289,9 @@ local function runForeman(cfg)
         end
 
         state.setupBlockReason=nil
+        if not verifyAssignedMinerOrientation() then
+            return false
+        end
         if not returnSetupResources() then
             state.setupBlockReason=state.setupBlockReason or
                 "Foreman-"..tostring(number)..
@@ -5292,7 +5442,13 @@ local function runForeman(cfg)
             end
             if flags.startMining then
                 flags.startMining=false
-                if not state.miningStarted then
+                if not state.orientationCheckDone then
+                    if verifyAssignedMinerOrientation() then
+                        flags.startMining=true
+                    else
+                        sendState(state.setupBlockReason or "Miner orientation verification blocked")
+                    end
+                elseif not state.miningStarted then
                     state.miningStarted=true
                     if state.phase~="RECALLED_PAUSED" then
                         state.phase="IDLE"

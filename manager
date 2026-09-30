@@ -320,11 +320,14 @@ local function runManagerSeedBootstrap()
         if not ok then return false,reason end
         local waypoints={
             {x=0,z=0},
+            {x=0,z=1},
+            {x=16,z=1},
             {x=16,z=0},
-            {x=16,z=-1},
+            {x=0,z=0},
             {x=0,z=-1},
-            {x=0,z=-2},
+            {x=16,z=-1},
             {x=16,z=-2},
+            {x=0,z=-2},
             {x=6,z=-2},
             {x=6,z=-3},
             {x=0,z=-3},
