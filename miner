@@ -2046,6 +2046,10 @@ local function runMiner(cfg)
     end
 
     local function neededService()
+        if state.recallMode=="PACK" or state.phase=="PACK_COLLECT" or
+            state.phase=="PACK_BLOCKED" or state.phase=="PACK_DONE" then
+            return nil
+        end
         local dump = inventoryFull()
         local fuel = turtle.getFuelLevel()
         local refuel = false
@@ -3199,7 +3203,11 @@ local function runMiner(cfg)
 
         while state.x>1 do
             local targetRow=state.x-1
-            local expected=isChestCollector(targetRow) and (targetRow==chestCollectorRow(1) and 4 or 5) or 1
+            local cargoExpected=0
+            if isChestCollector(targetRow) then
+                cargoExpected=targetRow==chestCollectorRow(1) and 3 or 4
+            end
+            local expected=cargoExpected+1
             if not state.packStepIntent and freeInventorySlots()<expected then
                 if not startOverflowTrip() then return false end
             end
@@ -3210,8 +3218,13 @@ local function runMiner(cfg)
                 if not turtle.detect() then
                     return packBlock("Expected parked Miner-"..tostring(targetRow).." in the pack lane")
                 end
-                state.packStepIntent={stage="DIGGING",targetRow=targetRow,
-                    beforeTotal=inventoryTotal(),expected=expected}
+                state.packStepIntent={
+                    stage=cargoExpected>0 and "DRAINING" or "DIGGING",
+                    targetRow=targetRow,
+                    beforeTotal=inventoryTotal(),
+                    cargoExpected=cargoExpected,
+                    expected=expected
+                }
                 save()
             end
 
@@ -3219,9 +3232,40 @@ local function runMiner(cfg)
                 return packBlock("Pack step target no longer matches Miner-16 position")
             end
 
-            if state.packStepIntent.stage=="DIGGING" then
+            if state.packStepIntent.stage=="DRAINING" then
                 local before=tonumber(state.packStepIntent.beforeTotal) or inventoryTotal()
-                local required=tonumber(state.packStepIntent.expected) or expected
+                local requiredCargo=tonumber(state.packStepIntent.cargoExpected) or cargoExpected
+                if not turtle.detect() then
+                    return packBlock("Hardware collector Miner-"..tostring(targetRow)..
+                        " disappeared before its inventory was drained")
+                end
+                local recoveredCargo=inventoryTotal()-before
+                while recoveredCargo<requiredCargo do
+                    if not selectEmptySlot() then
+                        return packBlock("Miner-16 has no slot while draining Miner-"..tostring(targetRow))
+                    end
+                    local moved=turtle.suck()
+                    if not moved then break end
+                    recoveredCargo=inventoryTotal()-before
+                end
+                if recoveredCargo<requiredCargo then
+                    reportMissing(targetRow)
+                    return packBlock("Miner-16 drained "..tostring(recoveredCargo).."/"..
+                        tostring(requiredCargo).." required hardware items from Miner-"..
+                        tostring(targetRow).." before collection")
+                end
+                state.packStepIntent.stage="DIGGING"
+                state.packStepIntent.beforeDigTotal=inventoryTotal()
+                save()
+            end
+
+            if state.packStepIntent.stage=="DIGGING" then
+                local before=tonumber(state.packStepIntent.beforeDigTotal)
+                if not before then
+                    before=inventoryTotal()
+                    state.packStepIntent.beforeDigTotal=before
+                    save()
+                end
                 if turtle.detect() then
                     if not selectEmptySlot() then return packBlock("Miner-16 has no slot for Miner-"..tostring(targetRow)) end
                     local dug,digError=turtle.dig()
@@ -3239,13 +3283,14 @@ local function runMiner(cfg)
                     if not moved then break end
                 end
                 local recovered=inventoryTotal()-before
-                if recovered<required then
+                if recovered<1 then
                     reportMissing(targetRow)
-                    return packBlock("Miner-16 recovered "..tostring(recovered).."/"..tostring(required)..
-                        " required pack items from Miner-"..tostring(targetRow))
+                    return packBlock("Miner-16 did not recover the Miner-"..tostring(targetRow)..
+                        " turtle after draining its inventory")
                 end
                 state.packStepIntent.stage="DUG"
                 state.packStepIntent.beforeTotal=nil
+                state.packStepIntent.beforeDigTotal=nil
                 save()
             end
 
@@ -3464,6 +3509,11 @@ local function runMiner(cfg)
         end
 
         if state.phase=="PACK_DONE" then
+            return
+        end
+
+        if cfg.row==WORKER_COUNT and state.recallMode=="PACK" and
+            (state.phase=="PACK_COLLECT" or state.phase=="PACK_BLOCKED") then
             return
         end
 
