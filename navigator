@@ -72,10 +72,22 @@ local function runNavigator(cfg)
             local slot=tonumber(intent.slot)
             local before=tonumber(intent.countBefore) or 0
             if turtle.getItemCount(slot)<before then
-                state.loaderPlaced=true
-                state.loaderSlot=nil
-                state.loaderChunk=state.chunkIndex
-                state.loaderSite=intent.loaderSite or state.loaderSite or "WORK"
+                local placedHere=turtle.detect()
+                if turtle.inspect then
+                    local inspectOk,inspectPresent=pcall(turtle.inspect)
+                    if inspectOk then placedHere=inspectPresent==true end
+                end
+                if placedHere then
+                    state.loaderPlaced=true
+                    state.loaderSlot=nil
+                    state.loaderChunk=state.chunkIndex
+                    state.loaderSite=intent.loaderSite or state.loaderSite or "WORK"
+                else
+                    state.loaderPlaced=false
+                    state.loaderSlot=nil
+                    state.recoveryLocked=true
+                    state.recoveryReason="Interrupted Chunk Loader placement consumed the item without a block at the expected position"
+                end
             end
             state.loaderIntent=nil
             saveTableLight(statePath,state)
@@ -432,6 +444,23 @@ local function runNavigator(cfg)
             return false,"Chunk Loader item 781 is not in Navigator inventory"
         end
         if not face(DIR_S) then return false,"Cannot face south to place Chunk Loader" end
+        local protectedType=peripheral.getType("front")
+        if protectedType then
+            face(DIR_N)
+            return false,"Chunk Loader target is occupied by peripheral "..tostring(protectedType)
+        end
+        pcall(turtle.dig)
+        sleep(0.1)
+        protectedType=peripheral.getType("front")
+        local targetOccupied=turtle.detect()
+        if turtle.inspect then
+            local inspectOk,inspectPresent=pcall(turtle.inspect)
+            if inspectOk then targetOccupied=inspectPresent==true end
+        end
+        if protectedType or targetOccupied then
+            face(DIR_N)
+            return false,"Chunk Loader target could not be cleared to the Navigator equipment level"
+        end
         local slot=state.loaderSlot
         local before=turtle.getItemCount(slot)
         state.loaderIntent={action="PLACE",slot=slot,countBefore=before,
@@ -439,11 +468,16 @@ local function runNavigator(cfg)
         save()
         turtle.select(slot)
         local ok,reason=turtle.place()
-        if not ok or turtle.getItemCount(slot)>=before then
+        local placedHere=turtle.detect() or peripheral.getType("front")~=nil
+        if turtle.inspect then
+            local inspectOk,inspectPresent=pcall(turtle.inspect)
+            if inspectOk then placedHere=inspectPresent==true end
+        end
+        if not ok or turtle.getItemCount(slot)>=before or not placedHere then
             state.loaderIntent=nil
             save()
             face(DIR_N)
-            return false,"Chunk Loader placement failed: "..tostring(reason or "target blocked")
+            return false,"Chunk Loader placement failed exact-position verification: "..tostring(reason or "target blocked")
         end
         state.loaderPlaced=true
         state.loaderSlot=nil

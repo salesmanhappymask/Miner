@@ -1855,14 +1855,21 @@ local function runMiner(cfg)
                     sendState("Miner-1 no longer has the Black Blue Blue supply chest after chunk travel")
                     return false
                 end
-                if turtle.detect() then
-                    sendState("Miner-1 supply-chest target is blocked at the new chunk")
+                local protectedType=peripheral.getType("front")
+                if protectedType then
+                    sendState("Miner-1 supply-chest target is occupied by protected peripheral "..tostring(protectedType))
                     return false
                 end
                 pcall(turtle.dig)
                 sleep(0.1)
-                if turtle.detect() then
-                    sendState("Miner-1 could not clear the supply-chest target at the new chunk")
+                protectedType=peripheral.getType("front")
+                local occupied=turtle.detect()
+                if turtle.inspect then
+                    local inspectOk,inspectPresent=pcall(turtle.inspect)
+                    if inspectOk then occupied=inspectPresent==true end
+                end
+                if protectedType or occupied then
+                    sendState("Miner-1 could not normalize the supply-chest target at the new chunk")
                     return false
                 end
                 turtle.select(slot)
@@ -3075,7 +3082,15 @@ local function runMiner(cfg)
                 return blocked("Cannot identify "..label.." in Miner-"..tostring(cfg.row).." inventory for restoration")
             end
             local detect=direction=="up" and turtle.detectUp or turtle.detect
+            local inspect=direction=="up" and turtle.inspectUp or turtle.inspect
             local place=direction=="up" and turtle.placeUp or turtle.place
+            local function occupied()
+                if inspect then
+                    local ok,present=pcall(inspect)
+                    if ok then return present==true end
+                end
+                return detect()
+            end
             local intent=state[intentKey]
             if not intent then
                 intent={slot=slot,beforeCount=turtle.getItemCount(slot)}
@@ -3084,20 +3099,46 @@ local function runMiner(cfg)
             end
             local beforeCount=tonumber(intent.beforeCount) or turtle.getItemCount(slot)
             local currentCount=turtle.getItemCount(slot)
-            if detect() then
-                if currentCount<beforeCount then
-                    state[restoredKey]=true
-                    state[intentKey]=nil
-                    save()
-                    return true
+            if currentCount<beforeCount then
+                local verified
+                if direction=="front" then
+                    verified=wrapInventory("front")~=nil
+                else
+                    verified=occupied()
                 end
-                return blocked(label.." restore position is occupied")
+                if not verified then
+                    return blocked(label.." left Miner-"..tostring(cfg.row).." inventory but is not at the expected restore position")
+                end
+                state[restoredKey]=true
+                state[intentKey]=nil
+                save()
+                return true
             end
+            if direction=="front" then
+                local protectedType=peripheral.getType("front")
+                if protectedType then return blocked(label.." restore position contains a protected peripheral") end
+                pcall(turtle.dig)
+            else
+                local protectedType=peripheral.getType("top")
+                if protectedType then return blocked(label.." restore position contains a protected peripheral") end
+                pcall(turtle.digUp)
+            end
+            sleep(0.1)
+            if occupied() then return blocked(label.." restore position could not be normalized") end
             turtle.select(slot)
             local ok,reason=place()
             if not ok then return blocked("Could not restore "..label..": "..tostring(reason or "place failed")) end
             if turtle.getItemCount(slot)>=beforeCount then
                 return blocked(label.." did not leave Miner-"..tostring(cfg.row).." inventory during restoration")
+            end
+            local verified
+            if direction=="front" then
+                verified=wrapInventory("front")~=nil
+            else
+                verified=occupied()
+            end
+            if not verified then
+                return blocked(label.." was placed but is not at the expected restore position")
             end
             state[restoredKey]=true
             state[intentKey]=nil

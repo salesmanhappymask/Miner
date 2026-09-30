@@ -120,6 +120,50 @@ local function runManagerSeedBootstrap()
         return false,"Path remained blocked"
     end
 
+    local function seedFrontPlacementOccupied()
+        if turtle.inspect then
+            local ok,present=pcall(turtle.inspect)
+            if ok then return present==true end
+        end
+        return turtle.detect()
+    end
+
+    local function seedUpPlacementOccupied()
+        if turtle.inspectUp then
+            local ok,present=pcall(turtle.inspectUp)
+            if ok then return present==true end
+        end
+        return turtle.detectUp()
+    end
+
+    local function clearSeedPlacementFront(label)
+        local kind=peripheral.getType("front")
+        local okId,id=pcall(peripheral.call,"front","getID")
+        if kind or (okId and tonumber(id)) then
+            return false,tostring(label or "Placement target").." is occupied by a protected block"
+        end
+        pcall(turtle.dig)
+        sleep(0.1)
+        kind=peripheral.getType("front")
+        okId,id=pcall(peripheral.call,"front","getID")
+        if kind or (okId and tonumber(id)) or seedFrontPlacementOccupied() then
+            return false,tostring(label or "Placement target").." could not be cleared"
+        end
+        return true
+    end
+
+    local function clearSeedPlacementUp(label)
+        local kind=peripheral.getType("top")
+        if kind then return false,tostring(label or "Upper placement target").." is occupied by a protected block" end
+        pcall(turtle.digUp)
+        sleep(0.1)
+        kind=peripheral.getType("top")
+        if kind or seedUpPlacementOccupied() then
+            return false,tostring(label or "Upper placement target").." could not be cleared"
+        end
+        return true
+    end
+
     local function forwardSeed()
         for attempt=1,20 do
             local ok=turtle.forward()
@@ -170,22 +214,28 @@ local function runManagerSeedBootstrap()
 
     local function placeSupplyChest()
         if waitSupplyChest(1) then return true end
-        if turtle.detect() then
+        if seedFrontPlacementOccupied() then
             local size=frontInventorySize()
-            if not size then
-                if waitSupplyChest(5) then return true end
-                return false
-            end
-            if size<=16 and not seed.masterSlot and not seed.driveSlot and not seed.rmLavaSlot and not seed.masterLavaSlot then
-                local empty=firstEmptySlot()
-                if not empty then return false end
-                turtle.select(empty)
-                if not turtle.dig() then return false end
-                sleep(0.2)
+            if size then
+                if size<=16 and not seed.masterSlot and not seed.driveSlot and not seed.rmLavaSlot and not seed.masterLavaSlot then
+                    local empty=firstEmptySlot()
+                    if not empty then return false end
+                    turtle.select(empty)
+                    if not turtle.dig() then return false end
+                    sleep(0.2)
+                else
+                    return false
+                end
             else
-                return false
+                local kind=peripheral.getType("front")
+                local okId,id=pcall(peripheral.call,"front","getID")
+                if kind or (okId and tonumber(id)) then return false end
+                pcall(turtle.dig)
+                sleep(0.1)
             end
         end
+        local clearOk=clearSeedPlacementFront("Black Blue Blue supply chest target")
+        if not clearOk then return false end
         for slot=1,16 do
             if turtle.getItemCount(slot)>0 then
                 turtle.select(slot)
@@ -282,6 +332,8 @@ local function runManagerSeedBootstrap()
 
     if seed.phase=="RM_REFUELED" then
         if peripheral.getType("top")~="drive" then
+            local clearOk,clearReason=clearSeedPlacementUp("Regional Manager bootstrap Disk Drive target")
+            if not clearOk then error(clearReason) end
             turtle.select(seed.driveSlot)
             if not turtle.placeUp() then error("Regional Manager could not place the bootstrap Disk Drive above itself") end
             sleep(0.2)
@@ -345,7 +397,8 @@ local function runManagerSeedBootstrap()
         local okExisting,idExisting=pcall(peripheral.call,"front","getID")
         if okExisting and tonumber(idExisting) then masterId=tonumber(idExisting) end
         if not masterId then
-            if turtle.detect() then error("Master Foreman placement square is occupied") end
+            local clearOk,clearReason=clearSeedPlacementFront("Master Foreman placement square")
+            if not clearOk then error(clearReason) end
             turtle.select(seed.masterSlot)
             if not turtle.place() then error("Regional Manager could not place the Master Foreman") end
             sleep(0.3)

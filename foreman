@@ -1195,6 +1195,14 @@ local function runForeman(cfg)
         return true
     end
 
+    local function frontPlacementOccupied()
+        if turtle.inspect then
+            local ok,present=pcall(turtle.inspect)
+            if ok then return present==true end
+        end
+        return turtle.detect()
+    end
+
     local function ensureEnderPair()
         if state.chestsReady then return true end
         if not goPrivateHome() then return false end
@@ -1202,20 +1210,24 @@ local function runForeman(cfg)
         local function placeChest(kind,flag,tx)
             if state[flag] then return true end
             if not goTo(tx,cfg.homeZ) or not faceTracked(DIR_S) then return false end
-            if turtle.detect() then
+            local existingType=peripheral.getType("front")
+            local okExisting,idExisting=pcall(peripheral.call,"front","getID")
+            if existingType or (okExisting and tonumber(idExisting)) then
                 state.phase="CHEST_RECOVERY_LOCK"
                 state.recoveryLocked=true
-                state.recoveryReason="Chest present without a saved placement at " .. tostring(tx)
+                state.recoveryReason="Chest target is occupied by a protected block at " .. tostring(tx)
                 saveState()
                 sendState(state.recoveryReason)
                 return false
             end
             pcall(turtle.dig)
             sleep(0.1)
-            if turtle.detect() then
+            existingType=peripheral.getType("front")
+            okExisting,idExisting=pcall(peripheral.call,"front","getID")
+            if frontPlacementOccupied() or existingType or (okExisting and tonumber(idExisting)) then
                 state.phase="CHEST_RECOVERY_LOCK"
                 state.recoveryLocked=true
-                state.recoveryReason="Chest target could not be cleared at " .. tostring(tx)
+                state.recoveryReason="Chest target could not be normalized at " .. tostring(tx)
                 saveState()
                 sendState(state.recoveryReason)
                 return false
@@ -1768,6 +1780,22 @@ local function runForeman(cfg)
         return false
     end
 
+    local function clearFrontPlacementCell(label)
+        local computerId=frontComputerId()
+        local peripheralType=peripheral.getType("front")
+        if computerId or peripheralType then
+            return false,tostring(label or "Placement target").." is occupied by a protected block"
+        end
+        pcall(turtle.dig)
+        sleep(0.1)
+        computerId=frontComputerId()
+        peripheralType=peripheral.getType("front")
+        if computerId or peripheralType or frontPlacementOccupied() then
+            return false,tostring(label or "Placement target").." could not be cleared to the Foreman equipment level"
+        end
+        return true
+    end
+
     local function waitFrontDisk(timeout)
         local deadline=now()+(timeout or 1)
         repeat
@@ -1869,10 +1897,11 @@ local function runForeman(cfg)
         saveState()
 
         if peripheral.getType("front")~="drive" then
-            if turtle.detect() then
+            local clearOk,clearReason=clearFrontPlacementCell("Installer square at relative Y 1")
+            if not clearOk then
                 state.phase="PLACEMENT_ERROR"
                 saveState()
-                sendState("Installer square blocked at relative Y 1")
+                sendState(clearReason)
                 ensureGroundLevel()
                 return false
             end
@@ -1964,6 +1993,12 @@ local function runForeman(cfg)
 
             local driveSlot=selfFindSlotExcluding("disk_drive",reserved)
             if not driveSlot then
+                ensureGroundLevel()
+                return false
+            end
+
+            local clearOk=clearFrontPlacementCell("Corrected installer square at relative Y 1")
+            if not clearOk then
                 ensureGroundLevel()
                 return false
             end
@@ -2478,16 +2513,14 @@ local function runForeman(cfg)
             return false
         end
 
-        if not progress.workerId and turtle.detect() then
-            turtle.dig()
-            sleep(0.2)
-        end
-
-        if not progress.workerId and turtle.detect() then
-            state.phase="PLACEMENT_ERROR"
-            saveState()
-            sendState("Miner target remains blocked")
-            return false
+        if not progress.workerId then
+            local clearOk,clearReason=clearFrontPlacementCell("Miner-"..tostring(row).." target")
+            if not clearOk then
+                state.phase="PLACEMENT_ERROR"
+                saveState()
+                sendState(clearReason)
+                return false
+            end
         end
 
         if not progress.workerId and not selfSelectKind("advanced_wireless_mining_turtle") then
@@ -3425,10 +3458,11 @@ local function runForeman(cfg)
         faceTracked(DIR_N)
 
         if peripheral.getType("front")~="drive" then
-            if turtle.detect() then
+            local clearOk,clearReason=clearFrontPlacementCell("Bootstrap installer square at relative Y 1")
+            if not clearOk then
                 state.phase="PLACEMENT_ERROR"
                 saveState()
-                sendState("Bootstrap installer square blocked at relative Y 1")
+                sendState(clearReason)
                 ensureGroundLevel()
                 return false
             end
@@ -3579,11 +3613,12 @@ local function runForeman(cfg)
             return nil
         end
         if not newId then
-            if progress.stage~="PLACEMENT_PENDING" or
+            local clearOk,clearReason=clearFrontPlacementCell("Navigator-"..tostring(n).." bootstrap target")
+            if progress.stage~="PLACEMENT_PENDING" or not clearOk or
                 not selfSelectKind("advanced_wireless_mining_turtle") or not turtle.place() then
                 state.phase="WAITING_NAVIGATOR_RECOVERY"
                 saveState()
-                sendState("Navigator-"..tostring(n).." placement must be inspected")
+                sendState(clearReason or ("Navigator-"..tostring(n).." placement must be inspected"))
                 return nil
             end
             newId=waitFrontComputerId(1)
@@ -3822,12 +3857,18 @@ local function runForeman(cfg)
             sendState("Foreman-"..tostring(n).." left bootstrap pad before deployment receipt")
             return nil
         end
+        if not progress.expectedGps then
+            progress.expectedGps=expectedNorthPlacement()
+            if not progress.expectedGps then return nil end
+            saveState()
+        end
         if not newId then
-            if progress.stage~="PLACEMENT_PENDING" or
+            local clearOk,clearReason=clearFrontPlacementCell("Foreman-"..tostring(n).." bootstrap target")
+            if progress.stage~="PLACEMENT_PENDING" or not clearOk or
                 not selfSelectKind("advanced_wireless_narcissistic_turtle") or not turtle.place() then
                 state.phase="WAITING_FOREMAN_RECOVERY"
                 saveState()
-                sendState("Foreman-"..tostring(n).." placement must be inspected")
+                sendState(clearReason or ("Foreman-"..tostring(n).." placement must be inspected"))
                 return nil
             end
             newId=waitFrontComputerId(1)
@@ -3837,11 +3878,6 @@ local function runForeman(cfg)
             saveState()
             sendState("Cannot identify Foreman-"..tostring(n))
             return nil
-        end
-        if not progress.expectedGps then
-            progress.expectedGps=expectedNorthPlacement()
-            if not progress.expectedGps then return nil end
-            saveState()
         end
         progress.id=newId
         if progress.stage=="PLACEMENT_PENDING" then progress.stage="PLACED" end
