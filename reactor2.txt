@@ -1,3 +1,5 @@
+--version 2
+
 local function wrapThis(name)
   local w, i = nil, 0
   while w == nil and i <= 100 do
