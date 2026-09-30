@@ -1,4 +1,5 @@
---version 2
+
+-- version 3
 
 local function wrapThis(name)
   local w, i = nil, 0
@@ -19,6 +20,10 @@ mon.setTextScale(0.5)
 
 local W, H = mon.getSize()
 
+if W < 58 or H < 28 then
+  error("Monitor is too small for the tabbed reactor interface at text scale 0.5")
+end
+
 local maxEnergy = 10000000
 local autoEnabled = true
 local targetPercent = 75
@@ -35,8 +40,6 @@ local lastControlRate = 0
 local lastEnergySample = nil
 local storageDelta = 0
 local currentPage = "overview"
-local statusMessage = ""
-local statusColor = colors.lightGray
 local timerId = nil
 local hotspots = {}
 
@@ -65,6 +68,68 @@ local function clamp(n, a, b)
   if n < a then return a end
   if n > b then return b end
   return n
+end
+
+local function fmtPct(n, digits)
+  digits = digits == nil and 1 or digits
+  local s = string.format("%." .. tostring(digits) .. "f%%", tonumber(n) or 0)
+  s = s:gsub("%.0%%", "%%")
+  return s
+end
+
+local function fmtTemp(n)
+  local s = string.format("%.1f C", tonumber(n) or 0)
+  s = s:gsub("%.0 C", " C")
+  return s
+end
+
+local function formatRF(n)
+  n = tonumber(n) or 0
+  local a = math.abs(n)
+  if a >= 1000000 then return string.format("%.2f MRF", n / 1000000) end
+  if a >= 1000 then return string.format("%.1f KRF", n / 1000) end
+  return string.format("%d RF", math.floor(n + 0.5))
+end
+
+local function formatRFPerTick(n)
+  return formatRF(n) .. "/T"
+end
+
+local function formatAmount(n, suffix)
+  n = tonumber(n) or 0
+  local a = math.abs(n)
+  local out
+  if a >= 1000000 then
+    out = string.format("%.2fM", n / 1000000)
+  elseif a >= 1000 then
+    out = string.format("%.1fK", n / 1000)
+  else
+    out = string.format("%d", math.floor(n + 0.5))
+  end
+  if suffix and suffix ~= "" then out = out .. " " .. suffix end
+  return out
+end
+
+local function signedRF(n)
+  n = tonumber(n) or 0
+  if n > 0 then return "+" .. formatRF(n) end
+  if n < 0 then return "-" .. formatRF(math.abs(n)) end
+  return "0 RF"
+end
+
+local function signedPct(n)
+  n = tonumber(n) or 0
+  if math.abs(n) < 0.005 then return "0.00%" end
+  return string.format("%+.2f%%", n)
+end
+
+local function centerText(text, width)
+  text = tostring(text or "")
+  if width <= 0 then return "" end
+  if #text > width then return text:sub(1, width) end
+  local left = math.floor((width - #text) / 2)
+  local right = width - #text - left
+  return string.rep(" ", left) .. text .. string.rep(" ", right)
 end
 
 local function makeUI(m)
@@ -129,63 +194,20 @@ end
 
 local ui = makeUI(mon)
 
+local function clearHotspots()
+  hotspots = {}
+end
+
+local function addHotspot(x, y, ww, hh, action)
+  hotspots[#hotspots + 1] = { x1 = x, y1 = y, x2 = x + ww - 1, y2 = y + hh - 1, action = action }
+end
+
 local function callOptional(name)
   local fn = r[name]
   if type(fn) ~= "function" then return nil end
   local ok, value = pcall(fn)
   if not ok then return nil end
   return value
-end
-
-local function percentColor(p)
-  if p < 30 then return C_BAD end
-  if p < 70 then return C_WARN end
-  return C_OK
-end
-
-local function formatRF(n)
-  n = tonumber(n) or 0
-  local a = math.abs(n)
-  if a >= 1000000 then return string.format("%.2f MRF", n / 1000000) end
-  if a >= 1000 then return string.format("%.1f kRF", n / 1000) end
-  return string.format("%d RF", math.floor(n + 0.5))
-end
-
-local function formatAmount(n, suffix)
-  n = tonumber(n) or 0
-  local a = math.abs(n)
-  local out
-  if a >= 1000000 then
-    out = string.format("%.2fM", n / 1000000)
-  elseif a >= 1000 then
-    out = string.format("%.1fk", n / 1000)
-  else
-    out = string.format("%d", math.floor(n + 0.5))
-  end
-  if suffix and suffix ~= "" then out = out .. " " .. suffix end
-  return out
-end
-
-local function signedRF(n)
-  n = tonumber(n) or 0
-  if n > 0 then return "+" .. formatRF(n) end
-  if n < 0 then return "-" .. formatRF(math.abs(n)) end
-  return "0 RF"
-end
-
-local function signedPercent(n)
-  n = tonumber(n) or 0
-  if math.abs(n) < 0.005 then return "0.00%" end
-  return string.format("%+.2f%%", n)
-end
-
-local function centerText(text, width)
-  text = tostring(text or "")
-  if width <= 0 then return "" end
-  if #text > width then return text:sub(1, width) end
-  local left = math.floor((width - #text) / 2)
-  local right = width - #text - left
-  return string.rep(" ", left) .. text .. string.rep(" ", right)
 end
 
 local function cardSurface(x, y, ww, hh, accentColor)
@@ -199,63 +221,27 @@ local function cardSurface(x, y, ww, hh, accentColor)
   ui.rect(x + 1, y + 1, 1, hh - 2, accentColor or C_ACCENT)
 end
 
-local function sectionTitle(key, x, y, ww, title, color)
-  ui.field(key, x + 3, y, math.max(0, ww - 5), title, color or C_TEXT, C_DIV)
+local function sectionTitle(key, x, y, ww, title)
+  ui.field(key, x + 3, y, math.max(0, ww - 5), string.upper(title or ""), C_TEXT, C_DIV)
 end
 
-local function drawHeader(title)
+local function drawHeader()
   ui.rect(1, 1, W, 1, C_HEADER)
   ui.rect(1, 2, W, 1, C_DIV)
-  local brand = "ZelOS"
-  local tx = 1 + math.floor((W - #title) / 2)
-  ui.field("hdr_title", tx, 1, #title, title, C_TEXT, C_HEADER)
-  ui.field("hdr_brand", W - #brand + 1, 1, #brand, brand, C_BRAND, C_HEADER)
-end
-
-local function clearHotspots()
-  hotspots = {}
-end
-
-local function addHotspot(x, y, ww, hh, action)
-  hotspots[#hotspots + 1] = { x1 = x, y1 = y, x2 = x + ww - 1, y2 = y + hh - 1, action = action }
-end
-
-local function drawButton(key, x, y, ww, hh, text, bg, fg, action)
-  if ww <= 0 or hh <= 0 then return end
-  ui.rect(x, y, ww, hh, C_DIV)
-  if ww > 2 and hh > 2 then
-    ui.rect(x + 1, y + 1, ww - 2, hh - 2, bg)
-    ui.field(key, x + 1, y + math.floor(hh / 2), ww - 2, centerText(text, ww - 2), fg or C_TEXT, bg)
-  else
-    ui.rect(x, y, ww, hh, bg)
-    ui.field(key, x, y + math.floor(hh / 2), ww, centerText(text, ww), fg or C_TEXT, bg)
-  end
-  if action then addHotspot(x, y, ww, hh, action) end
+  local title = "Reactor Control v2.2"
+  ui.field("hdr_title", 1 + math.floor((W - #title) / 2), 1, #title, title, C_TEXT, C_HEADER)
+  ui.field("hdr_brand", W - 5, 1, 5, "ZelOS", C_BRAND, C_HEADER)
 end
 
 local function drawTab(key, x, y, ww, text, active, action)
   local bg = active and C_BRAND or C_DIV
-  local fg = C_TEXT
-  ui.field(key, x, y, ww, centerText(text, ww), fg, bg)
+  ui.field(key, x, y, ww, centerText(string.upper(text), ww), C_TEXT, bg)
   addHotspot(x, y, ww, 1, action)
-end
-
-local function drawBar(x, y, width, percent, fillColor)
-  if width <= 0 then return end
-  percent = clamp(percent or 0, 0, 100)
-  local filled = math.floor(width * percent / 100 + 0.5)
-  filled = clamp(filled, 0, width)
-  mon.setCursorPos(x, y)
-  mon.setBackgroundColor(fillColor)
-  if filled > 0 then mon.write(string.rep(" ", filled)) end
-  mon.setBackgroundColor(C_DIV)
-  if width - filled > 0 then mon.write(string.rep(" ", width - filled)) end
-  mon.setBackgroundColor(C_BG)
 end
 
 local function kv(key, x, y, width, label, value, valueColor)
   if width <= 0 then return end
-  local labelText = tostring(label or "") .. ":"
+  local labelText = string.upper(tostring(label or "")) .. ":"
   local valueText = tostring(value or "")
   local labelW = math.min(#labelText, width)
   ui.field(key .. "_l", x, y, labelW, labelText, C_MUTED, C_INSET)
@@ -265,22 +251,35 @@ local function kv(key, x, y, width, label, value, valueColor)
   end
 end
 
-local function drawStatCard(key, x, y, ww, hh, title, accent, items)
-  cardSurface(x, y, ww, hh, accent)
-  sectionTitle(key .. "_t", x, y, ww, title, C_TEXT)
-  local rows = hh - 2
-  for i = 1, math.min(#items, rows) do
-    local item = items[i]
-    kv(key .. "_kv" .. i, x + 3, y + i, ww - 5, item[1], item[2], item[3])
-  end
+local function drawBar(x, y, width, percent, fillColor)
+  if width <= 0 then return end
+  percent = clamp(percent or 0, 0, 100)
+  local filled = clamp(math.floor(width * percent / 100 + 0.5), 0, width)
+  mon.setCursorPos(x, y)
+  mon.setBackgroundColor(fillColor)
+  if filled > 0 then mon.write(string.rep(" ", filled)) end
+  mon.setBackgroundColor(C_DIV)
+  if width - filled > 0 then mon.write(string.rep(" ", width - filled)) end
+  mon.setBackgroundColor(C_BG)
 end
 
-local function drawMeterCard(key, x, y, ww, hh, title, accent, label, detail, pct, fillColor)
-  cardSurface(x, y, ww, hh, accent)
-  sectionTitle(key .. "_t", x, y, ww, title, C_TEXT)
-  ui.field(key .. "_label", x + 3, y + 1, math.max(1, math.floor((ww - 6) / 2)), label, C_MUTED, C_INSET)
-  ui.field(key .. "_detail", x + 3 + math.floor((ww - 6) / 2), y + 1, math.max(1, ww - 6 - math.floor((ww - 6) / 2)), detail, C_TEXT, C_INSET)
-  drawBar(x + 2, y + 2, ww - 4, pct, fillColor)
+local function drawButton(key, x, y, ww, hh, text, bg, fg, action)
+  if ww <= 0 or hh <= 0 then return end
+  ui.rect(x, y, ww, hh, C_DIV)
+  if ww > 2 and hh > 2 then
+    ui.rect(x + 1, y + 1, ww - 2, hh - 2, bg)
+    ui.field(key, x + 1, y + math.floor(hh / 2), ww - 2, centerText(string.upper(text), ww - 2), fg or C_TEXT, bg)
+  else
+    ui.rect(x, y, ww, hh, bg)
+    ui.field(key, x, y, ww, centerText(string.upper(text), ww), fg or C_TEXT, bg)
+  end
+  if action then addHotspot(x, y, ww, hh, action) end
+end
+
+local function percentColor(p)
+  if p < 30 then return C_BAD end
+  if p < 70 then return C_WARN end
+  return C_OK
 end
 
 local function splitTwo(x, ww, gap)
@@ -291,7 +290,7 @@ local function splitTwo(x, ww, gap)
   return leftW, rightX, rightW
 end
 
-local function getReactorSnapshot()
+local function getSnapshot()
   local temp = r.getFuelTemperature()
   local fuel = r.getFuelAmount()
   local fuelMax = r.getFuelAmountMax()
@@ -303,12 +302,9 @@ local function getReactorSnapshot()
   local reactivity = callOptional("getFuelReactivity")
   local fuelUse = callOptional("getFuelConsumedLastTick")
   local waste = callOptional("getWasteAmount")
-
-  local fuelPct = 0
-  if fuelMax and fuelMax > 0 then fuelPct = clamp(fuel / fuelMax * 100, 0, 100) end
+  local fuelPct = fuelMax > 0 and clamp(fuel / fuelMax * 100, 0, 100) or 0
   local energyPct = clamp(energy / maxEnergy * 100, 0, 100)
   local deviation = energyPct - targetPercent
-
   return {
     temp = temp,
     fuel = fuel,
@@ -324,25 +320,30 @@ local function getReactorSnapshot()
     reactivity = reactivity,
     fuelUse = fuelUse,
     waste = waste,
-    modeText = autoEnabled and "AUTOMATIC" or "MANUAL",
     stateText = active and "ACTIVE" or "SHUTDOWN",
     stateColor = active and C_OK or C_BAD,
+    modeText = autoEnabled and "AUTOMATIC" or "MANUAL",
   }
 end
 
-local function getDefaultStatus()
-  if currentPage == "overview" then
-    return "TAB-UI 2.1 | Overview. Touch MANUAL & CONFIG for controls and tuning.", C_MUTED
+local function drawStatCard(key, x, y, ww, hh, title, accent, items)
+  cardSurface(x, y, ww, hh, accent)
+  sectionTitle(key .. "_t", x, y, ww, title)
+  local usableRows = hh - 2
+  for i = 1, math.min(#items, usableRows) do
+    local item = items[i]
+    kv(key .. i, x + 3, y + i, ww - 5, item[1], item[2], item[3])
   end
-  if autoEnabled then
-    return "Automatic mode is ON. Manual rod controls are locked until AUTO is turned OFF.", C_WARN
-  end
-  return "Automatic mode is OFF. Manual rod controls now change insertion directly.", C_OK
 end
 
-local function setStatus(msg, color)
-  statusMessage = tostring(msg or "")
-  statusColor = color or C_MUTED
+local function drawMeterCard(key, x, y, ww, hh, title, label, detail, pct, fillColor)
+  cardSurface(x, y, ww, hh, C_ACCENT)
+  sectionTitle(key .. "_t", x, y, ww, title)
+  local innerW = ww - 5
+  local leftW = math.floor(innerW * 0.42)
+  ui.field(key .. "_label", x + 3, y + 1, leftW, string.upper(label), C_MUTED, C_INSET)
+  ui.field(key .. "_detail", x + 3 + leftW, y + 1, innerW - leftW, detail, C_TEXT, C_INSET)
+  drawBar(x + 2, y + 2, ww - 4, pct, fillColor)
 end
 
 local function drawTabs()
@@ -353,202 +354,180 @@ local function drawTabs()
     leftW = math.floor((W - 3) / 2)
     rightW = W - 2 - gap - leftW
   end
-  drawTab("tab1", 2, 3, leftW, "OVERVIEW", currentPage == "overview", "tab_overview")
-  drawTab("tab2", 2 + leftW + gap, 3, rightW, "MANUAL & CONFIG", currentPage == "manual", "tab_manual")
+  drawTab("tab_over", 2, 3, leftW, "OVERVIEW", currentPage == "overview", "tab_overview")
+  drawTab("tab_manual", 2 + leftW + gap, 3, rightW, "MANUAL & CONFIG", currentPage == "manual", "tab_manual")
 end
 
-local function drawFooter()
-  ui.rect(1, H - 2, W, 1, C_DIV)
-  local msg, col = statusMessage, statusColor
-  if msg == nil or msg == "" then
-    msg, col = getDefaultStatus()
-  end
-  ui.field("footer", 2, H - 1, W - 2, msg, col, C_BG)
-end
-
-local function drawOverviewPage(d)
+local function drawOverview(d)
   local outerX = 2
   local outerW = W - 2
-  local gap = 1
   local contentTop = 5
-  local contentBottom = H - 3
+  local contentBottom = H - 1
+  local gap = 1
 
   local topH = 6
   local meterH = 4
-  local meterGap = 1
-  local midStart = contentTop + topH + gap
-  local energyY = midStart
-  local fuelY = energyY + meterH + meterGap
-  local rodsY = fuelY + meterH + meterGap
-  local teleY = rodsY + meterH + gap
+  local teleY = contentTop + topH + gap + meterH + gap + meterH + gap + meterH + gap
   local teleH = contentBottom - teleY + 1
 
   local leftW, rightX, rightW = splitTwo(outerX, outerW, 2)
 
-  drawStatCard("core", outerX, contentTop, leftW, topH, "CORE STATUS", C_ACCENT, {
-    { "State", d.stateText, d.stateColor },
-    { "Mode", d.modeText, autoEnabled and C_ACCENT or C_MUTED },
-    { "Stored", string.format("%.1f%%", d.energyPct), percentColor(d.energyPct) },
-    { "Generation", formatRF(d.gen) .. "/t", C_TEXT },
+  drawStatCard("ov_core", outerX, contentTop, leftW, topH, "CORE STATUS", C_ACCENT, {
+    { "STATE", d.stateText, d.stateColor },
+    { "MODE", d.modeText, autoEnabled and C_ACCENT or C_MUTED },
+    { "STORED", fmtPct(d.energyPct), percentColor(d.energyPct) },
+    { "GENERATION", formatRFPerTick(d.gen), C_TEXT },
   })
 
-  local moveText = lastControlStep == 0 and "HOLD" or string.format("%+d%% rods", lastControlStep)
-  drawStatCard("loop", rightX, contentTop, rightW, topH, "CONTROL LOOP", C_BRAND, {
-    { "Target", string.format("%d%%", targetPercent), C_TEXT },
-    { "Deviation", signedPercent(d.deviation), math.abs(d.deviation) < 5 and C_OK or C_WARN },
-    { "Rate", signedPercent(lastControlRate) .. "/cycle", C_TEXT },
-    { "Last move", moveText, lastControlStep == 0 and C_MUTED or C_ACCENT },
+  local moveText = lastControlStep == 0 and "HOLD" or string.format("%+d%% RODS", lastControlStep)
+  drawStatCard("ov_loop", rightX, contentTop, rightW, topH, "CONTROL LOOP", C_ACCENT, {
+    { "TARGET", fmtPct(targetPercent, 0), C_TEXT },
+    { "DEVIATION", signedPct(d.deviation), math.abs(d.deviation) < 5 and C_OK or C_WARN },
+    { "RATE", signedPct(lastControlRate) .. "/CYCLE", C_TEXT },
+    { "LAST MOVE", moveText, lastControlStep == 0 and C_MUTED or C_ACCENT },
   })
 
-  drawMeterCard("m_energy", outerX, energyY, outerW, meterH, "STORED ENERGY", C_ENERGY,
-    "Reserve level", formatRF(d.energy) .. "   " .. string.format("%.1f%%", d.energyPct), d.energyPct, C_ENERGY)
-
-  drawMeterCard("m_fuel", outerX, fuelY, outerW, meterH, "FUEL RESERVE", C_FUEL,
-    "Available fuel", formatAmount(d.fuel, "mB") .. " / " .. formatAmount(d.fuelMax, "mB") .. "   " .. string.format("%.1f%%", d.fuelPct), d.fuelPct, C_FUEL)
-
-  drawMeterCard("m_rods", outerX, rodsY, outerW, meterH, "CONTROL RODS", C_RODS,
-    "Rod insertion", string.format("%d%% inserted", math.floor(d.rod + 0.5)), d.rod, C_RODS)
+  drawMeterCard("ov_energy", outerX, contentTop + topH + gap, outerW, meterH, "STORED ENERGY",
+    "RESERVE LEVEL", formatRF(d.energy) .. "   " .. fmtPct(d.energyPct), d.energyPct, C_ENERGY)
+  drawMeterCard("ov_fuel", outerX, contentTop + topH + gap + meterH + gap, outerW, meterH, "FUEL RESERVE",
+    "AVAILABLE FUEL", formatAmount(d.fuel, "MB") .. " / " .. formatAmount(d.fuelMax, "MB") .. "   " .. fmtPct(d.fuelPct), d.fuelPct, C_FUEL)
+  drawMeterCard("ov_rods", outerX, contentTop + topH + gap + meterH + gap + meterH + gap, outerW, meterH, "CONTROL RODS",
+    "ROD INSERTION", fmtPct(d.rod, 0) .. " INSERTED", d.rod, C_RODS)
 
   if teleH < 5 then return end
 
-  if outerW >= 64 and teleH >= 11 then
-    local topTeleH = math.floor((teleH - 1) / 2)
-    local botTeleH = teleH - 1 - topTeleH
-    local c1W, c2X, c2W = splitTwo(outerX, outerW, 2)
+  local teleTopH = math.max(5, math.floor((teleH - 1) / 2))
+  local teleBotH = teleH - 1 - teleTopH
+  local c1W, c2X, c2W = splitTwo(outerX, outerW, 2)
 
-    drawStatCard("te1", outerX, teleY, c1W, topTeleH, "ENERGY DETAIL", C_ENERGY, {
-      { "Stored raw", string.format("%d RF", math.floor(d.energy + 0.5)), C_TEXT },
-      { "Output raw", string.format("%d RF/t", math.floor(d.gen + 0.5)), C_TEXT },
-      { "Storage step", signedRF(storageDelta), C_TEXT },
+  drawStatCard("ov_e1", outerX, teleY, c1W, teleTopH, "ENERGY DETAIL", C_ACCENT, {
+    { "STORED RAW", string.format("%d RF", math.floor(d.energy + 0.5)), C_TEXT },
+    { "OUTPUT RAW", string.format("%d RF/T", math.floor(d.gen + 0.5)), C_TEXT },
+    { "STORAGE STEP", signedRF(storageDelta), C_TEXT },
+    { "MAX BUFFER", formatRF(maxEnergy), C_TEXT },
+  })
+
+  drawStatCard("ov_f1", c2X, teleY, c2W, teleTopH, "FUEL DETAIL", C_ACCENT, {
+    { "FUEL RAW", string.format("%d / %d MB", math.floor(d.fuel + 0.5), math.floor(d.fuelMax + 0.5)), C_TEXT },
+    { "FUEL USE", d.fuelUse ~= nil and string.format("%.4f MB/T", d.fuelUse) or "N/A", C_TEXT },
+    { "WASTE", d.waste ~= nil and formatAmount(d.waste, "MB") or "N/A", C_TEXT },
+    { "FILL", fmtPct(d.fuelPct), C_TEXT },
+  })
+
+  if teleBotH >= 5 then
+    drawStatCard("ov_t1", outerX, teleY + teleTopH + 1, c1W, teleBotH, "THERMAL DETAIL", C_ACCENT, {
+      { "FUEL TEMP", fmtTemp(d.temp), C_TEXT },
+      { "CASING TEMP", d.casingTemp ~= nil and fmtTemp(d.casingTemp) or "N/A", C_TEXT },
+      { "REACTIVITY", d.reactivity ~= nil and fmtPct(d.reactivity) or "N/A", C_TEXT },
+      { "STATE", d.stateText, d.stateColor },
     })
 
-    drawStatCard("te2", c2X, teleY, c2W, topTeleH, "FUEL DETAIL", C_FUEL, {
-      { "Fuel raw", string.format("%d / %d mB", math.floor(d.fuel + 0.5), math.floor(d.fuelMax + 0.5)), C_TEXT },
-      { "Fuel use", d.fuelUse ~= nil and string.format("%.4f mB/t", d.fuelUse) or "N/A", C_TEXT },
-      { "Waste", d.waste ~= nil and formatAmount(d.waste, "mB") or "N/A", C_TEXT },
-    })
-
-    drawStatCard("te3", outerX, teleY + topTeleH + 1, c1W, botTeleH, "THERMAL DETAIL", C_ACCENT, {
-      { "Fuel temp", string.format("%.0f C", d.temp), C_TEXT },
-      { "Casing temp", d.casingTemp ~= nil and string.format("%.0f C", d.casingTemp) or "N/A", C_TEXT },
-      { "Reactivity", d.reactivity ~= nil and string.format("%.1f%%", d.reactivity) or "N/A", C_TEXT },
-    })
-
-    drawStatCard("te4", c2X, teleY + topTeleH + 1, c2W, botTeleH, "CONTROL DETAIL", C_BRAND, {
-      { "Cycle", string.format("%ds", checkInterval), C_TEXT },
-      { "Danger cap", string.format("%d%%", dangerCap), C_TEXT },
-      { "Sensitive zone", string.format("%d%%+", sensitiveZoneStart), C_TEXT },
-    })
-  else
-    drawStatCard("te_single", outerX, teleY, outerW, teleH, "SYSTEM DETAIL", C_BRAND, {
-      { "Stored raw", string.format("%d RF", math.floor(d.energy + 0.5)), C_TEXT },
-      { "Output raw", string.format("%d RF/t", math.floor(d.gen + 0.5)), C_TEXT },
-      { "Storage step", signedRF(storageDelta), C_TEXT },
-      { "Fuel temp", string.format("%.0f C", d.temp), C_TEXT },
-      { "Fuel use", d.fuelUse ~= nil and string.format("%.4f mB/t", d.fuelUse) or "N/A", C_TEXT },
-      { "Waste", d.waste ~= nil and formatAmount(d.waste, "mB") or "N/A", C_TEXT },
-      { "Cycle", string.format("%ds", checkInterval), C_TEXT },
+    drawStatCard("ov_c1", c2X, teleY + teleTopH + 1, c2W, teleBotH, "CONTROL DETAIL", C_ACCENT, {
+      { "INTERVAL", string.format("%d S", checkInterval), C_TEXT },
+      { "KP / KD", string.format("%.2f / %.1f", kp, kd), C_TEXT },
+      { "DANGER CAP", fmtPct(dangerCap, 0), C_TEXT },
+      { "SENS ZONE", fmtPct(sensitiveZoneStart, 0) .. "+", C_TEXT },
     })
   end
 end
 
-local function drawActionCluster(x, y, ww, hh, d)
-  cardSurface(x, y, ww, hh, C_ACTION)
-  sectionTitle("act_t", x, y, ww, "REACTOR ACTIONS", C_TEXT)
-
-  local btnGap = 2
-  local btnW = math.floor((ww - 6 - btnGap * 2) / 3)
-  local startX = x + 2
-  local rowY = y + 2
-  local btnH = 3
-  drawButton("act_start", startX, rowY, btnW, btnH, "START", C_ACTION, C_TEXT, "start")
-  drawButton("act_stop", startX + btnW + btnGap, rowY, btnW, btnH, "STOP", C_BAD, C_TEXT, "stop")
-  drawButton("act_auto", startX + (btnW + btnGap) * 2, rowY, ww - 4 - btnW * 2 - btnGap * 2, btnH,
-    autoEnabled and "AUTO ON" or "AUTO OFF", autoEnabled and C_BRAND or C_DIV, C_TEXT, "toggle_auto")
-
-  kv("act_state", x + 3, y + hh - 3, ww - 5, "State", d.stateText, d.stateColor)
-  kv("act_mode", x + 3, y + hh - 2, ww - 5, "Mode", d.modeText, autoEnabled and C_ACCENT or C_MUTED)
-end
-
-local function drawDeltaButtons(prefix, baseAction, x, y, ww)
-  local labels = { "-10", "-5", "-1", "+1", "+5", "+10" }
-  local values = { -10, -5, -1, 1, 5, 10 }
+local function drawButtonRow(prefix, x, y, ww, labels, actions, bg)
+  local count = #labels
+  if count == 0 then return end
   local gap = 1
-  local btnW = math.floor((ww - gap * 5) / 6)
+  local btnW = math.floor((ww - gap * (count - 1)) / count)
   local cursorX = x
-  for i = 1, 6 do
-    local width = (i == 6) and (x + ww - cursorX) or btnW
-    local action = baseAction .. tostring(values[i])
-    drawButton(prefix .. i, cursorX, y, width, 3, labels[i], C_DIV, C_TEXT, action)
+  for i = 1, count do
+    local width = (i == count) and (x + ww - cursorX) or btnW
+    drawButton(prefix .. i, cursorX, y, width, 3, labels[i], bg or C_DIV, C_TEXT, actions[i])
     cursorX = cursorX + width + gap
   end
 end
 
-local function drawManualPage(d)
+local function drawManual(d)
   local outerX = 2
   local outerW = W - 2
-  local gap = 1
   local contentTop = 5
-  local contentBottom = H - 3
-  local totalH = contentBottom - contentTop + 1
+  local contentBottom = H - 1
+  local gap = 1
 
-  local row1H = 8
-  local row2H = 8
-  local row3Y = contentTop + row1H + gap + row2H + gap
-  local row3H = contentBottom - row3Y + 1
-  if row3H < 5 then row3H = 5 end
+  local row1H = 7
+  local row2H = 7
+  local row3H = 7
+  local row4Y = contentTop + row1H + gap + row2H + gap + row3H + gap
+  local row4H = contentBottom - row4Y + 1
 
   local leftW, rightX, rightW = splitTwo(outerX, outerW, 2)
 
-  drawActionCluster(outerX, contentTop, leftW, row1H, d)
+  cardSurface(outerX, contentTop, leftW, row1H, C_ACCENT)
+  sectionTitle("m_act_t", outerX, contentTop, leftW, "REACTOR ACTIONS")
+  drawButtonRow("mact", outerX + 2, contentTop + 2, leftW - 4,
+    { "START", "STOP", autoEnabled and "AUTO ON" or "AUTO OFF" },
+    { "start", "stop", "toggle_auto" }, nil)
+  kv("m_act_s", outerX + 3, contentTop + row1H - 2, leftW - 5, "STATE", d.stateText, d.stateColor)
+  kv("m_act_m", outerX + 3, contentTop + row1H - 1, leftW - 5, "MODE", d.modeText, autoEnabled and C_ACCENT or C_MUTED)
 
-  cardSurface(rightX, contentTop, rightW, row1H, C_RODS)
-  sectionTitle("rod_t", rightX, contentTop, rightW, "MANUAL ROD CONTROL", C_TEXT)
-  kv("rod_disp", rightX + 3, contentTop + 1, rightW - 5, "Insertion", string.format("%d%% inserted", math.floor(d.rod + 0.5)), C_TEXT)
-  ui.field("rod_note", rightX + 3, contentTop + 2, rightW - 5,
-    autoEnabled and "Disable AUTO to use these controls." or "Touch a button to change rod insertion.", autoEnabled and C_WARN or C_MUTED, C_INSET)
-  drawDeltaButtons("rodb", "rod_", rightX + 2, contentTop + 4, rightW - 4)
+  cardSurface(rightX, contentTop, rightW, row1H, C_ACCENT)
+  sectionTitle("m_snap_t", rightX, contentTop, rightW, "CURRENT SNAPSHOT")
+  kv("m_s1", rightX + 3, contentTop + 1, rightW - 5, "STORED", fmtPct(d.energyPct) .. "  " .. formatRF(d.energy), percentColor(d.energyPct))
+  kv("m_s2", rightX + 3, contentTop + 2, rightW - 5, "FUEL", fmtPct(d.fuelPct) .. "  " .. formatAmount(d.fuel, "MB"), C_TEXT)
+  kv("m_s3", rightX + 3, contentTop + 3, rightW - 5, "RODS", fmtPct(d.rod, 0) .. " INSERTED", C_TEXT)
+  kv("m_s4", rightX + 3, contentTop + 4, rightW - 5, "OUTPUT", formatRFPerTick(d.gen), C_TEXT)
 
-  cardSurface(outerX, contentTop + row1H + gap, leftW, row2H, C_ACCENT)
-  sectionTitle("target_t", outerX, contentTop + row1H + gap, leftW, "ENERGY TARGET", C_TEXT)
-  kv("target_disp", outerX + 3, contentTop + row1H + gap + 1, leftW - 5, "Target", string.format("%d%% stored", targetPercent), C_TEXT)
-  ui.field("target_note", outerX + 3, contentTop + row1H + gap + 2, leftW - 5, "Automatic mode will try to maintain this reserve.", C_MUTED, C_INSET)
-  drawDeltaButtons("targb", "target_", outerX + 2, contentTop + row1H + gap + 4, leftW - 4)
+  local row2Y = contentTop + row1H + gap
+  cardSurface(outerX, row2Y, leftW, row2H, C_ACCENT)
+  sectionTitle("m_rod_t", outerX, row2Y, leftW, "MANUAL ROD NUDGE")
+  ui.field("m_rod_note", outerX + 3, row2Y + 1, leftW - 5,
+    autoEnabled and "DISABLE AUTO TO USE ROD CONTROLS." or "NUDGE ROD INSERTION IN SMALL OR LARGE STEPS.", autoEnabled and C_WARN or C_MUTED, C_INSET)
+  drawButtonRow("m_rodb", outerX + 2, row2Y + 3, leftW - 4,
+    { "-25", "-10", "-5", "-1", "+1", "+5", "+10", "+25" },
+    { "rod_-25", "rod_-10", "rod_-5", "rod_-1", "rod_1", "rod_5", "rod_10", "rod_25" }, nil)
 
-  cardSurface(rightX, contentTop + row1H + gap, rightW, row2H, C_BRAND)
-  sectionTitle("cfg_t", rightX, contentTop + row1H + gap, rightW, "LOOP TIMING & CONFIG", C_TEXT)
-  kv("cfg_cycle", rightX + 3, contentTop + row1H + gap + 1, rightW - 5, "Check interval", string.format("%ds", checkInterval), C_TEXT)
-  kv("cfg_kp", rightX + 3, contentTop + row1H + gap + 2, rightW - 5, "Tuning", string.format("kp %.2f   kd %.2f", kp, kd), C_TEXT)
-  kv("cfg_thresh", rightX + 3, contentTop + row1H + gap + 3, rightW - 5, "Safety", string.format("danger <%d%%, cap %d%%", dangerThreshold, dangerCap), C_TEXT)
+  cardSurface(rightX, row2Y, rightW, row2H, C_ACCENT)
+  sectionTitle("m_rodp_t", rightX, row2Y, rightW, "ROD PRESETS")
+  kv("m_rodp", rightX + 3, row2Y + 1, rightW - 5, "CURRENT", fmtPct(d.rod, 0) .. " INSERTED", C_TEXT)
+  drawButtonRow("m_rset", rightX + 2, row2Y + 3, rightW - 4,
+    { "0", "25", "50", "75", "100" },
+    { "rodset_0", "rodset_25", "rodset_50", "rodset_75", "rodset_100" }, nil)
 
-  local btnY = contentTop + row1H + gap + 4
-  local gapB = 1
-  local btnW = math.floor((rightW - 4 - gapB * 5) / 6)
-  local x0 = rightX + 2
-  drawButton("int1", x0, btnY, btnW, 3, "-1s", C_DIV, C_TEXT, "interval_-1")
-  x0 = x0 + btnW + gapB
-  drawButton("int2", x0, btnY, btnW, 3, "+1s", C_DIV, C_TEXT, "interval_1")
-  x0 = x0 + btnW + gapB
-  drawButton("int3", x0, btnY, btnW, 3, "1s", C_DIV, C_TEXT, "interval_set1")
-  x0 = x0 + btnW + gapB
-  drawButton("int4", x0, btnY, btnW, 3, "2s", C_DIV, C_TEXT, "interval_set2")
-  x0 = x0 + btnW + gapB
-  drawButton("int5", x0, btnY, btnW, 3, "5s", C_DIV, C_TEXT, "interval_set5")
-  x0 = x0 + btnW + gapB
-  drawButton("int6", x0, btnY, rightX + rightW - 2 - x0, 3, "10s", C_DIV, C_TEXT, "interval_set10")
+  local row3Y = row2Y + row2H + gap
+  cardSurface(outerX, row3Y, leftW, row3H, C_ACCENT)
+  sectionTitle("m_targ_t", outerX, row3Y, leftW, "ENERGY TARGET")
+  kv("m_targ_v", outerX + 3, row3Y + 1, leftW - 5, "TARGET", fmtPct(targetPercent, 0) .. " STORED", C_TEXT)
+  ui.field("m_targ_note", outerX + 3, row3Y + 2, leftW - 5, "AUTO HOLDS THIS BUFFER LEVEL.", C_MUTED, C_INSET)
+  drawButtonRow("m_tadj", outerX + 2, row3Y + 4, leftW - 4,
+    { "-10", "-5", "-1", "+1", "+5", "+10" },
+    { "target_-10", "target_-5", "target_-1", "target_1", "target_5", "target_10" }, nil)
 
-  if row3H >= 5 then
-    cardSurface(outerX, row3Y, outerW, row3H, C_FUEL)
-    sectionTitle("cfg_help_t", outerX, row3Y, outerW, "CONTROL NOTES", C_TEXT)
+  cardSurface(rightX, row3Y, rightW, row3H, C_ACCENT)
+  sectionTitle("m_cfg_t", rightX, row3Y, rightW, "LOOP INTERVAL")
+  kv("m_cfg1", rightX + 3, row3Y + 1, rightW - 5, "CHECK INTERVAL", tostring(checkInterval) .. " S", C_TEXT)
+  kv("m_cfg2", rightX + 3, row3Y + 2, rightW - 5, "TUNING", string.format("KP %.2f   KD %.1f", kp, kd), C_TEXT)
+  drawButtonRow("m_ipre", rightX + 2, row3Y + 4, rightW - 4,
+    { "1S", "2S", "5S", "10S", "-1S", "+1S" },
+    { "interval_set1", "interval_set2", "interval_set5", "interval_set10", "interval_delta_-1", "interval_delta_1" }, nil)
+
+  if row4H >= 5 then
+    local lowW, lowRightX, lowRightW = splitTwo(outerX, outerW, 2)
+    cardSurface(outerX, row4Y, lowW, row4H, C_ACCENT)
+    sectionTitle("m_preset_t", outerX, row4Y, lowW, "QUICK TARGET PRESETS")
+    kv("m_preset_v", outerX + 3, row4Y + 1, lowW - 5, "CURRENT TARGET", fmtPct(targetPercent, 0), C_TEXT)
+    if row4H >= 6 then
+      drawButtonRow("m_tset", outerX + 2, row4Y + 3, lowW - 4,
+        { "25%", "50%", "75%", "90%", "95%" },
+        { "targetset_25", "targetset_50", "targetset_75", "targetset_90", "targetset_95" }, nil)
+    end
+
+    cardSurface(lowRightX, row4Y, lowRightW, row4H, C_ACCENT)
+    sectionTitle("m_info_t", lowRightX, row4Y, lowRightW, "NOTES & SAFETY")
     local lines = {
-      "- Automatic mode controls stored energy reserve rather than direct RF/t output.",
-      "- Manual rod buttons change insertion. Lower insertion usually raises output.",
-      "- Manual rod control is intentionally locked while AUTO is enabled.",
-      "- Changing the check interval changes how often the control loop re-evaluates the reactor.",
+      "AUTO MODE CONTROLS STORED ENERGY, NOT DIRECT RF/T OUTPUT.",
+      "MANUAL ROD CONTROLS ARE LOCKED WHILE AUTO IS ON.",
+      "REACTIVITY " .. (d.reactivity ~= nil and fmtPct(d.reactivity) or "N/A") .. " | CASING " .. (d.casingTemp ~= nil and fmtTemp(d.casingTemp) or "N/A") .. " | WASTE " .. (d.waste ~= nil and formatAmount(d.waste, "MB") or "N/A"),
     }
-    local maxLines = row3H - 2
+    local maxLines = row4H - 2
     for i = 1, math.min(#lines, maxLines) do
-      ui.field("help" .. i, outerX + 3, row3Y + i, outerW - 5, lines[i], C_MUTED, C_INSET)
+      ui.field("m_info_" .. i, lowRightX + 3, row4Y + i, lowRightW - 5, lines[i], C_MUTED, C_INSET)
     end
   end
 end
@@ -556,21 +535,15 @@ end
 local function draw()
   clearHotspots()
   ui.clearAll()
-  drawHeader("Reactor Control v2.1")
+  drawHeader()
   drawTabs()
-  local d = getReactorSnapshot()
-
-  if W >= 50 then
-    ui.field("hdr_state", 2, 1, 11, d.stateText, d.stateColor, C_HEADER)
-  end
-
+  local d = getSnapshot()
+  ui.field("hdr_state", 2, 1, 11, d.stateText, d.stateColor, C_HEADER)
   if currentPage == "manual" then
-    drawManualPage(d)
+    drawManual(d)
   else
-    drawOverviewPage(d)
+    drawOverview(d)
   end
-
-  drawFooter()
   sleep(0)
 end
 
@@ -615,8 +588,7 @@ local function autoControl()
 
   lastControlStep = step
   if step ~= 0 then
-    local newLevel = clamp(current + step, 0, 100)
-    r.setAllControlRodLevels(newLevel)
+    r.setAllControlRodLevels(clamp(current + step, 0, 100))
   end
 end
 
@@ -633,67 +605,63 @@ end
 local function applyAction(action)
   if action == "tab_overview" then
     currentPage = "overview"
-    setStatus("Overview page selected.", C_MUTED)
     return
   elseif action == "tab_manual" then
     currentPage = "manual"
-    setStatus("Manual & configuration page selected.", C_MUTED)
     return
   elseif action == "start" then
     r.setActive(true)
-    setStatus("Reactor started.", C_OK)
     return
   elseif action == "stop" then
     r.setActive(false)
-    setStatus("Reactor shut down.", C_BAD)
     return
   elseif action == "toggle_auto" then
     autoEnabled = not autoEnabled
     previousPercent = nil
     lastControlStep = 0
     lastControlRate = 0
-    if autoEnabled then
-      setStatus("Automatic control enabled.", C_OK)
-    else
-      setStatus("Automatic control disabled. Manual rod controls unlocked.", C_WARN)
-    end
     return
   end
 
   local rodDelta = action:match("^rod_([%+%-]?%d+)$")
   if rodDelta then
-    if autoEnabled then
-      setStatus("Disable AUTO before adjusting control rods manually.", C_WARN)
-      return
-    end
+    if autoEnabled then return end
     local delta = tonumber(rodDelta) or 0
     local current = r.getControlRodLevel(0)
-    local newLevel = clamp(current + delta, 0, 100)
-    r.setAllControlRodLevels(newLevel)
-    setStatus(string.format("Control rods set to %d%% inserted.", math.floor(newLevel + 0.5)), C_OK)
+    r.setAllControlRodLevels(clamp(current + delta, 0, 100))
+    return
+  end
+
+  local rodSet = action:match("^rodset_(%d+)$")
+  if rodSet then
+    if autoEnabled then return end
+    r.setAllControlRodLevels(clamp(tonumber(rodSet) or 0, 0, 100))
     return
   end
 
   local targetDelta = action:match("^target_([%+%-]?%d+)$")
   if targetDelta then
-    local delta = tonumber(targetDelta) or 0
-    targetPercent = clamp(targetPercent + delta, 0, 100)
+    targetPercent = clamp(targetPercent + (tonumber(targetDelta) or 0), 0, 100)
     previousPercent = nil
-    setStatus(string.format("Stored-energy target set to %d%%.", targetPercent), C_OK)
+    return
+  end
+
+  local targetSet = action:match("^targetset_(%d+)$")
+  if targetSet then
+    targetPercent = clamp(tonumber(targetSet) or targetPercent, 0, 100)
+    previousPercent = nil
     return
   end
 
   local intervalSet = action:match("^interval_set(%d+)$")
   if intervalSet then
     checkInterval = clamp(tonumber(intervalSet) or checkInterval, 1, 30)
-    setStatus(string.format("Check interval set to %d second(s).", checkInterval), C_OK)
     return
   end
 
-  local intervalDelta = action:match("^interval_([%+%-]?%d+)$")
+  local intervalDelta = action:match("^interval_delta_([%+%-]?%d+)$")
   if intervalDelta then
     checkInterval = clamp(checkInterval + (tonumber(intervalDelta) or 0), 1, 30)
-    setStatus(string.format("Check interval set to %d second(s).", checkInterval), C_OK)
     return
   end
 end
@@ -708,10 +676,6 @@ local function hotspotActionAt(x, y)
   return nil
 end
 
-if W < 58 or H < 28 then
-  error("Monitor is too small for the tabbed reactor interface at text scale 0.5")
-end
-
 updateStorageDelta()
 draw()
 timerId = os.startTimer(checkInterval)
@@ -719,7 +683,6 @@ timerId = os.startTimer(checkInterval)
 local ok, err = pcall(function()
   while true do
     local event, a, b, c = os.pullEvent()
-
     if event == "monitor_touch" then
       local action = hotspotActionAt(b, c)
       if action then
