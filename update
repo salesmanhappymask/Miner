@@ -191,6 +191,9 @@ local staged = {}
 local updaterSource
 local version
 local commonVersion
+local workerInstallerVersion
+local masterSetupVersion
+local auxiliary={}
 local snapshotReady = false
 for attempt = 1, 6 do
     staged = {}
@@ -200,9 +203,13 @@ for attempt = 1, 6 do
         for _, name in ipairs(files) do
             staged[name] = fetch(name)
         end
+        auxiliary.worker_disk_startup=fetch("worker_disk_startup")
+        auxiliary.master_setup_startup=fetch("master_setup_startup")
         commonVersion = staged.common:match("^%s*VERSION%s*=%s*(%d+)")
+        workerInstallerVersion=auxiliary.worker_disk_startup:match("local%s+EXPECTED_VERSION%s*=%s*(%d+)")
+        masterSetupVersion=auxiliary.master_setup_startup:match("local%s+VERSION%s*=%s*(%d+)")
         local after = fetch("version"):match("^%s*(%d+)%s*$")
-        if before == after and commonVersion == before then
+        if before == after and commonVersion == before and workerInstallerVersion == before and masterSetupVersion == before then
             version = before
             snapshotReady = true
             break
@@ -211,7 +218,7 @@ for attempt = 1, 6 do
     if attempt < 6 then sleep(1) end
 end
 if not snapshotReady then
-    error("Remote release is inconsistent after 6 checks; version=" .. tostring(version or fetch("version"):match("^%s*(%d+)%s*$")) .. ", common=" .. tostring(commonVersion) .. ". Re-upload the complete release with version last; nothing was changed")
+    error("Remote release is inconsistent after 6 checks; version=" .. tostring(version or fetch("version"):match("^%s*(%d+)%s*$")) .. ", common=" .. tostring(commonVersion) .. ", worker=" .. tostring(workerInstallerVersion) .. ", master_setup=" .. tostring(masterSetupVersion) .. ". Re-upload the complete release with version last; nothing was changed")
 end
 
 local regional = role == "manager" and "1" or "0"
@@ -233,6 +240,10 @@ if compile then
     end
     local updaterFn, updaterErr = compile(updaterSource, "update")
     if not updaterFn then error("Invalid remote updater: " .. tostring(updaterErr) .. "; nothing was changed") end
+    for name,source in pairs(auxiliary) do
+        local fn,err=compile(source,name)
+        if not fn then error("Invalid remote "..name..": "..tostring(err).."; nothing was changed") end
+    end
 end
 
 if fetch("version"):match("^%s*(%d+)%s*$") ~= version then

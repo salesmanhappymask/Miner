@@ -49,19 +49,42 @@ if limit then
     if limit<1 then error("Disk count must be at least 1") end
 end
 
+local function fetchInstallerSnapshot(selectedMode)
+    local lastVersion=nil
+    local lastDeclared=nil
+    for attempt=1,6 do
+        local before=fetch("version"):match("^%s*(%d+)%s*$")
+        if before then
+            local startupName=selectedMode=="1" and "master_setup_startup" or "worker_disk_startup"
+            local startupSource=fetch(startupName)
+            local updateSource=selectedMode=="1" and fetch("update") or nil
+            local declared
+            if selectedMode=="1" then
+                declared=startupSource:match("local%s+VERSION%s*=%s*(%d+)")
+            else
+                declared=startupSource:match("local%s+EXPECTED_VERSION%s*=%s*(%d+)")
+            end
+            local after=fetch("version"):match("^%s*(%d+)%s*$")
+            lastVersion=after or before
+            lastDeclared=declared
+            if before==after and declared==before then
+                return before,startupSource,updateSource
+            end
+        end
+        if attempt<6 then sleep(1) end
+    end
+    local kind=selectedMode=="1" and "Master setup" or "Worker installer"
+    error(kind.."/version mismatch after 6 checks; version="..tostring(lastVersion)..", installer="..tostring(lastDeclared))
+end
+
 local contents={}
 local label
+local releaseVersion,startupSource,updateSource=fetchInstallerSnapshot(mode)
+contents.startup=startupSource
 if mode=="1" then
-    contents.update=fetch("update")
-    contents.startup=fetch("master_setup_startup")
+    contents.update=updateSource
     label=tostring(args[3] or "setup")
 else
-    local version=fetch("version"):match("^%s*(%d+)%s*$")
-    if not version then error("Invalid remote version") end
-    contents.startup=fetch("worker_disk_startup")
-    if contents.startup:match("local%s+EXPECTED_VERSION%s*=%s*(%d+)")~=version then
-        error("Worker installer/version mismatch")
-    end
     label=tostring(args[3] or "quarry worker")
 end
 
