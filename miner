@@ -2577,6 +2577,8 @@ local function runMiner(cfg)
             state.packAssetDump=nil
             state.packAssetForeman=nil
             state.packAssetNavigator=nil
+            state.packAssetNavigatorInventoryDrained=nil
+            state.packAssetNavigatorInventoryDrainedCount=nil
             state.packAssetFuelRetained=nil
             state.packAssetFuelSlot=nil
             state.packAssetFuelRestored=nil
@@ -2789,12 +2791,14 @@ local function runMiner(cfg)
                 return true
             elseif state.packAssetsReady and not state.packAssetsAcknowledged and
                 now()-(state.lastPackAssetSend or -10)>=2 then
+                local cargoCount=0
+                for slot=1,16 do cargoCount=cargoCount+turtle.getItemCount(slot) end
                 send(cfg.managerId,{
                     type="pack_assets_ready",role="miner",row=cfg.row,
                     packToken=state.packToken,foremanCollected=state.packAssetForeman==true,
                     navigatorCollected=state.packAssetNavigator==true,
                     dumpCollected=state.packAssetDump==true,fuelCollected=state.packAssetFuel==true,
-            fuelRetained=state.packAssetFuelRetained==true,
+                    fuelRetained=state.packAssetFuelRetained==true,cargoCount=cargoCount,
                     x=state.x,y=state.y,z=state.z,dir=state.dir,session=cfg.session
                 })
                 state.lastPackAssetSend=now()
@@ -2895,6 +2899,33 @@ local function runMiner(cfg)
             save()
             return true
         end
+        local function drainAssetInventory(flagName,label,direction,minimum)
+            if state[flagName] then return true end
+            local suck=direction=="up" and turtle.suckUp or turtle.suck
+            local before=inventoryTotal()
+            local pulls=0
+            while pulls<64 do
+                local moved=false
+                for slot=1,16 do
+                    turtle.select(slot)
+                    if suck() then
+                        moved=true
+                        pulls=pulls+1
+                        break
+                    end
+                end
+                if not moved then break end
+            end
+            local recovered=inventoryTotal()-before
+            if recovered<(tonumber(minimum) or 0) then
+                return blocked(label.." did not transfer its required carried item before collection")
+            end
+            state[flagName]=true
+            state[flagName.."Count"]=recovered
+            save()
+            return true
+        end
+
         local function restoreAsset(flagName,label,direction)
             local restoredKey=flagName.."Restored"
             local intentKey=flagName.."RestoreIntent"
@@ -2940,7 +2971,7 @@ local function runMiner(cfg)
             return true
         end
         if not state.packAssetProgress then
-            local needed=4
+            local needed=5
             if freeInventorySlots()<needed then
                 return blocked("Miner-"..tostring(cfg.row).." needs "..tostring(needed).." free slots for pack hardware")
             end
@@ -2972,6 +3003,7 @@ local function runMiner(cfg)
             if not moveTo(cfg.row-1,-1) then
                 return blocked("Miner-2 could not enter the Foreman-1 square")
             end
+            if not drainAssetInventory("packAssetNavigatorInventoryDrained","GPS Navigator-1 inventory","up",1) then return false end
             if not collectAsset("packAssetNavigator","GPS Navigator-1","up") then return false end
             if not moveTo(cfg.row,-1) or not face(DIR_S) then
                 return blocked("Miner-2 could not return beside Foreman-1's fuel chest position")
@@ -2998,6 +3030,7 @@ local function runMiner(cfg)
             if not moveTo(cfg.row-1,-1) then
                 return blocked("Miner-"..tostring(cfg.row).." could not enter Foreman-"..tostring(group).." square")
             end
+            if not drainAssetInventory("packAssetNavigatorInventoryDrained","GPS Navigator-"..tostring(group).." inventory","up",group==3 and 1 or 0) then return false end
             if not collectAsset("packAssetNavigator","GPS Navigator-"..tostring(group),"up") then return false end
             if not moveTo(cfg.row,-1) or not moveTo(cfg.row,0) then
                 return blocked("Miner-"..tostring(cfg.row).." could not return home after pack hardware collection")
@@ -3268,7 +3301,13 @@ local function runMiner(cfg)
             local targetRow=state.x-1
             local cargoMinimum=0
             if isChestCollector(targetRow) then
-                cargoMinimum=targetRow==chestCollectorRow(1) and 3 or 4
+                if targetRow==chestCollectorRow(1) then
+                    cargoMinimum=4
+                elseif targetRow==chestCollectorRow(3) then
+                    cargoMinimum=5
+                else
+                    cargoMinimum=4
+                end
             end
             local reportedCargo=state.packCargoCounts and tonumber(state.packCargoCounts[targetRow]) or nil
             local cargoExpected=math.max(cargoMinimum,reportedCargo or 0)

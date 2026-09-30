@@ -2742,56 +2742,157 @@ local function runRegionalManager()
             local supplied=packInventoryCount("front","turtle")
             if supplied==nil then return packFinalizeBlocked("Black Blue Blue supply chest is unreadable before Miner-16 recovery") end
 
-            if supplied<finalTurtleCount then
-                local slot=managerFindOwnItem("turtle",data.recall.packMiner16Slot)
-                if not slot then
+            if supplied>=finalTurtleCount then
+                data.recall.packMiner16Deposited=true
+                data.recall.packMiner16Collected=true
+                data.recall.packMiner16Slot=nil
+                data.recall.packMiner16Amount=nil
+                data.recall.packMiner16Intent=nil
+                data.recall.packMiner16DepositIntent=nil
+                save()
+                flushManager(true)
+            else
+                if not data.recall.packMiner16Collected then
+                    local intent=data.recall.packMiner16Intent
                     ok,reason=managerPackMoveTo(1,-1)
                     if not ok then return packFinalizeBlocked("RM could not reach Miner-16: "..tostring(reason)) end
                     ok,reason=managerPackFace(DIR_N)
                     if not ok then return packFinalizeBlocked(reason) end
-                    if not turtle.detect() then
-                        return packFinalizeBlocked("Miner-16 is not present at its final pack position")
-                    end
-                    slot=managerEmptySlot()
-                    if not slot then return packFinalizeBlocked("RM has no free slot for Miner-16") end
-                    turtle.select(slot)
-                    local before=turtle.getItemCount(slot)
-                    local dug,digError=turtle.dig()
-                    if not dug then
-                        return packFinalizeBlocked("RM could not collect Miner-16: "..tostring(digError or "dig failed"))
-                    end
-                    if turtle.getItemCount(slot)<=before then
-                        turtle.suck()
-                    end
-                    if turtle.getItemCount(slot)<=before or
-                        not matchesItem(managerOwnItem(slot),"turtle") then
-                        local recovered=managerFindOwnItem("turtle")
-                        if not recovered then
-                            return packFinalizeBlocked("RM broke Miner-16 but could not recover its turtle item")
+
+                    if not intent then
+                        if not turtle.detect() then
+                            return packFinalizeBlocked("Miner-16 is not present at its final pack position")
                         end
-                        slot=recovered
+                        local slot=managerEmptySlot()
+                        if not slot then return packFinalizeBlocked("RM has no free slot for Miner-16") end
+                        local beforeSlots={}
+                        for i=1,16 do beforeSlots[i]=turtle.getItemCount(i) end
+                        intent={captureSlot=slot,beforeSlots=beforeSlots,beforeTotal=0}
+                        for i=1,16 do intent.beforeTotal=intent.beforeTotal+beforeSlots[i] end
+                        data.recall.packMiner16Intent=intent
+                        save()
+                        flushManager(true)
                     end
+
+                    intent=data.recall.packMiner16Intent
+                    if turtle.detect() then
+                        local slot=tonumber(intent.captureSlot) or managerEmptySlot()
+                        if not slot then return packFinalizeBlocked("RM has no free slot for Miner-16") end
+                        turtle.select(slot)
+                        local dug,digError=turtle.dig()
+                        if not dug then
+                            return packFinalizeBlocked("RM could not collect Miner-16: "..tostring(digError or "dig failed"))
+                        end
+                    end
+
+                    local function recoveredSlotFromIntent()
+                        local beforeSlots=type(intent.beforeSlots)=="table" and intent.beforeSlots or {}
+                        local bestSlot=nil
+                        local bestDelta=0
+                        for i=1,16 do
+                            local delta=turtle.getItemCount(i)-(tonumber(beforeSlots[i]) or 0)
+                            if delta>bestDelta then
+                                bestDelta=delta
+                                bestSlot=i
+                            end
+                        end
+                        return bestSlot,bestDelta
+                    end
+
+                    local slot,delta=recoveredSlotFromIntent()
+                    if not slot or delta<1 then
+                        for attempt=1,4 do
+                            local moved=false
+                            local preferred=tonumber(intent.captureSlot)
+                            if preferred and turtle.getItemCount(preferred)==0 then
+                                turtle.select(preferred)
+                                moved=turtle.suck() and true or false
+                            end
+                            if not moved then
+                                for i=1,16 do
+                                    if turtle.getItemCount(i)==0 then
+                                        turtle.select(i)
+                                        if turtle.suck() then moved=true break end
+                                    end
+                                end
+                            end
+                            slot,delta=recoveredSlotFromIntent()
+                            if slot and delta>=1 then break end
+                            sleep(0.05)
+                        end
+                    end
+                    if not slot or delta<1 then
+                        return packFinalizeBlocked("RM broke Miner-16 but could not recover its turtle item")
+                    end
+
                     data.recall.packMiner16Slot=slot
+                    data.recall.packMiner16Amount=1
                     data.recall.packMiner16Collected=true
+                    data.recall.packMiner16Intent=nil
                     save()
                     flushManager(true)
                 end
 
                 ok,reason=supplyStation()
                 if not ok then return packFinalizeBlocked(reason) end
-                slot=managerFindOwnItem("turtle",data.recall.packMiner16Slot)
-                if slot then
-                    ok,reason=managerDropTrackedSlot(slot,"turtle","Miner-16")
-                    if not ok then return packFinalizeBlocked(reason) end
+                local slot=tonumber(data.recall.packMiner16Slot)
+                local amount=tonumber(data.recall.packMiner16Amount) or 1
+                local depositIntent=data.recall.packMiner16DepositIntent
+                local supplyTotal=packInventoryTotal("front")
+                if supplyTotal==nil then return packFinalizeBlocked("Black Blue Blue supply chest is unreadable during Miner-16 deposit") end
+
+                if depositIntent then
+                    local beforeSupply=tonumber(depositIntent.beforeSupplyTotal)
+                    local beforeSlot=tonumber(depositIntent.beforeSlotCount)
+                    local trackedSlot=tonumber(depositIntent.slot)
+                    if beforeSupply and supplyTotal>=beforeSupply+amount and trackedSlot and beforeSlot and
+                        turtle.getItemCount(trackedSlot)<=beforeSlot-amount then
+                        data.recall.packMiner16Deposited=true
+                        data.recall.packMiner16DepositIntent=nil
+                        data.recall.packMiner16Slot=nil
+                        data.recall.packMiner16Amount=nil
+                        save()
+                        flushManager(true)
+                    end
                 end
+
+                if not data.recall.packMiner16Deposited then
+                    if not slot or turtle.getItemCount(slot)<amount then
+                        return packFinalizeBlocked("RM no longer has the witnessed Miner-16 item")
+                    end
+                    if not data.recall.packMiner16DepositIntent then
+                        data.recall.packMiner16DepositIntent={
+                            slot=slot,
+                            amount=amount,
+                            beforeSlotCount=turtle.getItemCount(slot),
+                            beforeSupplyTotal=supplyTotal
+                        }
+                        save()
+                        flushManager(true)
+                    end
+                    turtle.select(slot)
+                    if not turtle.drop(amount) then
+                        return packFinalizeBlocked("RM could not place Miner-16 into the supply chest")
+                    end
+                    local afterSupply=packInventoryTotal("front")
+                    local beforeSupply=tonumber(data.recall.packMiner16DepositIntent.beforeSupplyTotal) or supplyTotal
+                    if afterSupply==nil or afterSupply<beforeSupply+amount then
+                        return packFinalizeBlocked("Supply chest did not receive Miner-16")
+                    end
+                    data.recall.packMiner16Deposited=true
+                    data.recall.packMiner16DepositIntent=nil
+                    data.recall.packMiner16Slot=nil
+                    data.recall.packMiner16Amount=nil
+                    save()
+                    flushManager(true)
+                end
+
                 supplied=packInventoryCount("front","turtle")
                 if supplied==nil or supplied<finalTurtleCount then
-                    return packFinalizeBlocked("Supply chest did not receive Miner-16")
+                    return packFinalizeBlocked("Supply chest did not register Miner-16 after witnessed deposit")
                 end
             end
 
-            data.recall.packMiner16Deposited=true
-            data.recall.packMiner16Slot=nil
             data.recall.packFinalizeStage="FUEL"
             data.recall.packError=nil
             save()
@@ -2961,14 +3062,15 @@ local function runRegionalManager()
                 {"turtle",WORKER_COUNT+FOREMAN_COUNT+NAVIGATOR_COUNT,"packed turtles"},
                 {"ender_dump",FOREMAN_COUNT,"dump Ender Chests"},
                 {"ender_fuel",FOREMAN_COUNT,"fuel Ender Chests"},
+                {"chunk_loader",2,"Chunk Loaders"},
                 {"lava_bucket",2,"full lava buckets"},
                 {"floppy",1,"Master Foreman setup disk"}
             }
             local missing={}
             local total=packInventoryTotal("front")
             if total==nil then return packFinalizeBlocked("Black Blue Blue supply chest is unreadable during final verification") end
-            if not data.recall.packDepositedCount or tonumber(data.recall.packDepositedCount)<30 then
-                missing[#missing+1]="Miner-16 verified deposit count "..tostring(data.recall.packDepositedCount or 0).."/30"
+            if not data.recall.packDepositedCount or tonumber(data.recall.packDepositedCount)<32 then
+                missing[#missing+1]="Miner-16 verified deposit count "..tostring(data.recall.packDepositedCount or 0).."/32"
             end
             if data.recall.packSupplyCount and total<tonumber(data.recall.packSupplyCount) then
                 missing[#missing+1]="total deposited items "..tostring(total).."/"..tostring(data.recall.packSupplyCount)
@@ -3864,9 +3966,11 @@ local function runRegionalManager()
                     isChestCollector(tonumber(message.row)) and
                     registeredNodeSender("miner",tonumber(message.row),sender) then
                     local row=tonumber(message.row)
+                    local minimumCargo=row==chestCollectorRow(3) and 5 or 4
                     if message.x==row and message.y==0 and message.z==0 and message.dir==DIR_N and
                         message.foremanCollected==true and message.navigatorCollected==true and
-                        message.dumpCollected==true and
+                        message.dumpCollected==true and tonumber(message.cargoCount) and
+                        tonumber(message.cargoCount)>=minimumCargo and
                         ((row==chestCollectorRow(1) and message.fuelRetained==true) or
                          (row~=chestCollectorRow(1) and message.fuelCollected==true)) then
                         data.recall.packAssetsReady[row]=true
