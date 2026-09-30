@@ -3591,7 +3591,8 @@ local function runRegionalManager()
                     if message.x==row and message.y==0 and message.z==0 and message.dir==DIR_N and
                         message.foremanCollected==true and message.navigatorCollected==true and
                         message.dumpCollected==true and
-                        (row==chestCollectorRow(1) or message.fuelCollected==true) then
+                        ((row==chestCollectorRow(1) and message.fuelRetained==true) or
+                         (row~=chestCollectorRow(1) and message.fuelCollected==true)) then
                         data.recall.packAssetsReady[row]=true
                         data.recall.packError=nil
                         save()

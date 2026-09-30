@@ -794,7 +794,7 @@ local function runMiner(cfg)
         end
         local group=math.floor((cfg.row-1)/4)+1
         if group==1 then
-            return x>=1 and x<=3 and y==0 and z>=-3 and z<=0
+            return x>=cfg.row-1 and x<=cfg.row and y==0 and z>=-2 and z<=0
         end
         return x>=cfg.row-1 and x<=cfg.row and y==0 and z>=-2 and z<=0
     end
@@ -2564,6 +2564,9 @@ local function runMiner(cfg)
             state.packAssetForeman=nil
             state.packAssetNavigator=nil
             state.packAssetFuelRetained=nil
+            state.packAssetFuelSlot=nil
+            state.packAssetFuelRestored=nil
+            state.packAssetFuelRestoreIntent=nil
         end
         save()
         sendState("Regional Manager recall: " .. tostring(mode))
@@ -2777,6 +2780,7 @@ local function runMiner(cfg)
                     packToken=state.packToken,foremanCollected=state.packAssetForeman==true,
                     navigatorCollected=state.packAssetNavigator==true,
                     dumpCollected=state.packAssetDump==true,fuelCollected=state.packAssetFuel==true,
+            fuelRetained=state.packAssetFuelRetained==true,
                     x=state.x,y=state.y,z=state.z,dir=state.dir,session=cfg.session
                 })
                 state.lastPackAssetSend=now()
@@ -2834,7 +2838,9 @@ local function runMiner(cfg)
             if state[flagName] then return true end
             local intent=state.packAssetIntent
             if not intent or intent.flag~=flagName then
-                intent={flag=flagName,beforeTotal=inventoryTotal(),direction=direction}
+                local beforeSlots={}
+                for slot=1,16 do beforeSlots[slot]=turtle.getItemCount(slot) end
+                intent={flag=flagName,beforeTotal=inventoryTotal(),beforeSlots=beforeSlots,direction=direction}
                 state.packAssetIntent=intent
                 save()
             end
@@ -2863,8 +2869,53 @@ local function runMiner(cfg)
             if inventoryTotal()<=before then
                 return blocked(label.." was not recovered into Miner-"..tostring(cfg.row).." inventory")
             end
+            local beforeSlots=type(intent.beforeSlots)=="table" and intent.beforeSlots or {}
+            for slot=1,16 do
+                if turtle.getItemCount(slot)>(tonumber(beforeSlots[slot]) or 0) then
+                    state[flagName.."Slot"]=slot
+                    break
+                end
+            end
             state[flagName]=true
             state.packAssetIntent=nil
+            save()
+            return true
+        end
+        local function restoreAsset(flagName,label,direction)
+            local restoredKey=flagName.."Restored"
+            local intentKey=flagName.."RestoreIntent"
+            if state[restoredKey] then return true end
+            local slot=tonumber(state[flagName.."Slot"])
+            if not slot or turtle.getItemCount(slot)<=0 then
+                return blocked("Cannot identify "..label.." in Miner-"..tostring(cfg.row).." inventory for restoration")
+            end
+            local detect=direction=="up" and turtle.detectUp or turtle.detect
+            local place=direction=="up" and turtle.placeUp or turtle.place
+            local intent=state[intentKey]
+            if not intent then
+                intent={slot=slot,beforeCount=turtle.getItemCount(slot)}
+                state[intentKey]=intent
+                save()
+            end
+            local beforeCount=tonumber(intent.beforeCount) or turtle.getItemCount(slot)
+            local currentCount=turtle.getItemCount(slot)
+            if detect() then
+                if currentCount<beforeCount then
+                    state[restoredKey]=true
+                    state[intentKey]=nil
+                    save()
+                    return true
+                end
+                return blocked(label.." restore position is occupied")
+            end
+            turtle.select(slot)
+            local ok,reason=place()
+            if not ok then return blocked("Could not restore "..label..": "..tostring(reason or "place failed")) end
+            if turtle.getItemCount(slot)>=beforeCount then
+                return blocked(label.." did not leave Miner-"..tostring(cfg.row).." inventory during restoration")
+            end
+            state[restoredKey]=true
+            state[intentKey]=nil
             save()
             return true
         end
@@ -2875,7 +2926,7 @@ local function runMiner(cfg)
             return true
         end
         if not state.packAssetProgress then
-            local needed=group==1 and 3 or 4
+            local needed=4
             if freeInventorySlots()<needed then
                 return blocked("Miner-"..tostring(cfg.row).." needs "..tostring(needed).." free slots for pack hardware")
             end
@@ -2892,22 +2943,31 @@ local function runMiner(cfg)
         end
 
         if group==1 then
-            if not state.packAssetDump then
-                if not moveTo(2,-1) or not moveTo(3,-1) or not moveTo(3,-3) or not moveTo(1,-3) or not face(DIR_N) then
-                    return blocked("Miner-2 could not route around Foreman-1's retained fuel chest")
-                end
-                if not collectAsset("packAssetDump","Foreman-1 dump Ender Chest","front") then return false end
+            if not moveTo(cfg.row,-1) or not face(DIR_S) then
+                return blocked("Miner-2 could not reach Foreman-1's fuel Ender Chest")
             end
-            if not moveTo(1,-2) or not face(DIR_N) then
-                return blocked("Miner-2 could not reach Foreman-1 from the south")
+            if not collectAsset("packAssetFuel","Foreman-1 fuel Ender Chest","front") then return false end
+            if not moveTo(cfg.row,-2) or not face(DIR_W) then
+                return blocked("Miner-2 could not reach Foreman-1's dump Ender Chest")
+            end
+            if not collectAsset("packAssetDump","Foreman-1 dump Ender Chest","front") then return false end
+            if not moveTo(cfg.row,-1) or not face(DIR_W) then
+                return blocked("Miner-2 could not reach Foreman-1")
             end
             if not collectAsset("packAssetForeman","Foreman-1","front") then return false end
-            if not moveTo(1,-1) then return blocked("Miner-2 could not enter the Foreman-1 square") end
+            if not moveTo(cfg.row-1,-1) then
+                return blocked("Miner-2 could not enter the Foreman-1 square")
+            end
             if not collectAsset("packAssetNavigator","GPS Navigator-1","up") then return false end
-            if not moveTo(1,0) or not moveTo(cfg.row,0) then
+            if not moveTo(cfg.row,-1) or not face(DIR_S) then
+                return blocked("Miner-2 could not return beside Foreman-1's fuel chest position")
+            end
+            if not restoreAsset("packAssetFuel","Foreman-1 fuel Ender Chest","front") then return false end
+            state.packAssetFuelRetained=true
+            save()
+            if not moveTo(cfg.row,0) then
                 return blocked("Miner-2 could not return home after pack hardware collection")
             end
-            state.packAssetFuelRetained=true
         else
             if not moveTo(cfg.row,-1) or not face(DIR_S) then
                 return blocked("Miner-"..tostring(cfg.row).." could not reach its fuel Ender Chest")
@@ -2943,6 +3003,7 @@ local function runMiner(cfg)
             packToken=state.packToken,foremanCollected=state.packAssetForeman==true,
             navigatorCollected=state.packAssetNavigator==true,
             dumpCollected=state.packAssetDump==true,fuelCollected=state.packAssetFuel==true,
+            fuelRetained=state.packAssetFuelRetained==true,
             x=state.x,y=state.y,z=state.z,dir=state.dir,session=cfg.session
         })
         sendState("Pack hardware secured for Foreman-"..tostring(group))
