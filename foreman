@@ -1210,10 +1210,26 @@ local function runForeman(cfg)
                 sendState(state.recoveryReason)
                 return false
             end
+            pcall(turtle.dig)
+            sleep(0.1)
+            if turtle.detect() then
+                state.phase="CHEST_RECOVERY_LOCK"
+                state.recoveryLocked=true
+                state.recoveryReason="Chest target could not be cleared at " .. tostring(tx)
+                saveState()
+                sendState(state.recoveryReason)
+                return false
+            end
             if not selfSelectKind(kind) or not turtle.place() then
                 state.phase="WAITING_ENDER_CHEST"
                 saveState()
                 sendState("Cannot place " .. kind .. " for Foreman-" .. tostring(number))
+                return false
+            end
+            if not wrapInventory("front") then
+                state.phase="CHEST_PLACEMENT_ERROR"
+                saveState()
+                sendState("Placed " .. kind .. " did not land on the Foreman equipment level")
                 return false
             end
             state[flag]=true

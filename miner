@@ -1855,6 +1855,16 @@ local function runMiner(cfg)
                     sendState("Miner-1 no longer has the Black Blue Blue supply chest after chunk travel")
                     return false
                 end
+                if turtle.detect() then
+                    sendState("Miner-1 supply-chest target is blocked at the new chunk")
+                    return false
+                end
+                pcall(turtle.dig)
+                sleep(0.1)
+                if turtle.detect() then
+                    sendState("Miner-1 could not clear the supply-chest target at the new chunk")
+                    return false
+                end
                 turtle.select(slot)
                 if not turtle.place() then
                     sendState("Miner-1 could not place the Black Blue Blue supply chest at the new chunk")
