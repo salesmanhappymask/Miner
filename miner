@@ -3061,7 +3061,38 @@ local function runMiner(cfg)
             return false
         end
 
+        local function compactInventory()
+            local selected=turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
+            for source=16,2,-1 do
+                if turtle.getItemCount(source)>0 then
+                    for target=1,source-1 do
+                        if turtle.getItemCount(target)>0 then
+                            turtle.select(source)
+                            turtle.transferTo(target)
+                            if turtle.getItemCount(source)==0 then break end
+                        end
+                    end
+                end
+            end
+            local target=1
+            while target<=16 and turtle.getItemCount(target)>0 do target=target+1 end
+            if target<=16 then
+                for source=target+1,16 do
+                    if turtle.getItemCount(source)>0 then
+                        while target<source and turtle.getItemCount(target)>0 do target=target+1 end
+                        if target<source then
+                            turtle.select(source)
+                            turtle.transferTo(target)
+                        end
+                    end
+                end
+            end
+            turtle.select(selected)
+            return freeInventorySlots()
+        end
+
         local function selectEmptySlot()
+            compactInventory()
             for slot=1,16 do
                 if turtle.getItemCount(slot)==0 then
                     turtle.select(slot)
@@ -3164,6 +3195,7 @@ local function runMiner(cfg)
         end
 
         local function startOverflowTrip()
+            compactInventory()
             if inventoryTotal()==0 then return true end
             state.packOverflowTrip=true
             state.packOverflowReturnX=state.x
@@ -3177,6 +3209,8 @@ local function runMiner(cfg)
         if state.packOverflowTrip then
             if not continueOverflowTrip() then return false end
         end
+
+        compactInventory()
 
         if state.x<1 or state.x>WORKER_COUNT or state.z~=0 then
             return packBlock("Miner-16 is outside the pack collection lane")
@@ -3208,6 +3242,7 @@ local function runMiner(cfg)
                 cargoExpected=targetRow==chestCollectorRow(1) and 3 or 4
             end
             local expected=cargoExpected+1
+            if not state.packStepIntent then compactInventory() end
             if not state.packStepIntent and freeInventorySlots()<expected then
                 if not startOverflowTrip() then return false end
             end
@@ -3246,6 +3281,7 @@ local function runMiner(cfg)
                     end
                     local moved=turtle.suck()
                     if not moved then break end
+                    compactInventory()
                     recoveredCargo=inventoryTotal()-before
                 end
                 if recoveredCargo<requiredCargo then
@@ -3273,12 +3309,17 @@ local function runMiner(cfg)
                         return packBlock("Could not break parked Miner-"..tostring(targetRow)..
                             ": "..tostring(digError or "dig failed"))
                     end
+                    compactInventory()
                 end
                 for attempt=1,96 do
                     local moved=false
                     for slot=1,16 do
                         turtle.select(slot)
-                        if turtle.suck() then moved=true break end
+                        if turtle.suck() then
+                            moved=true
+                            compactInventory()
+                            break
+                        end
                     end
                     if not moved then break end
                 end
