@@ -169,7 +169,10 @@ end
 local function centerText(text, width)
   text = tostring(text or "")
   if width <= 0 then return "" end
-  if #text > width then return text:sub(1, width) end
+  if #text > width then
+    if width <= 3 then return text:sub(1, width) end
+    text = text:sub(1, width - 3) .. "..."
+  end
   local left = math.floor((width - #text) / 2)
   local right = width - #text - left
   return string.rep(" ", left) .. text .. string.rep(" ", right)
@@ -225,6 +228,14 @@ local function makeUI(m)
     end
   end
 
+  local function fitText(s, width)
+    s = tostring(s or "")
+    if width <= 0 then return "" end
+    if #s <= width then return s end
+    if width <= 3 then return s:sub(1, width) end
+    return s:sub(1, width - 3) .. "..."
+  end
+
   local function field(key, x, y, ww, s, fg, bg)
     if ww <= 0 or y < 1 or y > h or x > w or x + ww - 1 < 1 then return end
     local x1 = clamp(x, 1, w)
@@ -233,7 +244,7 @@ local function makeUI(m)
     if visibleW <= 0 then return end
     s = tostring(s or "")
     if x < 1 then s = s:sub(2 - x) end
-    if #s > visibleW then s = s:sub(1, visibleW) end
+    s = fitText(s, visibleW)
     local out = s .. string.rep(" ", visibleW - #s)
     local useFg = fg or C_TEXT
     local useBg = bg or C_BG
@@ -288,7 +299,7 @@ local function makeUI(m)
   end
 
   beginFrame()
-  return { w = w, h = h, rect = rect, field = field, clearAll = clearAll, beginFrame = beginFrame, flush = flush, invalidate = invalidate }
+  return { w = w, h = h, rect = rect, field = field, clearAll = clearAll, beginFrame = beginFrame, flush = flush, invalidate = invalidate, fitText = fitText }
 end
 
 local ui = makeUI(mon)
@@ -403,8 +414,24 @@ local function getTurbineSnapshot(index)
   local active = safeCall(t, "getActive")
   local rpm = safeCall(t, "getRotorSpeed") or 0
   local output = safeCall(t, "getEnergyProducedLastTick") or 0
-  local stored = safeCall(t, "getEnergyStored") or 0
-  local storedMax = safeCall(t, "getEnergyStoredMax") or 0
+  local storedRaw = safeCall(t, "getEnergyStored")
+  local stored = tonumber(storedRaw) or 0
+  local storedMax = safeCall(t, "getEnergyCapacity")
+  local energyCapacitySource = "getEnergyCapacity"
+  if storedMax == nil or tonumber(storedMax) == nil or tonumber(storedMax) <= 0 then
+    storedMax = safeCall(t, "getEnergyStoredMax")
+    energyCapacitySource = "getEnergyStoredMax"
+  end
+  if storedMax == nil or tonumber(storedMax) == nil or tonumber(storedMax) <= 0 then
+    storedMax = safeCall(t, "getMaxEnergyStored")
+    energyCapacitySource = "getMaxEnergyStored"
+  end
+  storedMax = tonumber(storedMax) or 0
+  local energyReadable = storedRaw ~= nil
+  if energyReadable and storedMax <= 0 then
+    storedMax = 1000000
+    energyCapacitySource = "legacy 1 MRF fallback"
+  end
   local coil = safeCall(t, "getInductorEngaged")
   local flow = safeCall(t, "getFluidFlowRate") or 0
   local flowLimit = safeCall(t, "getFluidFlowRateMax") or 0
@@ -431,6 +458,8 @@ local function getTurbineSnapshot(index)
     stored = stored,
     storedMax = storedMax,
     storedPct = storedPct,
+    energyReadable = energyReadable and storedMax > 0,
+    energyCapacitySource = energyCapacitySource,
     coil = coil == true,
     flow = flow,
     flowLimit = flowLimit,
@@ -581,10 +610,60 @@ local function sectionTitle(key, x, y, ww, title)
   ui.field(key, x + 3, y, math.max(0, ww - 5), string.upper(title or ""), C_TEXT, C_DIV)
 end
 
+local function wrapText(text, width)
+  local lines = {}
+  width = math.max(1, tonumber(width) or 1)
+  text = tostring(text or "")
+  for paragraph in (text .. "\n"):gmatch("(.-)\n") do
+    if paragraph == "" then
+      lines[#lines + 1] = ""
+    else
+      local line = ""
+      for word in paragraph:gmatch("%S+") do
+        while #word > width do
+          if line ~= "" then
+            lines[#lines + 1] = line
+            line = ""
+          end
+          lines[#lines + 1] = word:sub(1, width)
+          word = word:sub(width + 1)
+        end
+        if word ~= "" then
+          if line == "" then
+            line = word
+          elseif #line + 1 + #word <= width then
+            line = line .. " " .. word
+          else
+            lines[#lines + 1] = line
+            line = word
+          end
+        end
+      end
+      if line ~= "" then lines[#lines + 1] = line end
+    end
+  end
+  if #lines == 0 then lines[1] = "" end
+  return lines
+end
+
+local function drawWrappedText(key, x, y, width, maxRows, text, fg, bg)
+  if width <= 0 or maxRows <= 0 then return 0 end
+  local lines = wrapText(text, width)
+  local count = math.min(#lines, maxRows)
+  for i = 1, count do
+    local line = lines[i]
+    if i == maxRows and #lines > maxRows and width >= 3 then
+      line = ui.fitText(line .. "...", width)
+    end
+    ui.field(key .. "_" .. tostring(i), x, y + i - 1, width, line, fg or C_TEXT, bg or C_INSET)
+  end
+  return count
+end
+
 local function drawHeader()
   ui.rect(1, 1, W, 1, C_HEADER)
   ui.rect(1, 2, W, 1, C_DIV)
-  local title = "Reactor Control v2.9"
+  local title = "Reactor Control v2.10"
   ui.field("hdr_title", 1 + math.floor((W - #title) / 2), 1, #title, title, C_TEXT, C_HEADER)
   ui.field("hdr_brand", W - 5, 1, 5, "ZelOS", C_BRAND, C_HEADER)
 end
@@ -601,6 +680,10 @@ local function kv(key, x, y, width, label, value, valueColor)
   local labelText = string.upper(tostring(label or "")) .. ":"
   local valueText = tostring(value or "")
   local labelW = math.min(#labelText, width)
+  if #labelText + 1 + #valueText > width and width >= 8 then
+    local valueNeed = math.min(#valueText, math.max(3, math.floor(width * 0.58)))
+    labelW = math.min(#labelText, math.max(3, width - valueNeed - 1))
+  end
   ui.field(key .. "_l", x, y, labelW, labelText, C_MUTED, C_INSET)
   local avail = width - labelW - 1
   if avail > 0 then
@@ -767,9 +850,9 @@ local function drawTaskbar(d)
   local statusTop = H - 8
   if statusTop > y then
     ui.field("nav_status_t", 3, statusTop, NAV_W - 5, "PLANT STATUS", C_MUTED, C_INSET)
-    ui.field("nav_auto", 3, statusTop + 2, NAV_W - 5, autoEnabled and "AUTO  ENABLED" or "AUTO  MANUAL", autoEnabled and C_OK or C_WARN, C_INSET)
-    ui.field("nav_gov", 3, statusTop + 3, NAV_W - 5, turbineGovernorEnabled and "GOV   ENABLED" or "GOV   MANUAL", turbineGovernorEnabled and C_OK or C_WARN, C_INSET)
-    ui.field("nav_charge", 3, statusTop + 4, NAV_W - 5, chargeActive and "CHARGE ACTIVE" or "CHARGE STANDBY", chargeActive and C_ACTION or C_MUTED, C_INSET)
+    ui.field("nav_auto", 3, statusTop + 2, NAV_W - 5, autoEnabled and "AUTO ENABLED" or "AUTO MANUAL", autoEnabled and C_OK or C_WARN, C_INSET)
+    ui.field("nav_gov", 3, statusTop + 3, NAV_W - 5, turbineGovernorEnabled and "GOV ENABLED" or "GOV MANUAL", turbineGovernorEnabled and C_OK or C_WARN, C_INSET)
+    ui.field("nav_charge", 3, statusTop + 4, NAV_W - 5, chargeActive and "CHARGE ACTIVE" or "CHARGE IDLE", chargeActive and C_ACTION or C_MUTED, C_INSET)
     ui.field("nav_grid", 3, statusTop + 5, NAV_W - 5, "CELLS " .. fmtPct(d.energyBank.cellsPct), percentColor(d.energyBank.cellsPct), C_INSET)
   end
 end
@@ -958,7 +1041,7 @@ local function drawManual(d)
   local row2Y = contentTop + row1H + gap
   cardSurface(outerX, row2Y, leftW, row2H, C_ACCENT)
   sectionTitle("m_rod_t", outerX, row2Y, leftW, "MANUAL ROD NUDGE")
-  ui.field("m_rod_note", outerX + 3, row2Y + 2, leftW - 5,
+  drawWrappedText("m_rod_note", outerX + 3, row2Y + 2, leftW - 5, 2,
     autoEnabled and "DISABLE AUTO TO USE ROD CONTROLS." or "NUDGE ROD INSERTION IN SMALL OR LARGE STEPS.", autoEnabled and C_WARN or C_MUTED, C_INSET)
   drawButtonRow("m_rodb", outerX + 2, row2Y + 4, leftW - 4,
     { "-25", "-10", "-5", "-1", "+1", "+5", "+10", "+25" },
@@ -1029,15 +1112,13 @@ local function drawManual(d)
       end
     else
       sectionTitle("m_info_t", lowRightX, row4Y, lowRightW, "NOTES & SAFETY")
-      local lines = {
-        "AUTO MODE CONTROLS STORED ENERGY, NOT DIRECT RF/T OUTPUT.",
-        "MANUAL ROD CONTROLS ARE LOCKED WHILE AUTO IS ON.",
-        "REACTIVITY " .. (d.reactivity ~= nil and fmtPct(d.reactivity) or "N/A") .. " | CASING " .. (d.casingTemp ~= nil and fmtTemp(d.casingTemp) or "N/A") .. " | WASTE " .. (d.waste ~= nil and formatAmount(d.waste, "MB") or "N/A"),
-      }
-      local maxLines = row4H - 3
-      for i = 1, math.min(#lines, maxLines) do
-        ui.field("m_info_" .. i, lowRightX + 3, row4Y + i + 1, lowRightW - 5, lines[i], C_MUTED, C_INSET)
-      end
+      local notes =
+        "AUTO MODE CONTROLS STORED ENERGY, NOT DIRECT RF/T OUTPUT. " ..
+        "MANUAL ROD CONTROLS ARE LOCKED WHILE AUTO IS ON. " ..
+        "REACTIVITY " .. (d.reactivity ~= nil and fmtPct(d.reactivity) or "N/A") ..
+        " | CASING " .. (d.casingTemp ~= nil and fmtTemp(d.casingTemp) or "N/A") ..
+        " | WASTE " .. (d.waste ~= nil and formatAmount(d.waste, "MB") or "N/A")
+      drawWrappedText("m_info", lowRightX + 3, row4Y + 2, lowRightW - 5, row4H - 3, notes, C_MUTED, C_INSET)
     end
   end
 end
@@ -1067,10 +1148,13 @@ local function drawNoTurbines(contentTop)
   local h = H - contentTop
   cardSurface(outerX, contentTop, outerW, h, C_ACCENT)
   sectionTitle("no_tur_t", outerX, contentTop, outerW, "TURBINE SUPPORT")
-  ui.field("no_tur_1", outerX + 3, contentTop + 2, outerW - 5, "NO BIGREACTORS-TURBINE PERIPHERALS ARE CURRENTLY VISIBLE.", C_WARN, C_INSET)
-  ui.field("no_tur_2", outerX + 3, contentTop + 3, outerW - 5, "CONNECT EACH TURBINE COMPUTER PORT TO THIS COMPUTER WITH WIRED MODEMS.", C_MUTED, C_INSET)
-  ui.field("no_tur_3", outerX + 3, contentTop + 4, outerW - 5, "THEN TOUCH RESCAN TO DISCOVER THEM WITHOUT RESTARTING THE PROGRAM.", C_MUTED, C_INSET)
-  drawButton("no_tur_scan", outerX + 3, contentTop + 6, 18, 3, "RESCAN", C_ACTION, C_TEXT, "turbine_rescan")
+  local textW = outerW - 5
+  local used = 0
+  used = used + drawWrappedText("no_tur_1", outerX + 3, contentTop + 2 + used, textW, math.max(1, h - 8 - used), "NO BIGREACTORS-TURBINE PERIPHERALS ARE CURRENTLY VISIBLE.", C_WARN, C_INSET)
+  used = used + drawWrappedText("no_tur_2", outerX + 3, contentTop + 2 + used, textW, math.max(1, h - 8 - used), "CONNECT EACH TURBINE COMPUTER PORT TO THIS COMPUTER WITH WIRED MODEMS.", C_MUTED, C_INSET)
+  used = used + drawWrappedText("no_tur_3", outerX + 3, contentTop + 2 + used, textW, math.max(1, h - 8 - used), "THEN TOUCH RESCAN TO DISCOVER THEM WITHOUT RESTARTING THE PROGRAM.", C_MUTED, C_INSET)
+  local buttonY = math.min(contentTop + h - 4, contentTop + 3 + used)
+  drawButton("no_tur_scan", outerX + 3, buttonY, 18, 3, "RESCAN", C_ACTION, C_TEXT, "turbine_rescan")
 end
 
 local function drawTurbines(d)
@@ -1195,7 +1279,7 @@ local function drawTurbineManual(d)
   local row3Y = row2Y + rowH + 1
   cardSurface(outerX, row3Y, leftW, rowH, C_ACCENT)
   sectionTitle("tc_nudge_t", outerX, row3Y, leftW, "MANUAL FLOW LIMIT")
-  ui.field("tc_lock", outerX + 3, row3Y + 2, leftW - 5,
+  drawWrappedText("tc_lock", outerX + 3, row3Y + 2, leftW - 5, 2,
     turbineGovernorEnabled and "DISABLE GOVERNOR TO ADJUST FLOW MANUALLY." or "MANUAL FLOW CONTROL UNLOCKED.", turbineGovernorEnabled and C_WARN or C_OK, C_INSET)
   drawButtonRow("tc_nudge", outerX + 2, row3Y + 4, leftW - 4,
     { "-500", "-100", "-25", "+25", "+100", "+500" },
@@ -1213,7 +1297,7 @@ local function drawTurbineManual(d)
   if row4H >= 5 then
     cardSurface(outerX, row4Y, leftW, row4H, C_ACCENT)
     sectionTitle("tc_coil_t", outerX, row4Y, leftW, "COIL CONTROL")
-    ui.field("tc_coil_note", outerX + 3, row4Y + 2, leftW - 5,
+    drawWrappedText("tc_coil_note", outerX + 3, row4Y + 2, leftW - 5, 2,
       turbineGovernorEnabled and "GOVERNOR OWNS COIL STATE." or "MANUAL COIL CONTROL UNLOCKED.", turbineGovernorEnabled and C_WARN or C_OK, C_INSET)
     if row4H >= 6 then
       drawButtonRow("tc_coils", outerX + 2, row4Y + 4, leftW - 4,
@@ -1289,7 +1373,7 @@ local function drawEnergy(d)
   end
   for i = 1, #turbines do
     local t = getTurbineSnapshot(i)
-    if t then entries[#entries + 1] = { "TURBINE " .. tostring(i), t.stored, t.storedMax, t.storedPct, t.storedMax > 0 } end
+    if t then entries[#entries + 1] = { "TURBINE " .. tostring(i), t.stored, t.storedMax, t.storedPct, t.energyReadable == true } end
   end
   entries[#entries + 1] = { "REACTOR MONITOR", bank.reactorStored, bank.reactorMax, bank.reactorPct, true }
 
@@ -1370,7 +1454,7 @@ local function drawEnergyControl(d)
 
     cardSurface(rightX, row3Y, rightW, row3H, C_ACCENT)
     sectionTitle("ec_rules_t", rightX, row3Y, rightW, "PRIORITY / STOP RULE")
-    local lines = {
+    local rules = {
       "1. ENERGY CELLS ARE THE PRIMARY BASE RESERVE.",
       "2. TURBINE BUFFER IS SECONDARY AND FEEDS THE CELLS.",
       "3. REACTOR BUFFER IS MONITORED BUT NEVER COUNTS TOWARD CONTROL.",
@@ -1378,8 +1462,13 @@ local function drawEnergyControl(d)
       "5. ONCE STARTED, CHARGING CONTINUES UNTIL CELLS AND TURBINE REACH THE TARGET.",
     }
     local maxLines = row3H - 3
-    for i = 1, math.min(#lines, maxLines) do
-      ui.field("ec_rule_" .. tostring(i), rightX + 3, row3Y + i + 1, rightW - 5, lines[i], C_MUTED, C_INSET)
+    local lineY = row3Y + 2
+    local remaining = maxLines
+    for i = 1, #rules do
+      if remaining <= 0 then break end
+      local used = drawWrappedText("ec_rule_" .. tostring(i), rightX + 3, lineY, rightW - 5, remaining, rules[i], C_MUTED, C_INSET)
+      lineY = lineY + used
+      remaining = remaining - used
     end
   end
 end
