@@ -1240,7 +1240,9 @@ local function runMiner(cfg)
                                 send(cfg.managerId,{type="chunk_ack",role="miner",
                                     row=cfg.row,stage="COLLECT_M",chunkIndex=target,
                                     session=cfg.session})
-                            elseif target==state.chunkIndex and message.stage=="MOVE_M" then
+                            elseif target==state.chunkIndex and message.stage=="MOVE_M" and
+                                state.advanceStage=="WAIT" and
+                                not (cfg.row==1 and tonumber(state.supplyChestTarget)==target) then
                                 send(cfg.managerId,{type="chunk_ack",role="miner",
                                     row=cfg.row,stage="MOVE_M",chunkIndex=target,
                                     session=cfg.session})
@@ -1479,7 +1481,11 @@ local function runMiner(cfg)
             toX>=1 and toX<=WORKER_COUNT and
             toY>=cfg.homeY and toY<=cfg.homeY+1 and
             toZ>=0 and toZ<=15
+        local supplyPlacementMove=cfg.row==1 and state.advanceStage=="MOVE" and
+            tonumber(state.supplyChestTarget)==tonumber(state.chunkIndex) and
+            state.y==0 and toY==0 and toZ==0 and toX>=0 and toX<=1
         if not chestMove and not packAssetMove and not packOverflowMove and not orientationMove and
+            not supplyPlacementMove and
             (toX~=cfg.row or toY>0 or toZ<0 or toZ>15) then
             state.recoveryLocked=true
             state.recoveryReason="Movement would leave assigned miner shaft"
@@ -2068,32 +2074,98 @@ local function runMiner(cfg)
         end
 
         if cfg.row==1 and tonumber(state.supplyChestTarget)==target then
-            if not face(DIR_W) then
-                sendState("Miner-1 could not face the new supply-chest position")
-                return false
+            if state.x~=1 or state.z~=0 then
+                if state.x~=0 or state.z~=0 then
+                    sendState("Miner-1 supply-chest placement recovery found an unexpected position")
+                    return false
+                end
             end
-            local placed=frontSupplyInventory()~=nil
+            if state.x==1 then
+                if not face(DIR_W) then
+                    sendState("Miner-1 could not face the new supply-chest position")
+                    return false
+                end
+            end
+            local placed=state.x==1 and frontSupplyInventory()~=nil
             if not placed then
                 local slot=tonumber(state.supplyChestSlot)
-                if not state.supplyChestCarried or not slot or turtle.getItemCount(slot)<1 then
-                    sendState("Miner-1 no longer has the Black Blue Blue supply chest after chunk travel")
+                if state.x==1 then
+                    pcall(turtle.dig)
+                    sleep(0.1)
+                    local occupied=turtle.detect()
+                    if turtle.inspect then
+                        local inspectOk,inspectPresent=pcall(turtle.inspect)
+                        if inspectOk then occupied=inspectPresent==true end
+                    end
+                    if occupied then
+                        sendState("Miner-1 could not clear the intended supply-chest square")
+                        return false
+                    end
+                    local moved,moveError=attemptForward()
+                    if not moved then
+                        sendState("Miner-1 could not enter the intended supply-chest square: "..tostring(moveError or "move failed"))
+                        return false
+                    end
+                    state.supplyChestPlacementStage="AT_TARGET"
+                    save()
+                elseif not face(DIR_W) then
+                    sendState("Miner-1 could not face west while recovering supply-chest placement")
                     return false
                 end
-                local protectedType=peripheral.getType("front")
-                if protectedType then
-                    sendState("Miner-1 supply-chest target is occupied by protected peripheral "..tostring(protectedType))
-                    return false
-                end
+
+                local misplacedSupply=frontSupplyInventory()~=nil
+                local before={}
+                for i=1,16 do before[i]=turtle.getItemCount(i) end
                 pcall(turtle.dig)
+                local recoveredSlot,recoveredDelta=changedSlot(before)
+                if misplacedSupply and recoveredSlot and recoveredDelta and recoveredDelta>0 then
+                    state.supplyChestSlot=recoveredSlot
+                    state.supplyChestCarried=true
+                    slot=recoveredSlot
+                end
+                pcall(turtle.digUp)
+                pcall(turtle.digDown)
                 sleep(0.1)
-                protectedType=peripheral.getType("front")
-                local occupied=turtle.detect()
+
+                local frontOccupied=turtle.detect()
                 if turtle.inspect then
                     local inspectOk,inspectPresent=pcall(turtle.inspect)
-                    if inspectOk then occupied=inspectPresent==true end
+                    if inspectOk then frontOccupied=inspectPresent==true end
                 end
-                if protectedType or occupied then
-                    sendState("Miner-1 could not normalize the supply-chest target at the new chunk")
+                local upOccupied=turtle.detectUp()
+                if turtle.inspectUp then
+                    local inspectOk,inspectPresent=pcall(turtle.inspectUp)
+                    if inspectOk then upOccupied=inspectPresent==true end
+                end
+                local downOccupied=turtle.detectDown()
+                if turtle.inspectDown then
+                    local inspectOk,inspectPresent=pcall(turtle.inspectDown)
+                    if inspectOk then downOccupied=inspectPresent==true end
+                end
+                if frontOccupied or upOccupied or downOccupied then
+                    sendState("Miner-1 could not fully clear the supply-chest placement pocket")
+                    return false
+                end
+
+                if not face(DIR_E) then
+                    sendState("Miner-1 could not turn back toward its chunk position")
+                    return false
+                end
+                local movedBack,moveBackError=attemptForward()
+                if not movedBack then
+                    sendState("Miner-1 could not return from the supply-chest placement pocket: "..tostring(moveBackError or "move failed"))
+                    return false
+                end
+                if not face(DIR_W) then
+                    sendState("Miner-1 could not face the prepared supply-chest square")
+                    return false
+                end
+                state.supplyChestPlacementStage="READY_PLACE"
+                save()
+
+                slot=tonumber(state.supplyChestSlot)
+                if not state.supplyChestCarried or not slot or turtle.getItemCount(slot)<1 then
+                    sendState("Miner-1 no longer has the Black Blue Blue supply chest after preparing its new position")
                     return false
                 end
                 turtle.select(slot)
@@ -2111,6 +2183,7 @@ local function runMiner(cfg)
             state.supplyChestSlot=nil
             state.supplyChestIntent=nil
             state.supplyChestTarget=nil
+            state.supplyChestPlacementStage=nil
             save()
             if not face(DIR_N) then
                 sendState("Miner-1 could not restore its north-facing chunk position")
@@ -2139,7 +2212,7 @@ local function runMiner(cfg)
             end
         elseif command.stage=="MOVE_M" then
             local supplyPending=cfg.row==1 and tonumber(state.supplyChestTarget)==tonumber(command.target)
-            if state.chunkIndex>=command.target and not supplyPending then
+            if state.chunkIndex>=command.target and state.advanceStage=="WAIT" and not supplyPending then
                 advanceAck("MOVE_M",command.target)
             elseif not runChunkMove(command.target) then
                 if not flags.recallMode and not flags.advanceCancelled then

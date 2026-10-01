@@ -3797,6 +3797,20 @@ local function runRegionalManager()
             return
         end
         if stage=="RELEASE" then
+            for row=1,16 do
+                local miner=data.miners[row]
+                if miner and miner.id and tonumber(miner.chunkIndex)==advance.target and
+                    miner.state=="ADVANCE_MOVE" then
+                    if now()-(advance.lastSend or -10)>=3 then
+                        send(miner.id,{type="chunk_command",stage="MOVE_M",
+                            chunkIndex=advance.target,session=data.session})
+                        advance.lastSend=now()
+                    end
+                    advance.error="Waiting for miner-"..row.." to finish chunk movement"
+                    save()
+                    return
+                end
+            end
             if advanceStageDone(stage) then
                 data.advance=nil
                 save();flushManager(true)
