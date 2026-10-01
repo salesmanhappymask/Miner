@@ -111,7 +111,7 @@ end
 
 local function fmtPct(n, digits)
   n = tonumber(n) or 0
-  if tonumber(digits) == 0 then return string.format("%.0f%%", n) end
+  if digits == 0 then return string.format("%.0f%%", n) end
   return string.format("%.1f%%", n)
 end
 
@@ -233,7 +233,11 @@ local function makeUI(m)
   local function clearAll()
     setBg(C_BG)
     setFg(C_TEXT)
-    m.clear()
+    local line = string.rep(" ", w)
+    for y = 1, h do
+      m.setCursorPos(1, y)
+      m.write(line)
+    end
     cache = {}
     rectCache = {}
   end
@@ -534,7 +538,7 @@ end
 local function drawHeader()
   ui.rect(1, 1, W, 1, C_HEADER)
   ui.rect(1, 2, W, 1, C_DIV)
-  local title = "Reactor Control v2.7"
+  local title = "Reactor Control v2.8"
   ui.field("hdr_title", 1 + math.floor((W - #title) / 2), 1, #title, title, C_TEXT, C_HEADER)
   ui.field("hdr_brand", W - 5, 1, 5, "ZelOS", C_BRAND, C_HEADER)
 end
@@ -788,7 +792,7 @@ local function drawOverview(d)
         { "COOLANT", d.coolantMax ~= nil and fmtPct(d.coolantPct) or "N/A", d.coolantPct < 10 and C_BAD or C_TEXT },
         { "ROD BANK", fmtPct(d.rod, 0), C_TEXT },
         { "FUEL TEMP", fmtTemp(d.temp), C_TEXT },
-        { "FUEL USE", d.fuelUse ~= nil and string.format("%.4f MB/T", d.fuelUse) or "N/A", C_TEXT },
+        { "FUEL USE", d.fuelUse ~= nil and string.format("%.2f MB/T", d.fuelUse) or "N/A", C_TEXT },
       })
 
       drawStatCard("ov_tf", c2X, teleY, c2W, teleH, "TURBINE / GOVERNOR DETAIL", C_ACCENT, {
@@ -841,7 +845,7 @@ local function drawOverview(d)
       })
       drawStatCard("ov_f1", c2X, teleY, c2W, teleTopH, "FUEL DETAIL", C_ACCENT, {
         { "FUEL", formatAmount(d.fuel, "MB"), C_TEXT },
-        { "FUEL USE", d.fuelUse ~= nil and string.format("%.4f MB/T", d.fuelUse) or "N/A", C_TEXT },
+        { "FUEL USE", d.fuelUse ~= nil and string.format("%.2f MB/T", d.fuelUse) or "N/A", C_TEXT },
         { "WASTE", d.waste ~= nil and formatAmount(d.waste, "MB") or "N/A", C_TEXT },
         { "REACTIVITY", d.reactivity ~= nil and fmtPct(d.reactivity) or "N/A", C_TEXT },
       })
