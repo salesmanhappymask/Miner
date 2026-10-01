@@ -717,7 +717,7 @@ end
 local function drawHeader()
   ui.rect(1, 1, W, 1, C_HEADER)
   ui.rect(1, 2, W, 1, C_DIV)
-  local title = "Reactor Control v2.15"
+  local title = "Reactor Control v2.16"
   ui.field("hdr_title", 1 + math.floor((W - #title) / 2), 1, #title, title, C_TEXT, C_HEADER)
   ui.field("hdr_brand", W - 5, 1, 5, "ZelOS", C_BRAND, C_HEADER)
 end
@@ -879,51 +879,54 @@ end
 
 local function drawZelusLogo(x, y, w, h)
   if w < 8 or h < 8 then return end
-  local gold = IS_COLOR and colors.orange or colors.white
+  local gray = IS_COLOR and colors.gray or colors.white
+  local blue = IS_COLOR and colors.blue or colors.white
+  local lightBlue = IS_COLOR and colors.lightBlue or colors.white
+  local brown = IS_COLOR and colors.brown or colors.white
+  local orange = IS_COLOR and colors.orange or colors.white
+  local yellow = IS_COLOR and colors.yellow or colors.white
   local red = IS_COLOR and colors.red or colors.white
   local pink = IS_COLOR and colors.pink or colors.white
-  local blue = IS_COLOR and colors.blue or colors.white
-  local gray = IS_COLOR and colors.gray or colors.white
-  local lightGray = IS_COLOR and colors.lightGray or colors.white
-  local brown = IS_COLOR and colors.brown or colors.white
   local white = colors.white
 
   ui.rect(x, y, w, h, C_INSET)
 
   local pattern = {
-    "    BB        BB    ",
-    "   BKB        BKB   ",
-    "   GBBGGGGGGGGBBG   ",
-    "   GGRRRRAARRRRGG   ",
-    "  GGRRYYRRRRYYRRGG  ",
-    " GGRRRRRRKRRRRRRRGG ",
-    "GGGRRPPPRRRRPPPRRGGG",
-    "GGGRRWW      WWRRGGG",
-    " GGRR WWW  WWW RRGG ",
-    "  GGRR WWRRWW RRGG  ",
-    "   GGRRRRRRRRRRGG   ",
-    "    GGRRRRRRRRGG    ",
+    ".....KK......KK.....",
+    "....KBBK....KBBK....",
+    "...KBBbK....KbBBK...",
+    "...KBBBKKDDKKBBBK...",
+    "...KKBBdDYYDdBBKK...",
+    "...KRPPRPDDRRPPRK...",
+    "...KRddddRRddddRK...",
+    "..KKRDYOoRRoOYDRKK..",
+    "..KKPPRRDPRDRRPPKK..",
+    "KKKKRRPPPPrPPPRRKKKK",
+    "KWWWYOWWWWWWWWOYWWWK",
+    ".KKKKKBrrDDrrBKKKKK.",
+    "...KKBKKrrrrKKBKK...",
+    "...KBbKKKYYKKKbBK...",
+    "....KKKKKWWKKKKK....",
+    ".....KKK.KK.KKK.....",
   }
 
   local palette = {
     K = gray,
-    G = lightGray,
     B = blue,
-    A = gold,
+    b = lightBlue,
+    D = brown,
+    d = brown,
+    O = orange,
+    o = orange,
+    Y = yellow,
     R = red,
     P = pink,
+    r = red,
     W = white,
-    Y = gold,
   }
 
-  local maxArtW = 0
-  for i = 1, #pattern do
-    if #pattern[i] > maxArtW then maxArtW = #pattern[i] end
-  end
-
-  local artW = math.min(maxArtW, w)
-  local artH = math.min(#pattern, math.max(1, h - 2))
-  local drawY = y
+  local artH = math.min(#pattern, math.max(1, h - 1))
+  local drawY = y + math.max(0, math.floor((h - 1 - artH) / 2))
 
   for row = 1, artH do
     local line = pattern[row]
@@ -941,8 +944,91 @@ local function drawZelusLogo(x, y, w, h)
     end
   end
 
-  if h >= 3 then
-    ui.field("zelus_logo_name", x, y + h - 1, w, centerText("ZELUS", w), gold, C_INSET)
+  ui.field("zelus_logo_name", x, y + h - 1, w, centerText("ZELUS", w), orange, C_INSET)
+end
+
+local function drawIdleScreen()
+  local gray = IS_COLOR and colors.gray or colors.white
+  local blue = IS_COLOR and colors.blue or colors.white
+  local lightBlue = IS_COLOR and colors.lightBlue or colors.white
+  local brown = IS_COLOR and colors.brown or colors.white
+  local orange = IS_COLOR and colors.orange or colors.white
+  local yellow = IS_COLOR and colors.yellow or colors.white
+  local red = IS_COLOR and colors.red or colors.white
+  local pink = IS_COLOR and colors.pink or colors.white
+  local white = colors.white
+
+  local pattern = {
+    "......KK.......KK......",
+    ".....KBK.......KBK.....",
+    "....KBbK.......KbBK....",
+    "...KBBbK.......KbBBK...",
+    "...KBBbKKKDKKKbbBBK....",
+    "....KBBBBdDODdBBBBK....",
+    ".....KBBdDoYoDdBBK.....",
+    "....KRddRRDODRRddRK....",
+    "....KRPPPPPDRPPPPRK....",
+    "....KRdddddRdddddRK....",
+    "...KDRDYOoDRDoOYDRdK...",
+    "...KDRDDDoDRDoDDDRdK...",
+    "...KKPPRRDPRrDRRPPKK...",
+    ".K..KRRPPPPrrPPPRRK..K.",
+    "KWKKWYOWWWWdWWWWOYWKKWK",
+    ".KWWWYODDDWWWDDDOYWWWK.",
+    "..KKKKKBrrDDDrrBKKKKK..",
+    ".....KBbDrTtTrDbBK.....",
+    "....KBbKKDrOrDKKbBK....",
+    "....KBbK.KDYDK.KbBK....",
+    ".....KBbK.KWK.KbBK.....",
+    "......KKK.KWK.KKK......",
+    "...........K...........",
+  }
+
+  local palette = {
+    K = gray,
+    B = blue,
+    b = lightBlue,
+    D = brown,
+    d = brown,
+    O = orange,
+    o = orange,
+    Y = yellow,
+    R = red,
+    P = pink,
+    r = red,
+    W = white,
+    T = orange,
+    t = brown,
+  }
+
+  local sourceH = #pattern
+  local sourceW = #pattern[1]
+  local targetH = math.max(1, H - 4)
+  local targetW = math.min(W - 4, targetH * 2)
+  if targetW < 1 then targetW = 1 end
+  local startX = math.floor((W - targetW) / 2) + 1
+  local startY = math.floor((H - targetH) / 2) + 1
+
+  for dy = 0, targetH - 1 do
+    local sy = math.floor(dy * sourceH / targetH) + 1
+    local line = pattern[sy]
+    local runColor = nil
+    local runStart = 0
+    for dx = 0, targetW do
+      local color = nil
+      if dx < targetW then
+        local sx = math.floor(dx * sourceW / targetW) + 1
+        local ch = line:sub(sx, sx)
+        color = palette[ch]
+      end
+      if color ~= runColor then
+        if runColor and runColor ~= C_BG then
+          ui.rect(startX + runStart, startY + dy, dx - runStart, 1, runColor)
+        end
+        runColor = color
+        runStart = dx
+      end
+    end
   end
 end
 
@@ -958,30 +1044,34 @@ local function drawTaskbar(d)
     { "TURBINE CTRL", "turbine_manual", "tab_turbine_manual", C_RODS },
     { "ENERGY", "energy", "tab_energy", C_ACTION },
     { "ENERGY CTRL", "energy_control", "tab_energy_control", C_WARN },
+    { "IDLE", "idle", "tab_idle", C_BAD },
   }
 
   local logoH
   if H >= 40 then
-    logoH = 14
+    logoH = 18
   elseif H >= 34 then
-    logoH = 11
+    logoH = 14
   else
-    logoH = 8
+    logoH = 10
   end
 
   drawZelusLogo(2, 4, NAV_W - 2, logoH)
 
-  local statusTop = H - 8
+  local statusTop = H - 6
   local y = 4 + logoH + 1
   local available = statusTop - y
   local buttonH = 2
   local navGap = 1
   local needed = #items * buttonH + (#items - 1) * navGap
   if available < needed then
+    navGap = 0
+    needed = #items * buttonH
+  end
+  if available < needed then
     buttonH = 1
     needed = #items * buttonH + (#items - 1) * navGap
   end
-  if available < needed then navGap = 0 end
 
   for i = 1, #items do
     local item = items[i]
@@ -1619,23 +1709,29 @@ end
 local function draw()
   clearHotspots()
   ui.beginFrame()
-  local d = getSnapshot()
-  drawHeader()
-  drawTaskbar(d)
-  ui.field("hdr_state", 2, 1, 11, d.stateText, d.stateColor, C_HEADER)
-  if currentPage == "manual" then
-    drawManual(d)
-  elseif currentPage == "turbines" then
-    drawTurbines(d)
-  elseif currentPage == "turbine_manual" then
-    drawTurbineManual(d)
-  elseif currentPage == "energy" then
-    drawEnergy(d)
-  elseif currentPage == "energy_control" then
-    drawEnergyControl(d)
+
+  if currentPage == "idle" then
+    drawIdleScreen()
   else
-    drawOverview(d)
+    local d = getSnapshot()
+    drawHeader()
+    drawTaskbar(d)
+    ui.field("hdr_state", 2, 1, 11, d.stateText, d.stateColor, C_HEADER)
+    if currentPage == "manual" then
+      drawManual(d)
+    elseif currentPage == "turbines" then
+      drawTurbines(d)
+    elseif currentPage == "turbine_manual" then
+      drawTurbineManual(d)
+    elseif currentPage == "energy" then
+      drawEnergy(d)
+    elseif currentPage == "energy_control" then
+      drawEnergyControl(d)
+    else
+      drawOverview(d)
+    end
   end
+
   local force = forceFullRedraw
   forceFullRedraw = false
   lastRenderedPage = currentPage
@@ -2045,6 +2141,10 @@ local function applyAction(action)
   elseif action == "tab_energy_control" then
     currentPage = "energy_control"
     return
+  elseif action == "tab_idle" then
+    currentPage = "idle"
+    forceFullRedraw = true
+    return
   elseif action == "start" then
     r.setActive(true)
     return
@@ -2253,10 +2353,16 @@ local ok, err = pcall(function()
   while true do
     local event, a, b, c = os.pullEvent()
     if event == "monitor_touch" then
-      local action = hotspotActionAt(b, c)
-      if action then
-        applyAction(action)
+      if currentPage == "idle" then
+        currentPage = "overview"
+        forceFullRedraw = true
         draw()
+      else
+        local action = hotspotActionAt(b, c)
+        if action then
+          applyAction(action)
+          draw()
+        end
       end
     elseif event == "timer" and a == timerId then
       autoControl()
