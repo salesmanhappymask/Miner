@@ -108,24 +108,43 @@ local function clamp(n, a, b)
   return n
 end
 
+local function trimFixed(s)
+  s = tostring(s or "0")
+  s = s:gsub("(%..-)0+$", "%1")
+  s = s:gsub("%.$", "")
+  if s == "-0" then s = "0" end
+  return s
+end
+
+local function fmtFixed(n, digits)
+  n = tonumber(n) or 0
+  digits = math.max(0, math.floor(tonumber(digits) or 0))
+  return trimFixed(string.format("%." .. tostring(digits) .. "f", n))
+end
+
+local function fmtDisplayNumber(n)
+  n = tonumber(n) or 0
+  local a = math.abs(n)
+  if a >= 100 then return fmtFixed(n, 0) end
+  return fmtFixed(n, 1)
+end
+
 local function fmtPct(n, digits)
   n = tonumber(n) or 0
-  if digits == 0 then return string.format("%.0f%%", n) end
-  return string.format("%.1f%%", n)
+  if digits == 0 then return fmtFixed(n, 0) .. "%" end
+  return fmtFixed(n, 1) .. "%"
 end
 
 local function fmtTemp(n)
-  local s = string.format("%.1f C", tonumber(n) or 0)
-  s = s:gsub("%.0 C", " C")
-  return s
+  return fmtFixed(n, 1) .. " C"
 end
 
 local function formatRF(n)
   n = tonumber(n) or 0
   local a = math.abs(n)
-  if a >= 1000000 then return string.format("%.2f MRF", n / 1000000) end
-  if a >= 1000 then return string.format("%.1f KRF", n / 1000) end
-  return string.format("%d RF", math.floor(n + 0.5))
+  if a >= 1000000 then return fmtFixed(n / 1000000, 1) .. " MRF" end
+  if a >= 1000 then return fmtFixed(n / 1000, 1) .. " KRF" end
+  return fmtFixed(n, 0) .. " RF"
 end
 
 local function formatRFPerTick(n)
@@ -137,11 +156,26 @@ local function formatAmount(n, suffix)
   local a = math.abs(n)
   local out
   if a >= 1000000 then
-    out = string.format("%.2fM", n / 1000000)
+    out = fmtFixed(n / 1000000, 1) .. "M"
   elseif a >= 1000 then
-    out = string.format("%.1fK", n / 1000)
+    out = fmtFixed(n / 1000, 1) .. "K"
   else
-    out = string.format("%d", math.floor(n + 0.5))
+    out = fmtFixed(n, 0)
+  end
+  if suffix and suffix ~= "" then out = out .. " " .. suffix end
+  return out
+end
+
+local function formatSmallRate(n, suffix)
+  n = tonumber(n) or 0
+  local a = math.abs(n)
+  local out
+  if a > 0 and a < 0.01 then
+    out = "<0.01"
+  elseif a < 10 then
+    out = fmtFixed(n, 2)
+  else
+    out = fmtFixed(n, 1)
   end
   if suffix and suffix ~= "" then out = out .. " " .. suffix end
   return out
@@ -157,7 +191,7 @@ end
 local function signedPct(n)
   n = tonumber(n) or 0
   if math.abs(n) < 0.05 then return "0.0%" end
-  return string.format("%+.1f%%", n)
+  return (n > 0 and "+" or "") .. fmtFixed(n, 1) .. "%"
 end
 
 local function roundNearest(n)
@@ -242,7 +276,7 @@ local function makeUI(m)
     local x2 = clamp(x + ww - 1, 1, w)
     local visibleW = x2 - x1 + 1
     if visibleW <= 0 then return end
-    s = tostring(s or "")
+    if type(s) == "number" then s = fmtDisplayNumber(s) else s = tostring(s or "") end
     if x < 1 then s = s:sub(2 - x) end
     s = fitText(s, visibleW)
     local out = s .. string.rep(" ", visibleW - #s)
@@ -663,7 +697,7 @@ end
 local function drawHeader()
   ui.rect(1, 1, W, 1, C_HEADER)
   ui.rect(1, 2, W, 1, C_DIV)
-  local title = "Reactor Control v2.10"
+  local title = "Reactor Control v2.11"
   ui.field("hdr_title", 1 + math.floor((W - #title) / 2), 1, #title, title, C_TEXT, C_HEADER)
   ui.field("hdr_brand", W - 5, 1, 5, "ZelOS", C_BRAND, C_HEADER)
 end
@@ -678,7 +712,7 @@ end
 local function kv(key, x, y, width, label, value, valueColor)
   if width <= 0 then return end
   local labelText = string.upper(tostring(label or "")) .. ":"
-  local valueText = tostring(value or "")
+  local valueText = type(value) == "number" and fmtDisplayNumber(value) or tostring(value or "")
   local labelW = math.min(#labelText, width)
   if #labelText + 1 + #valueText > width and width >= 8 then
     local valueNeed = math.min(#valueText, math.max(3, math.floor(width * 0.58)))
@@ -914,7 +948,7 @@ local function drawOverview(d)
         { "COOLANT", d.coolantMax ~= nil and fmtPct(d.coolantPct) or "N/A", d.coolantPct < 10 and C_BAD or C_TEXT },
         { "ROD BANK", fmtPct(d.rod, 0), C_TEXT },
         { "FUEL TEMP", fmtTemp(d.temp), C_TEXT },
-        { "FUEL USE", d.fuelUse ~= nil and string.format("%.2f MB/T", d.fuelUse) or "N/A", C_TEXT },
+        { "FUEL USE", d.fuelUse ~= nil and formatSmallRate(d.fuelUse, "MB/T") or "N/A", C_TEXT },
       })
 
       drawStatCard("ov_tf", c2X, teleY, c2W, teleH, "TURBINE / GOVERNOR DETAIL", C_ACCENT, {
@@ -967,7 +1001,7 @@ local function drawOverview(d)
       })
       drawStatCard("ov_f1", c2X, teleY, c2W, teleTopH, "FUEL DETAIL", C_ACCENT, {
         { "FUEL", formatAmount(d.fuel, "MB"), C_TEXT },
-        { "FUEL USE", d.fuelUse ~= nil and string.format("%.2f MB/T", d.fuelUse) or "N/A", C_TEXT },
+        { "FUEL USE", d.fuelUse ~= nil and formatSmallRate(d.fuelUse, "MB/T") or "N/A", C_TEXT },
         { "WASTE", d.waste ~= nil and formatAmount(d.waste, "MB") or "N/A", C_TEXT },
         { "REACTIVITY", d.reactivity ~= nil and fmtPct(d.reactivity) or "N/A", C_TEXT },
       })
@@ -979,7 +1013,7 @@ local function drawOverview(d)
           { "INTERVAL", string.format("%d S", checkInterval), C_TEXT },
         })
         drawStatCard("ov_c1", c2X, teleY + teleTopH + 1, c2W, teleBotH, "CONTROL DETAIL", C_ACCENT, {
-          { "KP / KD", string.format("%.2f / %.1f", kp, kd), C_TEXT },
+          { "KP / KD", fmtFixed(kp, 2) .. " / " .. fmtFixed(kd, 1), C_TEXT },
           { "DANGER CAP", fmtPct(dangerCap, 0), C_TEXT },
           { "SENS ZONE", fmtPct(sensitiveZoneStart, 0) .. "+", C_TEXT },
           { "RATE", signedPct(lastControlRate), C_TEXT },
@@ -1073,9 +1107,9 @@ local function drawManual(d)
   sectionTitle("m_cfg_t", rightX, row3Y, rightW, "LOOP INTERVAL")
   kv("m_cfg1", rightX + 3, row3Y + 2, rightW - 5, "CHECK INTERVAL", tostring(checkInterval) .. " S", C_TEXT)
   if d.activeCooled then
-    kv("m_cfg2", rightX + 3, row3Y + 3, rightW - 5, "STEAM PID", string.format("P %.2f  I %.2f  D %.2f", steamProductionKp, steamProductionKi, steamProductionKd), C_TEXT)
+    kv("m_cfg2", rightX + 3, row3Y + 3, rightW - 5, "STEAM PID", "P " .. fmtFixed(steamProductionKp, 2) .. "  I " .. fmtFixed(steamProductionKi, 2) .. "  D " .. fmtFixed(steamProductionKd, 2), C_TEXT)
   else
-    kv("m_cfg2", rightX + 3, row3Y + 3, rightW - 5, "TUNING", string.format("KP %.2f   KD %.1f", kp, kd), C_TEXT)
+    kv("m_cfg2", rightX + 3, row3Y + 3, rightW - 5, "TUNING", "KP " .. fmtFixed(kp, 2) .. "   KD " .. fmtFixed(kd, 1), C_TEXT)
   end
   drawButtonRow("m_ipre", rightX + 2, row3Y + 4, rightW - 4,
     { "1S", "2S", "5S", "10S", "-1S", "+1S" },
@@ -1215,7 +1249,7 @@ local function drawTurbines(d)
   if detailH >= 5 then
     local d1W, d2X, d2W = splitTwo(outerX, outerW, 2)
     drawStatCard("ti_gov", outerX, detailY, d1W, detailH, "GOVERNOR DETAIL", C_ACCENT, {
-      { "RPM RATE", string.format("%+.1f RPM/C", t.rpmRate or 0), C_TEXT },
+      { "RPM RATE", ((t.rpmRate or 0) >= 0 and "+" or "") .. fmtFixed(t.rpmRate or 0, 1) .. " RPM/C", C_TEXT },
       { "FLOW STEP", string.format("%+.0f MB/T", t.lastFlowStep or 0), C_TEXT },
       { "FLOW LIMIT", formatAmount(t.flowLimit, "MB/T"), C_TEXT },
       { "MAX FLOW", formatAmount(t.flowLimitMax, "MB/T"), C_TEXT },
@@ -1271,7 +1305,7 @@ local function drawTurbineManual(d)
   cardSurface(rightX, row2Y, rightW, rowH, C_ACCENT)
   sectionTitle("tc_rpmp_t", rightX, row2Y, rightW, "RPM PRESETS")
   kv("tc_rpmp_v", rightX + 3, row2Y + 2, rightW - 5, "DEADBAND", string.format("+/- %d RPM", rpmDeadband), C_TEXT)
-  kv("tc_rpmp_pid", rightX + 3, row2Y + 3, rightW - 5, "PID", string.format("P %.2f  I %.2f  D %.1f", rpmKp, rpmKi, rpmKd), C_TEXT)
+  kv("tc_rpmp_pid", rightX + 3, row2Y + 3, rightW - 5, "PID", "P " .. fmtFixed(rpmKp, 2) .. "  I " .. fmtFixed(rpmKi, 2) .. "  D " .. fmtFixed(rpmKd, 1), C_TEXT)
   drawButtonRow("tc_rpmp", rightX + 2, row2Y + 4, rightW - 4,
     { "900 RPM", "1800 RPM" },
     { "rpmset_900", "rpmset_1800" }, { C_BRAND, C_BRAND })
