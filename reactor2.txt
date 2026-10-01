@@ -108,18 +108,38 @@ local function clamp(n, a, b)
   return n
 end
 
-local function trimFixed(s)
-  s = tostring(s or "0")
-  s = s:gsub("(%..-)0+$", "%1")
-  s = s:gsub("%.$", "")
-  if s == "-0" then s = "0" end
-  return s
-end
-
 local function fmtFixed(n, digits)
   n = tonumber(n) or 0
   digits = math.max(0, math.floor(tonumber(digits) or 0))
-  return trimFixed(string.format("%." .. tostring(digits) .. "f", n))
+  if n ~= n or n == math.huge or n == -math.huge then return "0" end
+  local scale = 1
+  for i = 1, digits do scale = scale * 10 end
+  local scaled
+  if n >= 0 then
+    scaled = math.floor(n * scale + 0.5)
+  else
+    scaled = math.ceil(n * scale - 0.5)
+  end
+  local negative = scaled < 0
+  if negative then scaled = -scaled end
+  local whole = math.floor(scaled / scale)
+  local sign = negative and "-" or ""
+  if digits == 0 then return sign .. tostring(whole) end
+  local frac = math.floor(scaled - whole * scale)
+  if frac == 0 then return sign .. tostring(whole) end
+  local fracText = tostring(frac)
+  while #fracText < digits do fracText = "0" .. fracText end
+  fracText = fracText:gsub("0+$", "")
+  return sign .. tostring(whole) .. "." .. fracText
+end
+
+local function compactDecimalsInText(s)
+  s = tostring(s or "")
+  return (s:gsub("([%+%-]?%d+%.%d%d%d+)", function(token)
+    local n = tonumber(token)
+    if n == nil then return token end
+    return fmtFixed(n, 1)
+  end))
 end
 
 local function fmtDisplayNumber(n)
@@ -276,7 +296,7 @@ local function makeUI(m)
     local x2 = clamp(x + ww - 1, 1, w)
     local visibleW = x2 - x1 + 1
     if visibleW <= 0 then return end
-    if type(s) == "number" then s = fmtDisplayNumber(s) else s = tostring(s or "") end
+    if type(s) == "number" then s = fmtDisplayNumber(s) else s = compactDecimalsInText(s) end
     if x < 1 then s = s:sub(2 - x) end
     s = fitText(s, visibleW)
     local out = s .. string.rep(" ", visibleW - #s)
@@ -697,7 +717,7 @@ end
 local function drawHeader()
   ui.rect(1, 1, W, 1, C_HEADER)
   ui.rect(1, 2, W, 1, C_DIV)
-  local title = "Reactor Control v2.12"
+  local title = "Reactor Control v2.13"
   ui.field("hdr_title", 1 + math.floor((W - #title) / 2), 1, #title, title, C_TEXT, C_HEADER)
   ui.field("hdr_brand", W - 5, 1, 5, "ZelOS", C_BRAND, C_HEADER)
 end
@@ -863,23 +883,25 @@ local function drawZelusLogo(x, y, w, h)
   local red = IS_COLOR and colors.red or colors.white
   local blue = IS_COLOR and colors.blue or colors.white
   local white = colors.white
-  ui.rect(x, y, w, h, gold)
   ui.rect(x + 1, y + 1, w - 2, h - 2, C_INSET)
+  ui.rect(x, y, w, 1, gold)
+  ui.rect(x, y + h - 1, w, 1, gold)
+  ui.rect(x, y, 1, h, gold)
+  ui.rect(x + w - 1, y, 1, h, gold)
 
   local pattern = {
-    " GG         GG ",
-    " GGRR     RRGG ",
-    "  RRRBBBBBRRR  ",
+    " RR         RR ",
+    " RRR BBBBB RRR ",
     " RRRWWRRRWWRRR ",
     " RRRR RRR RRRR ",
     "  RRRRRRRRRRR  ",
     "   RR WWW RR   ",
-    "    WW   WW    ",
+    "   WW     WW   ",
   }
-  local palette = { G = gold, R = red, B = blue, W = white }
+  local palette = { R = red, B = blue, W = white }
   local innerW = w - 2
   local artW = math.min(15, innerW)
-  local artRows = math.min(#pattern, math.max(1, h - 3))
+  local artRows = math.min(#pattern, math.max(1, h - 4))
   local sourceStart = math.floor((15 - artW) / 2) + 1
   local drawX = x + 1 + math.floor((innerW - artW) / 2)
   local drawY = y + 1
