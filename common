@@ -1,4 +1,4 @@
-VERSION = 150
+VERSION = 151
 PROTOCOL = "miner_swarm_v121"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
@@ -656,7 +656,10 @@ function inventorySnapshot(inv)
         end
     end
 
-    local size=inv.getInventorySize()
+    local sizeOk,size=pcall(inv.getInventorySize)
+    if not sizeOk or type(size)~="number" then
+        return nil
+    end
     local items={}
 
     for slot=1,size do

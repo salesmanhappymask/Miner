@@ -3950,6 +3950,13 @@ local function runRegionalManager()
             beginRecall("SHUTDOWN")
         elseif command=="6" then
             if data.commissioningComplete then
+                if not data.installerConsolidationComplete then
+                    chunkBlockReason="Pack requires Foreman installer disks/drives to be consolidated first"
+                    save()
+                    drawTerminal()
+                    drawMonitor()
+                    return
+                end
                 if data.recall.mode=="PACK" or data.recall.mode=="SHUTDOWN" then
                     return
                 elseif data.recall.mode=="NORMAL" then
