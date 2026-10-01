@@ -717,7 +717,7 @@ end
 local function drawHeader()
   ui.rect(1, 1, W, 1, C_HEADER)
   ui.rect(1, 2, W, 1, C_DIV)
-  local title = "Reactor Control v2.14"
+  local title = "Reactor Control v2.15"
   ui.field("hdr_title", 1 + math.floor((W - #title) / 2), 1, #title, title, C_TEXT, C_HEADER)
   ui.field("hdr_brand", W - 5, 1, 5, "ZelOS", C_BRAND, C_HEADER)
 end
@@ -891,32 +891,29 @@ local function drawZelusLogo(x, y, w, h)
   ui.rect(x, y, w, h, C_INSET)
 
   local pattern = {
-    "     K      K     ",
-    "   KBK      KBK   ",
-    "   KBSKKKKKKSBK   ",
-    "    KBMDAADMBK    ",
-    "   KRMRRDDRRMRK   ",
-    "   KRMMMMMMMMRK   ",
-    "  KDRDDADDADDRMK  ",
-    " K KRPPPPRPPPRK K ",
-    " KWWYDDDWWDDDYWWK ",
-    "  KKKBrrDDrrBKKK  ",
-    "   KBKKDrrDKKBK   ",
-    "    KSK KK KSK    ",
+    "    BB        BB    ",
+    "   BKB        BKB   ",
+    "   GBBGGGGGGGGBBG   ",
+    "   GGRRRRAARRRRGG   ",
+    "  GGRRYYRRRRYYRRGG  ",
+    " GGRRRRRRKRRRRRRRGG ",
+    "GGGRRPPPRRRRPPPRRGGG",
+    "GGGRRWW      WWRRGGG",
+    " GGRR WWW  WWW RRGG ",
+    "  GGRR WWRRWW RRGG  ",
+    "   GGRRRRRRRRRRGG   ",
+    "    GGRRRRRRRRGG    ",
   }
 
   local palette = {
     K = gray,
+    G = lightGray,
     B = blue,
-    S = lightGray,
-    D = brown,
-    M = red,
     A = gold,
     R = red,
     P = pink,
     W = white,
     Y = gold,
-    r = red,
   }
 
   local maxArtW = 0
