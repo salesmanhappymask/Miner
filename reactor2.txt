@@ -717,7 +717,7 @@ end
 local function drawHeader()
   ui.rect(1, 1, W, 1, C_HEADER)
   ui.rect(1, 2, W, 1, C_DIV)
-  local title = "Reactor Control v2.16"
+  local title = "Reactor Control v2.17"
   ui.field("hdr_title", 1 + math.floor((W - #title) / 2), 1, #title, title, C_TEXT, C_HEADER)
   ui.field("hdr_brand", W - 5, 1, 5, "ZelOS", C_BRAND, C_HEADER)
 end
@@ -1736,7 +1736,6 @@ local function draw()
   forceFullRedraw = false
   lastRenderedPage = currentPage
   ui.flush(force)
-  sleep(0)
 end
 
 local function getControlEnergy()
@@ -2341,13 +2340,20 @@ local function hotspotActionAt(x, y)
   return nil
 end
 
+local function restartRefreshTimer()
+  if timerId ~= nil and os.cancelTimer then
+    pcall(os.cancelTimer, timerId)
+  end
+  timerId = os.startTimer(checkInterval)
+end
+
 discoverTurbines()
 discoverEnergyCells()
 updateChargeState(getEnergyBankSnapshot(callOptional("isActivelyCooled") == true, getTurbineFleet()))
 primePlantTelemetry()
 updateStorageDelta()
 draw()
-timerId = os.startTimer(checkInterval)
+restartRefreshTimer()
 
 local ok, err = pcall(function()
   while true do
@@ -2357,18 +2363,20 @@ local ok, err = pcall(function()
         currentPage = "overview"
         forceFullRedraw = true
         draw()
+        restartRefreshTimer()
       else
         local action = hotspotActionAt(b, c)
         if action then
           applyAction(action)
           draw()
+          restartRefreshTimer()
         end
       end
     elseif event == "timer" and a == timerId then
       autoControl()
       updateStorageDelta()
       draw()
-      timerId = os.startTimer(checkInterval)
+      restartRefreshTimer()
     end
   end
 end)
