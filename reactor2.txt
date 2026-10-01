@@ -697,7 +697,7 @@ end
 local function drawHeader()
   ui.rect(1, 1, W, 1, C_HEADER)
   ui.rect(1, 2, W, 1, C_DIV)
-  local title = "Reactor Control v2.11"
+  local title = "Reactor Control v2.12"
   ui.field("hdr_title", 1 + math.floor((W - #title) / 2), 1, #title, title, C_TEXT, C_HEADER)
   ui.field("hdr_brand", W - 5, 1, 5, "ZelOS", C_BRAND, C_HEADER)
 end
@@ -857,11 +857,51 @@ local function drawMeterCard(key, x, y, ww, hh, title, label, detail, pct, fillC
   drawBar(x + 2, y + 3, ww - 4, pct, fillColor)
 end
 
+local function drawZelusLogo(x, y, w, h)
+  if w < 5 or h < 5 then return end
+  local gold = IS_COLOR and colors.orange or colors.white
+  local red = IS_COLOR and colors.red or colors.white
+  local blue = IS_COLOR and colors.blue or colors.white
+  local white = colors.white
+  ui.rect(x, y, w, h, gold)
+  ui.rect(x + 1, y + 1, w - 2, h - 2, C_INSET)
+
+  local pattern = {
+    " GG         GG ",
+    " GGRR     RRGG ",
+    "  RRRBBBBBRRR  ",
+    " RRRWWRRRWWRRR ",
+    " RRRR RRR RRRR ",
+    "  RRRRRRRRRRR  ",
+    "   RR WWW RR   ",
+    "    WW   WW    ",
+  }
+  local palette = { G = gold, R = red, B = blue, W = white }
+  local innerW = w - 2
+  local artW = math.min(15, innerW)
+  local artRows = math.min(#pattern, math.max(1, h - 3))
+  local sourceStart = math.floor((15 - artW) / 2) + 1
+  local drawX = x + 1 + math.floor((innerW - artW) / 2)
+  local drawY = y + 1
+
+  for row = 1, artRows do
+    local line = pattern[row]
+    for col = 1, artW do
+      local ch = line:sub(sourceStart + col - 1, sourceStart + col - 1)
+      local color = palette[ch]
+      if color then ui.rect(drawX + col - 1, drawY + row - 1, 1, 1, color) end
+    end
+  end
+
+  if h >= 10 then
+    ui.field("zelus_logo_name", x + 1, y + h - 2, w - 2, centerText("ZELUS", w - 2), gold, C_INSET)
+  end
+end
+
 local function drawTaskbar(d)
   ui.rect(1, 3, NAV_W, H - 2, C_DIV)
   ui.rect(2, 3, NAV_W - 2, H - 2, C_INSET)
   ui.rect(NAV_W, 3, 1, H - 2, C_ACCENT)
-  ui.field("nav_title", 3, 4, NAV_W - 5, "PLANT MENU", C_MUTED, C_INSET)
 
   local items = {
     { "OVERVIEW", "overview", "tab_overview", C_BRAND },
@@ -872,16 +912,37 @@ local function drawTaskbar(d)
     { "ENERGY CTRL", "energy_control", "tab_energy_control", C_WARN },
   }
 
-  local y = 6
+  local logoH
+  if H >= 40 then
+    logoH = 11
+  elseif H >= 34 then
+    logoH = 8
+  else
+    logoH = 6
+  end
+
+  drawZelusLogo(3, 4, NAV_W - 5, logoH)
+
+  local statusTop = H - 8
+  local y = 4 + logoH + 1
+  local available = statusTop - y
+  local buttonH = 2
+  local navGap = 1
+  local needed = #items * buttonH + (#items - 1) * navGap
+  if available < needed then
+    buttonH = 1
+    needed = #items * buttonH + (#items - 1) * navGap
+  end
+  if available < needed then navGap = 0 end
+
   for i = 1, #items do
     local item = items[i]
     local active = currentPage == item[2]
     local bg = active and item[4] or C_DIV
-    drawButton("nav_" .. tostring(i), 3, y, NAV_W - 5, 3, item[1], bg, C_TEXT, item[3])
-    y = y + 4
+    drawButton("nav_" .. tostring(i), 3, y, NAV_W - 5, buttonH, item[1], bg, C_TEXT, item[3])
+    y = y + buttonH + navGap
   end
 
-  local statusTop = H - 8
   if statusTop > y then
     ui.field("nav_status_t", 3, statusTop, NAV_W - 5, "PLANT STATUS", C_MUTED, C_INSET)
     ui.field("nav_auto", 3, statusTop + 2, NAV_W - 5, autoEnabled and "AUTO ENABLED" or "AUTO MANUAL", autoEnabled and C_OK or C_WARN, C_INSET)
