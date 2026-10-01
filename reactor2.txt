@@ -74,12 +74,11 @@ local lastSteamBufferPct = 0
 local plantControlState = "IDLE"
 local timerId = nil
 local hotspots = {}
-local barCache = {}
 
 local NAV_W = math.max(18, math.min(22, math.floor(W * 0.20)))
 local CONTENT_X = NAV_W + 2
 local CONTENT_W = W - CONTENT_X
-local CONTENT_TOP = 3
+local CONTENT_TOP = 4
 local CONTENT_BOTTOM = H - 1
 
 local function supportsColor(m)
@@ -178,8 +177,17 @@ end
 
 local function makeUI(m)
   local w, h = m.getSize()
-  local cache = {}
-  local rectCache = {}
+  local total = w * h
+  local frameChars = {}
+  local frameFg = {}
+  local frameBg = {}
+  local prevChars = {}
+  local prevFg = {}
+  local prevBg = {}
+
+  local function indexOf(x, y)
+    return (y - 1) * w + x
+  end
 
   local function setBg(bg)
     if IS_COLOR then m.setBackgroundColor(bg) else m.setBackgroundColor(colors.black) end
@@ -189,6 +197,17 @@ local function makeUI(m)
     if IS_COLOR then m.setTextColor(fg) else m.setTextColor(colors.white) end
   end
 
+  local function beginFrame()
+    frameChars = {}
+    frameFg = {}
+    frameBg = {}
+    for i = 1, total do
+      frameChars[i] = " "
+      frameFg[i] = C_TEXT
+      frameBg[i] = C_BG
+    end
+  end
+
   local function rect(x, y, ww, hh, bg)
     if ww <= 0 or hh <= 0 then return end
     local x1 = clamp(x, 1, w)
@@ -196,15 +215,14 @@ local function makeUI(m)
     local x2 = clamp(x + ww - 1, 1, w)
     local y2 = clamp(y + hh - 1, 1, h)
     if x2 < x1 or y2 < y1 then return end
-    local rk = table.concat({ x1, y1, x2, y2 }, ":")
-    if rectCache[rk] == bg then return end
-    setBg(bg)
-    local line = string.rep(" ", x2 - x1 + 1)
     for yy = y1, y2 do
-      m.setCursorPos(x1, yy)
-      m.write(line)
+      for xx = x1, x2 do
+        local i = indexOf(xx, yy)
+        frameChars[i] = " "
+        frameFg[i] = C_TEXT
+        frameBg[i] = bg
+      end
     end
-    rectCache[rk] = bg
   end
 
   local function field(key, x, y, ww, s, fg, bg)
@@ -217,32 +235,60 @@ local function makeUI(m)
     if x < 1 then s = s:sub(2 - x) end
     if #s > visibleW then s = s:sub(1, visibleW) end
     local out = s .. string.rep(" ", visibleW - #s)
-    local k1 = key .. "_out"
-    local k2 = key .. "_fg"
-    local k3 = key .. "_bg"
-    if cache[k1] == out and cache[k2] == fg and cache[k3] == bg then return end
-    setBg(bg or C_BG)
-    setFg(fg or C_TEXT)
-    m.setCursorPos(x1, y)
-    m.write(out)
-    cache[k1] = out
-    cache[k2] = fg
-    cache[k3] = bg
+    local useFg = fg or C_TEXT
+    local useBg = bg or C_BG
+    for n = 1, visibleW do
+      local i = indexOf(x1 + n - 1, y)
+      frameChars[i] = out:sub(n, n)
+      frameFg[i] = useFg
+      frameBg[i] = useBg
+    end
+  end
+
+  local function invalidate()
+    prevChars = {}
+    prevFg = {}
+    prevBg = {}
+  end
+
+  local function flush(force)
+    for y = 1, h do
+      local x = 1
+      while x <= w do
+        local i = indexOf(x, y)
+        local changed = force or prevChars[i] ~= frameChars[i] or prevFg[i] ~= frameFg[i] or prevBg[i] ~= frameBg[i]
+        if changed then
+          local fg = frameFg[i]
+          local bg = frameBg[i]
+          local startX = x
+          local chars = {}
+          while x <= w do
+            local j = indexOf(x, y)
+            local cellChanged = force or prevChars[j] ~= frameChars[j] or prevFg[j] ~= frameFg[j] or prevBg[j] ~= frameBg[j]
+            if not cellChanged or frameFg[j] ~= fg or frameBg[j] ~= bg then break end
+            chars[#chars + 1] = frameChars[j]
+            prevChars[j] = frameChars[j]
+            prevFg[j] = frameFg[j]
+            prevBg[j] = frameBg[j]
+            x = x + 1
+          end
+          setBg(bg)
+          setFg(fg)
+          m.setCursorPos(startX, y)
+          m.write(table.concat(chars))
+        else
+          x = x + 1
+        end
+      end
+    end
   end
 
   local function clearAll()
-    setBg(C_BG)
-    setFg(C_TEXT)
-    local line = string.rep(" ", w)
-    for y = 1, h do
-      m.setCursorPos(1, y)
-      m.write(line)
-    end
-    cache = {}
-    rectCache = {}
+    invalidate()
   end
 
-  return { w = w, h = h, rect = rect, field = field, clearAll = clearAll }
+  beginFrame()
+  return { w = w, h = h, rect = rect, field = field, clearAll = clearAll, beginFrame = beginFrame, flush = flush, invalidate = invalidate }
 end
 
 local ui = makeUI(mon)
@@ -538,7 +584,7 @@ end
 local function drawHeader()
   ui.rect(1, 1, W, 1, C_HEADER)
   ui.rect(1, 2, W, 1, C_DIV)
-  local title = "Reactor Control v2.8"
+  local title = "Reactor Control v2.9"
   ui.field("hdr_title", 1 + math.floor((W - #title) / 2), 1, #title, title, C_TEXT, C_HEADER)
   ui.field("hdr_brand", W - 5, 1, 5, "ZelOS", C_BRAND, C_HEADER)
 end
@@ -566,15 +612,8 @@ local function drawBar(x, y, width, percent, fillColor)
   if width <= 0 then return end
   percent = clamp(percent or 0, 0, 100)
   local filled = clamp(math.floor(width * percent / 100 + 0.5), 0, width)
-  local key = table.concat({ x, y, width, tostring(fillColor) }, ":")
-  if barCache[key] == filled then return end
-  mon.setCursorPos(x, y)
-  mon.setBackgroundColor(fillColor)
-  if filled > 0 then mon.write(string.rep(" ", filled)) end
-  mon.setBackgroundColor(C_DIV)
-  if width - filled > 0 then mon.write(string.rep(" ", width - filled)) end
-  mon.setBackgroundColor(C_BG)
-  barCache[key] = filled
+  if filled > 0 then ui.rect(x, y, filled, 1, fillColor) end
+  if width - filled > 0 then ui.rect(x + filled, y, width - filled, 1, C_DIV) end
 end
 
 local function drawButton(key, x, y, ww, hh, text, bg, fg, action)
@@ -1347,12 +1386,7 @@ end
 
 local function draw()
   clearHotspots()
-  if forceFullRedraw or lastRenderedPage ~= currentPage then
-    ui.clearAll()
-    barCache = {}
-    lastRenderedPage = currentPage
-    forceFullRedraw = false
-  end
+  ui.beginFrame()
   local d = getSnapshot()
   drawHeader()
   drawTaskbar(d)
@@ -1370,6 +1404,10 @@ local function draw()
   else
     drawOverview(d)
   end
+  local force = forceFullRedraw
+  forceFullRedraw = false
+  lastRenderedPage = currentPage
+  ui.flush(force)
   sleep(0)
 end
 
