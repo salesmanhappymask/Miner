@@ -1246,6 +1246,9 @@ local function runMiner(cfg)
                                 send(cfg.managerId,{type="chunk_ack",role="miner",
                                     row=cfg.row,stage="MOVE_M",chunkIndex=target,
                                     session=cfg.session})
+                            elseif target==state.chunkIndex and message.stage=="MOVE_M" and
+                                state.advanceStage=="MOVE" then
+                                flags.advanceCommand={stage="MOVE_M",target=target}
                             elseif target and target==state.chunkIndex+1 and
                                 (message.stage=="COLLECT_M" or message.stage=="MOVE_M") then
                                 flags.advanceCommand={stage=message.stage,target=target}
@@ -4471,9 +4474,11 @@ local function runMiner(cfg)
                     if not digForward() and flags.recallMode then
                         if not handleRecallRequest() then return end
                     end
+                    sleep(0)
                 end
 
                 clearMiningColumn()
+                sleep(0)
 
                 if descendMiningBand()==0 then
                     if not finishMining() then return end
@@ -4513,9 +4518,11 @@ local function runMiner(cfg)
                     if not digForward() and flags.recallMode then
                         if not handleRecallRequest() then return end
                     end
+                    sleep(0)
                 end
 
                 clearMiningColumn()
+                sleep(0)
 
                 if descendMiningBand()==0 then
                     if not finishMining() then return end

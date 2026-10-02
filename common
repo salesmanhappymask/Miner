@@ -1,4 +1,4 @@
-VERSION = 151
+VERSION = 152
 PROTOCOL = "miner_swarm_v121"
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
@@ -261,7 +261,7 @@ function debugLog(category,message,severity)
     if debugRole~="regional_manager" then
         debugRemoteBuffer[#debugRemoteBuffer+1]=line
         if #debugRemoteBuffer>48 then table.remove(debugRemoteBuffer,1) end
-        debugSendBuffer(severity=="ERROR" or severity=="WARN")
+        debugSendBuffer(severity=="ERROR")
     end
 end
 
@@ -356,13 +356,15 @@ end
 
 if turtle then
     local actions={"forward","back","up","down","turnLeft","turnRight","dig","digUp","digDown","place","placeUp","placeDown","attack","attackUp","attackDown","suck","suckUp","suckDown","drop","dropUp","dropDown","select","transferTo","refuel","equipLeft","equipRight","craft","inspect","inspectUp","inspectDown","detect","detectUp","detectDown","compare","compareUp","compareDown","compareTo"}
+    local warnFalse={forward=true,back=true,up=true,down=true,place=true,placeUp=true,placeDown=true,equipLeft=true,equipRight=true,craft=true}
     for _,name in ipairs(actions) do
         local raw=debugRawTurtle[name]
         if raw then
             turtle[name]=function(...)
                 debugLog("TURTLE","CALL "..name.."("..debugArgs(...)..")","INFO")
                 local results={raw(...)}
-                debugLog("TURTLE","RETURN "..name.." -> "..debugArgs(unpack(results)),results[1]==false and "WARN" or "INFO")
+                local severity=results[1]==false and warnFalse[name] and "WARN" or "INFO"
+                debugLog("TURTLE","RETURN "..name.." -> "..debugArgs(unpack(results)),severity)
                 return unpack(results)
             end
         end
@@ -1529,6 +1531,7 @@ function travelChunkNorth(state,save,face,baseZ,targetIndex,origin,abortCheck,cl
         state.seq=(tonumber(state.seq) or 0)+1
         state.chunkMoveIntent=nil
         save()
+        sleep(0)
         if cancelled() then return false,"Chunk move cancelled" end
     end
     verified,reason=verifyWorld()

@@ -5502,12 +5502,24 @@ local function runForeman(cfg)
                 now()>=nextIdleFuelAttempt then
                 local low=turtle.getFuelLevel()~="unlimited" and
                     (turtle.getFuelLevel()<=FOREMAN_FUEL_LOW or state.fuelPending)
-                local excess=selfCount("empty_bucket")>0 or
-                    selfCount("lava_bucket")>0 or selfCount("blaze_rod")>0 or
-                    selfCount("charcoal")>0 or selfCount("coal")>0
+                local excess=false
+                if not low then
+                    local inv=getSelfInventory()
+                    local items=inv and inventorySnapshot(inv) or {}
+                    for _,item in pairs(items) do
+                        if matchesItem(item,"empty_bucket") or matchesItem(item,"lava_bucket") or
+                            matchesItem(item,"blaze_rod") or matchesItem(item,"charcoal") or
+                            matchesItem(item,"coal") then
+                            excess=true
+                            break
+                        end
+                    end
+                end
                 if low or excess then
                     local fueled=low and loadOwnFuel() or returnUnusedFuel()
                     nextIdleFuelAttempt=now()+(fueled and 10 or 30)
+                else
+                    nextIdleFuelAttempt=now()+30
                 end
             end
 
