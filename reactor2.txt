@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-=======
--- version 5
-
->>>>>>> f2ddb4b20b586de0e42b8f89928bfdab0ad03b9d
 local function wrapThis(name)
   local w, i = nil, 0
   while w == nil and i <= 100 do
@@ -29,6 +24,11 @@ end
 local maxEnergy = 10000000
 local autoEnabled = true
 local targetPercent = 75
+local chargeStartPercent = 20
+local chargeStopPercent = 80
+local chargeActive = false
+local chargeInitialized = false
+local chargeState = "STANDBY"
 local kp = 0.25
 local kd = 1.2
 local previousPercent = nil
@@ -42,11 +42,8 @@ local lastControlRate = 0
 local lastEnergySample = nil
 local storageDelta = 0
 local currentPage = "overview"
-<<<<<<< HEAD
 local lastRenderedPage = nil
 local forceFullRedraw = true
-=======
->>>>>>> f2ddb4b20b586de0e42b8f89928bfdab0ad03b9d
 local selectedTurbine = 1
 local turbines = {}
 local turbineNames = {}
@@ -77,12 +74,11 @@ local lastSteamBufferPct = 0
 local plantControlState = "IDLE"
 local timerId = nil
 local hotspots = {}
-local barCache = {}
 
 local NAV_W = math.max(18, math.min(22, math.floor(W * 0.20)))
 local CONTENT_X = NAV_W + 2
 local CONTENT_W = W - CONTENT_X
-local CONTENT_TOP = 3
+local CONTENT_TOP = 4
 local CONTENT_BOTTOM = H - 1
 
 local function supportsColor(m)
@@ -112,24 +108,63 @@ local function clamp(n, a, b)
   return n
 end
 
+local function fmtFixed(n, digits)
+  n = tonumber(n) or 0
+  digits = math.max(0, math.floor(tonumber(digits) or 0))
+  if n ~= n or n == math.huge or n == -math.huge then return "0" end
+  local scale = 1
+  for i = 1, digits do scale = scale * 10 end
+  local scaled
+  if n >= 0 then
+    scaled = math.floor(n * scale + 0.5)
+  else
+    scaled = math.ceil(n * scale - 0.5)
+  end
+  local negative = scaled < 0
+  if negative then scaled = -scaled end
+  local whole = math.floor(scaled / scale)
+  local sign = negative and "-" or ""
+  if digits == 0 then return sign .. tostring(whole) end
+  local frac = math.floor(scaled - whole * scale)
+  if frac == 0 then return sign .. tostring(whole) end
+  local fracText = tostring(frac)
+  while #fracText < digits do fracText = "0" .. fracText end
+  fracText = fracText:gsub("0+$", "")
+  return sign .. tostring(whole) .. "." .. fracText
+end
+
+local function compactDecimalsInText(s)
+  s = tostring(s or "")
+  return (s:gsub("([%+%-]?%d+%.%d%d%d+)", function(token)
+    local n = tonumber(token)
+    if n == nil then return token end
+    return fmtFixed(n, 1)
+  end))
+end
+
+local function fmtDisplayNumber(n)
+  n = tonumber(n) or 0
+  local a = math.abs(n)
+  if a >= 100 then return fmtFixed(n, 0) end
+  return fmtFixed(n, 1)
+end
+
 local function fmtPct(n, digits)
   n = tonumber(n) or 0
-  if tonumber(digits) == 0 then return string.format("%.0f%%", n) end
-  return string.format("%.1f%%", n)
+  if digits == 0 then return fmtFixed(n, 0) .. "%" end
+  return fmtFixed(n, 1) .. "%"
 end
 
 local function fmtTemp(n)
-  local s = string.format("%.1f C", tonumber(n) or 0)
-  s = s:gsub("%.0 C", " C")
-  return s
+  return fmtFixed(n, 1) .. " C"
 end
 
 local function formatRF(n)
   n = tonumber(n) or 0
   local a = math.abs(n)
-  if a >= 1000000 then return string.format("%.2f MRF", n / 1000000) end
-  if a >= 1000 then return string.format("%.1f KRF", n / 1000) end
-  return string.format("%d RF", math.floor(n + 0.5))
+  if a >= 1000000 then return fmtFixed(n / 1000000, 1) .. " MRF" end
+  if a >= 1000 then return fmtFixed(n / 1000, 1) .. " KRF" end
+  return fmtFixed(n, 0) .. " RF"
 end
 
 local function formatRFPerTick(n)
@@ -141,11 +176,26 @@ local function formatAmount(n, suffix)
   local a = math.abs(n)
   local out
   if a >= 1000000 then
-    out = string.format("%.2fM", n / 1000000)
+    out = fmtFixed(n / 1000000, 1) .. "M"
   elseif a >= 1000 then
-    out = string.format("%.1fK", n / 1000)
+    out = fmtFixed(n / 1000, 1) .. "K"
   else
-    out = string.format("%d", math.floor(n + 0.5))
+    out = fmtFixed(n, 0)
+  end
+  if suffix and suffix ~= "" then out = out .. " " .. suffix end
+  return out
+end
+
+local function formatSmallRate(n, suffix)
+  n = tonumber(n) or 0
+  local a = math.abs(n)
+  local out
+  if a > 0 and a < 0.01 then
+    out = "<0.01"
+  elseif a < 10 then
+    out = fmtFixed(n, 2)
+  else
+    out = fmtFixed(n, 1)
   end
   if suffix and suffix ~= "" then out = out .. " " .. suffix end
   return out
@@ -161,13 +211,7 @@ end
 local function signedPct(n)
   n = tonumber(n) or 0
   if math.abs(n) < 0.05 then return "0.0%" end
-  return string.format("%+.1f%%", n)
-end
-
-local function roundNearest(n)
-  n = tonumber(n) or 0
-  if n >= 0 then return math.floor(n + 0.5) end
-  return math.ceil(n - 0.5)
+  return (n > 0 and "+" or "") .. fmtFixed(n, 1) .. "%"
 end
 
 local function roundNearest(n)
@@ -179,7 +223,10 @@ end
 local function centerText(text, width)
   text = tostring(text or "")
   if width <= 0 then return "" end
-  if #text > width then return text:sub(1, width) end
+  if #text > width then
+    if width <= 3 then return text:sub(1, width) end
+    text = text:sub(1, width - 3) .. "..."
+  end
   local left = math.floor((width - #text) / 2)
   local right = width - #text - left
   return string.rep(" ", left) .. text .. string.rep(" ", right)
@@ -187,8 +234,17 @@ end
 
 local function makeUI(m)
   local w, h = m.getSize()
-  local cache = {}
-  local rectCache = {}
+  local total = w * h
+  local frameChars = {}
+  local frameFg = {}
+  local frameBg = {}
+  local prevChars = {}
+  local prevFg = {}
+  local prevBg = {}
+
+  local function indexOf(x, y)
+    return (y - 1) * w + x
+  end
 
   local function setBg(bg)
     if IS_COLOR then m.setBackgroundColor(bg) else m.setBackgroundColor(colors.black) end
@@ -198,6 +254,17 @@ local function makeUI(m)
     if IS_COLOR then m.setTextColor(fg) else m.setTextColor(colors.white) end
   end
 
+  local function beginFrame()
+    frameChars = {}
+    frameFg = {}
+    frameBg = {}
+    for i = 1, total do
+      frameChars[i] = " "
+      frameFg[i] = C_TEXT
+      frameBg[i] = C_BG
+    end
+  end
+
   local function rect(x, y, ww, hh, bg)
     if ww <= 0 or hh <= 0 then return end
     local x1 = clamp(x, 1, w)
@@ -205,15 +272,22 @@ local function makeUI(m)
     local x2 = clamp(x + ww - 1, 1, w)
     local y2 = clamp(y + hh - 1, 1, h)
     if x2 < x1 or y2 < y1 then return end
-    local rk = table.concat({ x1, y1, x2, y2 }, ":")
-    if rectCache[rk] == bg then return end
-    setBg(bg)
-    local line = string.rep(" ", x2 - x1 + 1)
     for yy = y1, y2 do
-      m.setCursorPos(x1, yy)
-      m.write(line)
+      for xx = x1, x2 do
+        local i = indexOf(xx, yy)
+        frameChars[i] = " "
+        frameFg[i] = C_TEXT
+        frameBg[i] = bg
+      end
     end
-    rectCache[rk] = bg
+  end
+
+  local function fitText(s, width)
+    s = tostring(s or "")
+    if width <= 0 then return "" end
+    if #s <= width then return s end
+    if width <= 3 then return s:sub(1, width) end
+    return s:sub(1, width - 3) .. "..."
   end
 
   local function field(key, x, y, ww, s, fg, bg)
@@ -222,32 +296,64 @@ local function makeUI(m)
     local x2 = clamp(x + ww - 1, 1, w)
     local visibleW = x2 - x1 + 1
     if visibleW <= 0 then return end
-    s = tostring(s or "")
+    if type(s) == "number" then s = fmtDisplayNumber(s) else s = compactDecimalsInText(s) end
     if x < 1 then s = s:sub(2 - x) end
-    if #s > visibleW then s = s:sub(1, visibleW) end
+    s = fitText(s, visibleW)
     local out = s .. string.rep(" ", visibleW - #s)
-    local k1 = key .. "_out"
-    local k2 = key .. "_fg"
-    local k3 = key .. "_bg"
-    if cache[k1] == out and cache[k2] == fg and cache[k3] == bg then return end
-    setBg(bg or C_BG)
-    setFg(fg or C_TEXT)
-    m.setCursorPos(x1, y)
-    m.write(out)
-    cache[k1] = out
-    cache[k2] = fg
-    cache[k3] = bg
+    local useFg = fg or C_TEXT
+    local useBg = bg or C_BG
+    for n = 1, visibleW do
+      local i = indexOf(x1 + n - 1, y)
+      frameChars[i] = out:sub(n, n)
+      frameFg[i] = useFg
+      frameBg[i] = useBg
+    end
+  end
+
+  local function invalidate()
+    prevChars = {}
+    prevFg = {}
+    prevBg = {}
+  end
+
+  local function flush(force)
+    for y = 1, h do
+      local x = 1
+      while x <= w do
+        local i = indexOf(x, y)
+        local changed = force or prevChars[i] ~= frameChars[i] or prevFg[i] ~= frameFg[i] or prevBg[i] ~= frameBg[i]
+        if changed then
+          local fg = frameFg[i]
+          local bg = frameBg[i]
+          local startX = x
+          local chars = {}
+          while x <= w do
+            local j = indexOf(x, y)
+            local cellChanged = force or prevChars[j] ~= frameChars[j] or prevFg[j] ~= frameFg[j] or prevBg[j] ~= frameBg[j]
+            if not cellChanged or frameFg[j] ~= fg or frameBg[j] ~= bg then break end
+            chars[#chars + 1] = frameChars[j]
+            prevChars[j] = frameChars[j]
+            prevFg[j] = frameFg[j]
+            prevBg[j] = frameBg[j]
+            x = x + 1
+          end
+          setBg(bg)
+          setFg(fg)
+          m.setCursorPos(startX, y)
+          m.write(table.concat(chars))
+        else
+          x = x + 1
+        end
+      end
+    end
   end
 
   local function clearAll()
-    setBg(C_BG)
-    setFg(C_TEXT)
-    m.clear()
-    cache = {}
-    rectCache = {}
+    invalidate()
   end
 
-  return { w = w, h = h, rect = rect, field = field, clearAll = clearAll }
+  beginFrame()
+  return { w = w, h = h, rect = rect, field = field, clearAll = clearAll, beginFrame = beginFrame, flush = flush, invalidate = invalidate, fitText = fitText }
 end
 
 local ui = makeUI(mon)
@@ -362,8 +468,24 @@ local function getTurbineSnapshot(index)
   local active = safeCall(t, "getActive")
   local rpm = safeCall(t, "getRotorSpeed") or 0
   local output = safeCall(t, "getEnergyProducedLastTick") or 0
-  local stored = safeCall(t, "getEnergyStored") or 0
-  local storedMax = safeCall(t, "getEnergyStoredMax") or 0
+  local storedRaw = safeCall(t, "getEnergyStored")
+  local stored = tonumber(storedRaw) or 0
+  local storedMax = safeCall(t, "getEnergyCapacity")
+  local energyCapacitySource = "getEnergyCapacity"
+  if storedMax == nil or tonumber(storedMax) == nil or tonumber(storedMax) <= 0 then
+    storedMax = safeCall(t, "getEnergyStoredMax")
+    energyCapacitySource = "getEnergyStoredMax"
+  end
+  if storedMax == nil or tonumber(storedMax) == nil or tonumber(storedMax) <= 0 then
+    storedMax = safeCall(t, "getMaxEnergyStored")
+    energyCapacitySource = "getMaxEnergyStored"
+  end
+  storedMax = tonumber(storedMax) or 0
+  local energyReadable = storedRaw ~= nil
+  if energyReadable and storedMax <= 0 then
+    storedMax = 1000000
+    energyCapacitySource = "legacy 1 MRF fallback"
+  end
   local coil = safeCall(t, "getInductorEngaged")
   local flow = safeCall(t, "getFluidFlowRate") or 0
   local flowLimit = safeCall(t, "getFluidFlowRateMax") or 0
@@ -390,6 +512,8 @@ local function getTurbineSnapshot(index)
     stored = stored,
     storedMax = storedMax,
     storedPct = storedPct,
+    energyReadable = energyReadable and storedMax > 0,
+    energyCapacitySource = energyCapacitySource,
     coil = coil == true,
     flow = flow,
     flowLimit = flowLimit,
@@ -458,6 +582,8 @@ local function getEnergyBankSnapshot(activeCooled, fleet)
     cells = {},
     totalStored = 0,
     totalMax = 0,
+    monitoredStored = 0,
+    monitoredMax = 0,
   }
 
   for i = 1, #energyCells do
@@ -472,10 +598,55 @@ local function getEnergyBankSnapshot(activeCooled, fleet)
 
   bank.cellsPct = bank.cellsMax > 0 and clamp(bank.cellsStored / bank.cellsMax * 100, 0, 100) or 0
   bank.turbinePct = bank.turbineMax > 0 and clamp(bank.turbineStored / bank.turbineMax * 100, 0, 100) or 0
-  bank.totalStored = bank.reactorStored + bank.turbineStored + bank.cellsStored
-  bank.totalMax = bank.reactorMax + bank.turbineMax + bank.cellsMax
+  bank.totalStored = bank.turbineStored + bank.cellsStored
+  bank.totalMax = bank.turbineMax + bank.cellsMax
   bank.totalPct = bank.totalMax > 0 and clamp(bank.totalStored / bank.totalMax * 100, 0, 100) or 0
+  bank.monitoredStored = bank.reactorStored + bank.totalStored
+  bank.monitoredMax = bank.reactorMax + bank.totalMax
+  bank.monitoredPct = bank.monitoredMax > 0 and clamp(bank.monitoredStored / bank.monitoredMax * 100, 0, 100) or 0
+  bank.primaryStored = bank.cellsStored
+  bank.primaryMax = bank.cellsMax
+  bank.primaryPct = bank.cellsPct
+  bank.secondaryStored = bank.turbineStored
+  bank.secondaryMax = bank.turbineMax
+  bank.secondaryPct = bank.turbinePct
+  bank.primaryReadable = bank.cellsReadable > 0 and bank.cellsMax > 0
   return bank
+end
+
+local function updateChargeState(bank)
+  if not bank or not bank.primaryReadable then
+    chargeActive = false
+    chargeInitialized = false
+    chargeState = "NO CELL BANK"
+    return false
+  end
+
+  if not chargeInitialized then
+    chargeActive = bank.cellsPct <= chargeStartPercent
+    chargeInitialized = true
+  end
+
+  if chargeActive then
+    local turbineReady = bank.turbineMax <= 0 or bank.turbinePct >= chargeStopPercent
+    if bank.cellsPct >= chargeStopPercent and turbineReady then
+      chargeActive = false
+      chargeState = "CHARGE COMPLETE"
+    elseif bank.cellsPct >= chargeStopPercent then
+      chargeState = "TOPPING TURBINE"
+    else
+      chargeState = "CHARGING CELL BANK"
+    end
+  else
+    if bank.cellsPct <= chargeStartPercent then
+      chargeActive = true
+      chargeState = "LOW CELLS START"
+    else
+      chargeState = "STANDBY"
+    end
+  end
+
+  return chargeActive
 end
 
 local function cardSurface(x, y, ww, hh, accentColor)
@@ -493,14 +664,60 @@ local function sectionTitle(key, x, y, ww, title)
   ui.field(key, x + 3, y, math.max(0, ww - 5), string.upper(title or ""), C_TEXT, C_DIV)
 end
 
+local function wrapText(text, width)
+  local lines = {}
+  width = math.max(1, tonumber(width) or 1)
+  text = tostring(text or "")
+  for paragraph in (text .. "\n"):gmatch("(.-)\n") do
+    if paragraph == "" then
+      lines[#lines + 1] = ""
+    else
+      local line = ""
+      for word in paragraph:gmatch("%S+") do
+        while #word > width do
+          if line ~= "" then
+            lines[#lines + 1] = line
+            line = ""
+          end
+          lines[#lines + 1] = word:sub(1, width)
+          word = word:sub(width + 1)
+        end
+        if word ~= "" then
+          if line == "" then
+            line = word
+          elseif #line + 1 + #word <= width then
+            line = line .. " " .. word
+          else
+            lines[#lines + 1] = line
+            line = word
+          end
+        end
+      end
+      if line ~= "" then lines[#lines + 1] = line end
+    end
+  end
+  if #lines == 0 then lines[1] = "" end
+  return lines
+end
+
+local function drawWrappedText(key, x, y, width, maxRows, text, fg, bg)
+  if width <= 0 or maxRows <= 0 then return 0 end
+  local lines = wrapText(text, width)
+  local count = math.min(#lines, maxRows)
+  for i = 1, count do
+    local line = lines[i]
+    if i == maxRows and #lines > maxRows and width >= 3 then
+      line = ui.fitText(line .. "...", width)
+    end
+    ui.field(key .. "_" .. tostring(i), x, y + i - 1, width, line, fg or C_TEXT, bg or C_INSET)
+  end
+  return count
+end
+
 local function drawHeader()
   ui.rect(1, 1, W, 1, C_HEADER)
   ui.rect(1, 2, W, 1, C_DIV)
-<<<<<<< HEAD
-  local title = "Reactor Control v2.6"
-=======
-  local title = "Reactor Control v2.5"
->>>>>>> f2ddb4b20b586de0e42b8f89928bfdab0ad03b9d
+  local title = "Reactor Control v2.17"
   ui.field("hdr_title", 1 + math.floor((W - #title) / 2), 1, #title, title, C_TEXT, C_HEADER)
   ui.field("hdr_brand", W - 5, 1, 5, "ZelOS", C_BRAND, C_HEADER)
 end
@@ -515,8 +732,12 @@ end
 local function kv(key, x, y, width, label, value, valueColor)
   if width <= 0 then return end
   local labelText = string.upper(tostring(label or "")) .. ":"
-  local valueText = tostring(value or "")
+  local valueText = type(value) == "number" and fmtDisplayNumber(value) or tostring(value or "")
   local labelW = math.min(#labelText, width)
+  if #labelText + 1 + #valueText > width and width >= 8 then
+    local valueNeed = math.min(#valueText, math.max(3, math.floor(width * 0.58)))
+    labelW = math.min(#labelText, math.max(3, width - valueNeed - 1))
+  end
   ui.field(key .. "_l", x, y, labelW, labelText, C_MUTED, C_INSET)
   local avail = width - labelW - 1
   if avail > 0 then
@@ -528,15 +749,8 @@ local function drawBar(x, y, width, percent, fillColor)
   if width <= 0 then return end
   percent = clamp(percent or 0, 0, 100)
   local filled = clamp(math.floor(width * percent / 100 + 0.5), 0, width)
-  local key = table.concat({ x, y, width, tostring(fillColor) }, ":")
-  if barCache[key] == filled then return end
-  mon.setCursorPos(x, y)
-  mon.setBackgroundColor(fillColor)
-  if filled > 0 then mon.write(string.rep(" ", filled)) end
-  mon.setBackgroundColor(C_DIV)
-  if width - filled > 0 then mon.write(string.rep(" ", width - filled)) end
-  mon.setBackgroundColor(C_BG)
-  barCache[key] = filled
+  if filled > 0 then ui.rect(x, y, filled, 1, fillColor) end
+  if width - filled > 0 then ui.rect(x + filled, y, width - filled, 1, C_DIV) end
 end
 
 local function drawButton(key, x, y, ww, hh, text, bg, fg, action)
@@ -591,11 +805,11 @@ local function getSnapshot()
     coolantPct = clamp(coolantAmount / coolantMax * 100, 0, 100)
   end
   local energyBank = getEnergyBankSnapshot(activeCooled, fleet)
-  local controlStored = energyBank.totalStored
-  local controlMax = energyBank.totalMax
-  local controlSource = "GRID RESERVE"
-  local controlPct = energyBank.totalPct
-  local deviation = controlPct - targetPercent
+  local controlStored = energyBank.primaryReadable and energyBank.cellsStored or energyBank.totalStored
+  local controlMax = energyBank.primaryReadable and energyBank.cellsMax or energyBank.totalMax
+  local controlSource = energyBank.primaryReadable and "PRIMARY CELL BANK" or "OPERATING RESERVE"
+  local controlPct = controlMax > 0 and clamp(controlStored / controlMax * 100, 0, 100) or 0
+  local deviation = controlPct - (activeCooled and chargeStopPercent or targetPercent)
   return {
     temp = temp,
     fuel = fuel,
@@ -632,6 +846,10 @@ local function getSnapshot()
     steamBufferPct = lastSteamBufferPct,
     plantState = plantControlState,
     targetRPM = targetRPM,
+    chargeActive = chargeActive,
+    chargeState = chargeState,
+    chargeStartPercent = chargeStartPercent,
+    chargeStopPercent = chargeStopPercent,
     stateText = active and "ACTIVE" or "SHUTDOWN",
     stateColor = active and C_OK or C_BAD,
     modeText = autoEnabled and "AUTOMATIC" or "MANUAL",
@@ -659,12 +877,165 @@ local function drawMeterCard(key, x, y, ww, hh, title, label, detail, pct, fillC
   drawBar(x + 2, y + 3, ww - 4, pct, fillColor)
 end
 
-<<<<<<< HEAD
+local function drawZelusLogo(x, y, w, h)
+  if w < 8 or h < 8 then return end
+  local gray = IS_COLOR and colors.gray or colors.white
+  local blue = IS_COLOR and colors.blue or colors.white
+  local lightBlue = IS_COLOR and colors.lightBlue or colors.white
+  local brown = IS_COLOR and colors.brown or colors.white
+  local orange = IS_COLOR and colors.orange or colors.white
+  local yellow = IS_COLOR and colors.yellow or colors.white
+  local red = IS_COLOR and colors.red or colors.white
+  local pink = IS_COLOR and colors.pink or colors.white
+  local white = colors.white
+
+  ui.rect(x, y, w, h, C_INSET)
+
+  local pattern = {
+    ".....KK......KK.....",
+    "....KBBK....KBBK....",
+    "...KBBbK....KbBBK...",
+    "...KBBBKKDDKKBBBK...",
+    "...KKBBdDYYDdBBKK...",
+    "...KRPPRPDDRRPPRK...",
+    "...KRddddRRddddRK...",
+    "..KKRDYOoRRoOYDRKK..",
+    "..KKPPRRDPRDRRPPKK..",
+    "KKKKRRPPPPrPPPRRKKKK",
+    "KWWWYOWWWWWWWWOYWWWK",
+    ".KKKKKBrrDDrrBKKKKK.",
+    "...KKBKKrrrrKKBKK...",
+    "...KBbKKKYYKKKbBK...",
+    "....KKKKKWWKKKKK....",
+    ".....KKK.KK.KKK.....",
+  }
+
+  local palette = {
+    K = gray,
+    B = blue,
+    b = lightBlue,
+    D = brown,
+    d = brown,
+    O = orange,
+    o = orange,
+    Y = yellow,
+    R = red,
+    P = pink,
+    r = red,
+    W = white,
+  }
+
+  local artH = math.min(#pattern, math.max(1, h - 1))
+  local drawY = y + math.max(0, math.floor((h - 1 - artH) / 2))
+
+  for row = 1, artH do
+    local line = pattern[row]
+    local lineW = #line
+    local visibleW = math.min(lineW, w)
+    local drawX = x + math.floor((w - visibleW) / 2)
+    local srcStart = 1
+    if lineW > w then
+      srcStart = math.floor((lineW - w) / 2) + 1
+    end
+    for col = 1, visibleW do
+      local ch = line:sub(srcStart + col - 1, srcStart + col - 1)
+      local color = palette[ch]
+      if color then ui.rect(drawX + col - 1, drawY + row - 1, 1, 1, color) end
+    end
+  end
+
+  ui.field("zelus_logo_name", x, y + h - 1, w, centerText("ZELUS", w), orange, C_INSET)
+end
+
+local function drawIdleScreen()
+  local gray = IS_COLOR and colors.gray or colors.white
+  local blue = IS_COLOR and colors.blue or colors.white
+  local lightBlue = IS_COLOR and colors.lightBlue or colors.white
+  local brown = IS_COLOR and colors.brown or colors.white
+  local orange = IS_COLOR and colors.orange or colors.white
+  local yellow = IS_COLOR and colors.yellow or colors.white
+  local red = IS_COLOR and colors.red or colors.white
+  local pink = IS_COLOR and colors.pink or colors.white
+  local white = colors.white
+
+  local pattern = {
+    "......KK.......KK......",
+    ".....KBK.......KBK.....",
+    "....KBbK.......KbBK....",
+    "...KBBbK.......KbBBK...",
+    "...KBBbKKKDKKKbbBBK....",
+    "....KBBBBdDODdBBBBK....",
+    ".....KBBdDoYoDdBBK.....",
+    "....KRddRRDODRRddRK....",
+    "....KRPPPPPDRPPPPRK....",
+    "....KRdddddRdddddRK....",
+    "...KDRDYOoDRDoOYDRdK...",
+    "...KDRDDDoDRDoDDDRdK...",
+    "...KKPPRRDPRrDRRPPKK...",
+    ".K..KRRPPPPrrPPPRRK..K.",
+    "KWKKWYOWWWWdWWWWOYWKKWK",
+    ".KWWWYODDDWWWDDDOYWWWK.",
+    "..KKKKKBrrDDDrrBKKKKK..",
+    ".....KBbDrTtTrDbBK.....",
+    "....KBbKKDrOrDKKbBK....",
+    "....KBbK.KDYDK.KbBK....",
+    ".....KBbK.KWK.KbBK.....",
+    "......KKK.KWK.KKK......",
+    "...........K...........",
+  }
+
+  local palette = {
+    K = gray,
+    B = blue,
+    b = lightBlue,
+    D = brown,
+    d = brown,
+    O = orange,
+    o = orange,
+    Y = yellow,
+    R = red,
+    P = pink,
+    r = red,
+    W = white,
+    T = orange,
+    t = brown,
+  }
+
+  local sourceH = #pattern
+  local sourceW = #pattern[1]
+  local targetH = math.max(1, H - 4)
+  local targetW = math.min(W - 4, targetH * 2)
+  if targetW < 1 then targetW = 1 end
+  local startX = math.floor((W - targetW) / 2) + 1
+  local startY = math.floor((H - targetH) / 2) + 1
+
+  for dy = 0, targetH - 1 do
+    local sy = math.floor(dy * sourceH / targetH) + 1
+    local line = pattern[sy]
+    local runColor = nil
+    local runStart = 0
+    for dx = 0, targetW do
+      local color = nil
+      if dx < targetW then
+        local sx = math.floor(dx * sourceW / targetW) + 1
+        local ch = line:sub(sx, sx)
+        color = palette[ch]
+      end
+      if color ~= runColor then
+        if runColor and runColor ~= C_BG then
+          ui.rect(startX + runStart, startY + dy, dx - runStart, 1, runColor)
+        end
+        runColor = color
+        runStart = dx
+      end
+    end
+  end
+end
+
 local function drawTaskbar(d)
   ui.rect(1, 3, NAV_W, H - 2, C_DIV)
   ui.rect(2, 3, NAV_W - 2, H - 2, C_INSET)
   ui.rect(NAV_W, 3, 1, H - 2, C_ACCENT)
-  ui.field("nav_title", 3, 4, NAV_W - 5, "PLANT MENU", C_MUTED, C_INSET)
 
   local items = {
     { "OVERVIEW", "overview", "tab_overview", C_BRAND },
@@ -672,39 +1043,53 @@ local function drawTaskbar(d)
     { "TURBINES", "turbines", "tab_turbines", C_ACCENT },
     { "TURBINE CTRL", "turbine_manual", "tab_turbine_manual", C_RODS },
     { "ENERGY", "energy", "tab_energy", C_ACTION },
+    { "ENERGY CTRL", "energy_control", "tab_energy_control", C_WARN },
+    { "IDLE", "idle", "tab_idle", C_BAD },
   }
 
-  local y = 6
+  local logoH
+  if H >= 40 then
+    logoH = 18
+  elseif H >= 34 then
+    logoH = 14
+  else
+    logoH = 10
+  end
+
+  drawZelusLogo(2, 4, NAV_W - 2, logoH)
+
+  local statusTop = H - 6
+  local y = 4 + logoH + 1
+  local available = statusTop - y
+  local buttonH = 2
+  local navGap = 1
+  local needed = #items * buttonH + (#items - 1) * navGap
+  if available < needed then
+    navGap = 0
+    needed = #items * buttonH
+  end
+  if available < needed then
+    buttonH = 1
+    needed = #items * buttonH + (#items - 1) * navGap
+  end
+
   for i = 1, #items do
     local item = items[i]
     local active = currentPage == item[2]
     local bg = active and item[4] or C_DIV
-    drawButton("nav_" .. tostring(i), 3, y, NAV_W - 5, 3, item[1], bg, C_TEXT, item[3])
-    y = y + 4
+    drawButton("nav_" .. tostring(i), 3, y, NAV_W - 5, buttonH, item[1], bg, C_TEXT, item[3])
+    y = y + buttonH + navGap
   end
 
-  local statusTop = H - 8
   if statusTop > y then
     ui.field("nav_status_t", 3, statusTop, NAV_W - 5, "PLANT STATUS", C_MUTED, C_INSET)
-    ui.field("nav_auto", 3, statusTop + 2, NAV_W - 5, autoEnabled and "AUTO  ENABLED" or "AUTO  MANUAL", autoEnabled and C_OK or C_WARN, C_INSET)
-    ui.field("nav_gov", 3, statusTop + 3, NAV_W - 5, turbineGovernorEnabled and "GOV   ENABLED" or "GOV   MANUAL", turbineGovernorEnabled and C_OK or C_WARN, C_INSET)
-    ui.field("nav_grid", 3, statusTop + 5, NAV_W - 5, "GRID  " .. fmtPct(d.controlPct), percentColor(d.controlPct), C_INSET)
-=======
-local function drawTabs()
-  local labels = { "OVERVIEW", "REACTOR CTRL", "TURBINES", "TURBINE CTRL", "ENERGY" }
-  local pages = { "overview", "manual", "turbines", "turbine_manual", "energy" }
-  local actions = { "tab_overview", "tab_manual", "tab_turbines", "tab_turbine_manual", "tab_energy" }
-  local gap = 1
-  local totalW = W - 2
-  local tabW = math.floor((totalW - gap * 4) / 5)
-  local x = 2
-  for i = 1, 5 do
-    local width = i == 5 and (W - x + 1) or tabW
-    drawTab("tab_" .. tostring(i), x, 3, width, labels[i], currentPage == pages[i], actions[i])
-    x = x + width + gap
->>>>>>> f2ddb4b20b586de0e42b8f89928bfdab0ad03b9d
+    ui.field("nav_auto", 3, statusTop + 2, NAV_W - 5, autoEnabled and "AUTO ENABLED" or "AUTO MANUAL", autoEnabled and C_OK or C_WARN, C_INSET)
+    ui.field("nav_gov", 3, statusTop + 3, NAV_W - 5, turbineGovernorEnabled and "GOV ENABLED" or "GOV MANUAL", turbineGovernorEnabled and C_OK or C_WARN, C_INSET)
+    ui.field("nav_charge", 3, statusTop + 4, NAV_W - 5, chargeActive and "CHARGE ACTIVE" or "CHARGE IDLE", chargeActive and C_ACTION or C_MUTED, C_INSET)
+    ui.field("nav_grid", 3, statusTop + 5, NAV_W - 5, "CELLS " .. fmtPct(d.energyBank.cellsPct), percentColor(d.energyBank.cellsPct), C_INSET)
   end
 end
+
 local function drawOverview(d)
   local outerX = CONTENT_X
   local outerW = CONTENT_W
@@ -730,12 +1115,12 @@ local function drawOverview(d)
     drawStatCard("ov_loop", rightX, contentTop, rightW, topH, "PLANT CONTROL", C_ACCENT, {
       { "PLANT AUTO", autoEnabled and "ENABLED" or "MANUAL", autoEnabled and C_OK or C_WARN },
       { "RPM GOV", turbineGovernorEnabled and "ENABLED" or "MANUAL", turbineGovernorEnabled and C_OK or C_WARN },
-      { "ENERGY TARGET", fmtPct(targetPercent, 0), C_TEXT },
-      { "RPM TARGET", string.format("%d RPM", targetRPM), C_TEXT },
+      { "START BELOW", fmtPct(chargeStartPercent, 0), C_TEXT },
+      { "CHARGE TO", fmtPct(chargeStopPercent, 0), C_TEXT },
     })
 
-    drawMeterCard("ov_energy", outerX, contentTop + topH + gap, outerW, meterH, "SYSTEM ENERGY",
-      d.controlSource, formatRF(d.controlStored) .. " / " .. formatRF(d.controlMax) .. "   " .. fmtPct(d.controlPct), d.controlPct, C_ENERGY)
+    drawMeterCard("ov_energy", outerX, contentTop + topH + gap, outerW, meterH, "PRIMARY ENERGY CELL BANK",
+      "AUTO START " .. fmtPct(chargeStartPercent, 0) .. " / STOP " .. fmtPct(chargeStopPercent, 0), formatRF(d.energyBank.cellsStored) .. " / " .. formatRF(d.energyBank.cellsMax) .. "   " .. fmtPct(d.energyBank.cellsPct), d.energyBank.cellsPct, C_ENERGY)
 
     local steamDetail = "PROD " .. formatAmount(d.steamProduced, "MB/T") .. "   DEM " .. formatAmount(d.steamDemand, "MB/T")
     drawMeterCard("ov_steam", outerX, contentTop + topH + gap + meterH + gap, outerW, meterH, "STEAM BUFFER",
@@ -762,15 +1147,17 @@ local function drawOverview(d)
         { "COOLANT", d.coolantMax ~= nil and fmtPct(d.coolantPct) or "N/A", d.coolantPct < 10 and C_BAD or C_TEXT },
         { "ROD BANK", fmtPct(d.rod, 0), C_TEXT },
         { "FUEL TEMP", fmtTemp(d.temp), C_TEXT },
-        { "FUEL USE", d.fuelUse ~= nil and string.format("%.4f MB/T", d.fuelUse) or "N/A", C_TEXT },
+        { "FUEL USE", d.fuelUse ~= nil and formatSmallRate(d.fuelUse, "MB/T") or "N/A", C_TEXT },
       })
 
       drawStatCard("ov_tf", c2X, teleY, c2W, teleH, "TURBINE / GOVERNOR DETAIL", C_ACCENT, {
         { "ONLINE", tostring(d.fleet.active) .. " / " .. tostring(d.fleet.count), d.fleet.active > 0 and C_OK or C_WARN },
         { "COILS", tostring(d.fleet.coils) .. " ENGAGED", C_TEXT },
         { "TOTAL RF", formatRFPerTick(d.fleet.totalOutput), C_TEXT },
-        { "GRID RESERVE", fmtPct(d.energyBank.totalPct) .. "  " .. formatRF(d.energyBank.totalStored), percentColor(d.energyBank.totalPct) },
         { "CELL BANK", fmtPct(d.energyBank.cellsPct) .. "  " .. formatRF(d.energyBank.cellsStored), d.energyBank.cellsReadable > 0 and C_TEXT or C_WARN },
+        { "TURBINE BUF", fmtPct(d.energyBank.turbinePct) .. "  " .. formatRF(d.energyBank.turbineStored), C_TEXT },
+        { "REACTOR MON", fmtPct(d.energyBank.reactorPct) .. "  " .. formatRF(d.energyBank.reactorStored), C_MUTED },
+        { "CHARGE STATE", d.chargeState, d.chargeActive and C_ACTION or C_MUTED },
         { "AVG RPM", string.format("%d / %d", math.floor(d.fleet.avgRPM + 0.5), targetRPM), C_TEXT },
         { "STEAM FLOW", formatAmount(d.fleet.totalFlow, "MB/T"), C_TEXT },
         { "PLANT", d.plantState .. " / " .. moveText, autoEnabled and C_ACCENT or C_WARN },
@@ -813,7 +1200,7 @@ local function drawOverview(d)
       })
       drawStatCard("ov_f1", c2X, teleY, c2W, teleTopH, "FUEL DETAIL", C_ACCENT, {
         { "FUEL", formatAmount(d.fuel, "MB"), C_TEXT },
-        { "FUEL USE", d.fuelUse ~= nil and string.format("%.4f MB/T", d.fuelUse) or "N/A", C_TEXT },
+        { "FUEL USE", d.fuelUse ~= nil and formatSmallRate(d.fuelUse, "MB/T") or "N/A", C_TEXT },
         { "WASTE", d.waste ~= nil and formatAmount(d.waste, "MB") or "N/A", C_TEXT },
         { "REACTIVITY", d.reactivity ~= nil and fmtPct(d.reactivity) or "N/A", C_TEXT },
       })
@@ -825,7 +1212,7 @@ local function drawOverview(d)
           { "INTERVAL", string.format("%d S", checkInterval), C_TEXT },
         })
         drawStatCard("ov_c1", c2X, teleY + teleTopH + 1, c2W, teleBotH, "CONTROL DETAIL", C_ACCENT, {
-          { "KP / KD", string.format("%.2f / %.1f", kp, kd), C_TEXT },
+          { "KP / KD", fmtFixed(kp, 2) .. " / " .. fmtFixed(kd, 1), C_TEXT },
           { "DANGER CAP", fmtPct(dangerCap, 0), C_TEXT },
           { "SENS ZONE", fmtPct(sensitiveZoneStart, 0) .. "+", C_TEXT },
           { "RATE", signedPct(lastControlRate), C_TEXT },
@@ -887,7 +1274,7 @@ local function drawManual(d)
   local row2Y = contentTop + row1H + gap
   cardSurface(outerX, row2Y, leftW, row2H, C_ACCENT)
   sectionTitle("m_rod_t", outerX, row2Y, leftW, "MANUAL ROD NUDGE")
-  ui.field("m_rod_note", outerX + 3, row2Y + 2, leftW - 5,
+  drawWrappedText("m_rod_note", outerX + 3, row2Y + 2, leftW - 5, 2,
     autoEnabled and "DISABLE AUTO TO USE ROD CONTROLS." or "NUDGE ROD INSERTION IN SMALL OR LARGE STEPS.", autoEnabled and C_WARN or C_MUTED, C_INSET)
   drawButtonRow("m_rodb", outerX + 2, row2Y + 4, leftW - 4,
     { "-25", "-10", "-5", "-1", "+1", "+5", "+10", "+25" },
@@ -902,20 +1289,26 @@ local function drawManual(d)
 
   local row3Y = row2Y + row2H + gap
   cardSurface(outerX, row3Y, leftW, row3H, C_ACCENT)
-  sectionTitle("m_targ_t", outerX, row3Y, leftW, "ENERGY TARGET")
-  kv("m_targ_v", outerX + 3, row3Y + 2, leftW - 5, "TARGET", fmtPct(targetPercent, 0) .. " STORED", C_TEXT)
-  ui.field("m_targ_note", outerX + 3, row3Y + 3, leftW - 5, "AUTO HOLDS THIS BUFFER LEVEL.", C_MUTED, C_INSET)
-  drawButtonRow("m_tadj", outerX + 2, row3Y + 4, leftW - 4,
-    { "-10", "-5", "-1", "+1", "+5", "+10" },
-    { "target_-10", "target_-5", "target_-1", "target_1", "target_5", "target_10" }, C_ACCENT)
+  sectionTitle("m_targ_t", outerX, row3Y, leftW, d.activeCooled and "AUTO CHARGE WINDOW" or "ENERGY TARGET")
+  if d.activeCooled then
+    kv("m_targ_v", outerX + 3, row3Y + 2, leftW - 5, "START BELOW", fmtPct(chargeStartPercent, 0), C_TEXT)
+    kv("m_targ_stop", outerX + 3, row3Y + 3, leftW - 5, "CHARGE TO", fmtPct(chargeStopPercent, 0), C_TEXT)
+    drawButton("m_energy_cfg", outerX + 2, row3Y + 4, leftW - 4, 3, "OPEN ENERGY CONTROL", C_ACCENT, C_TEXT, "tab_energy_control")
+  else
+    kv("m_targ_v", outerX + 3, row3Y + 2, leftW - 5, "TARGET", fmtPct(targetPercent, 0) .. " STORED", C_TEXT)
+    ui.field("m_targ_note", outerX + 3, row3Y + 3, leftW - 5, "AUTO HOLDS THIS BUFFER LEVEL.", C_MUTED, C_INSET)
+    drawButtonRow("m_tadj", outerX + 2, row3Y + 4, leftW - 4,
+      { "-10", "-5", "-1", "+1", "+5", "+10" },
+      { "target_-10", "target_-5", "target_-1", "target_1", "target_5", "target_10" }, C_ACCENT)
+  end
 
   cardSurface(rightX, row3Y, rightW, row3H, C_ACCENT)
   sectionTitle("m_cfg_t", rightX, row3Y, rightW, "LOOP INTERVAL")
   kv("m_cfg1", rightX + 3, row3Y + 2, rightW - 5, "CHECK INTERVAL", tostring(checkInterval) .. " S", C_TEXT)
   if d.activeCooled then
-    kv("m_cfg2", rightX + 3, row3Y + 3, rightW - 5, "STEAM PID", string.format("P %.2f  I %.2f  D %.2f", steamProductionKp, steamProductionKi, steamProductionKd), C_TEXT)
+    kv("m_cfg2", rightX + 3, row3Y + 3, rightW - 5, "STEAM PID", "P " .. fmtFixed(steamProductionKp, 2) .. "  I " .. fmtFixed(steamProductionKi, 2) .. "  D " .. fmtFixed(steamProductionKd, 2), C_TEXT)
   else
-    kv("m_cfg2", rightX + 3, row3Y + 3, rightW - 5, "TUNING", string.format("KP %.2f   KD %.1f", kp, kd), C_TEXT)
+    kv("m_cfg2", rightX + 3, row3Y + 3, rightW - 5, "TUNING", "KP " .. fmtFixed(kp, 2) .. "   KD " .. fmtFixed(kd, 1), C_TEXT)
   end
   drawButtonRow("m_ipre", rightX + 2, row3Y + 4, rightW - 4,
     { "1S", "2S", "5S", "10S", "-1S", "+1S" },
@@ -924,12 +1317,20 @@ local function drawManual(d)
   if row4H >= 5 then
     local lowW, lowRightX, lowRightW = splitTwo(outerX, outerW, 2)
     cardSurface(outerX, row4Y, lowW, row4H, C_ACCENT)
-    sectionTitle("m_preset_t", outerX, row4Y, lowW, "QUICK TARGET PRESETS")
-    kv("m_preset_v", outerX + 3, row4Y + 2, lowW - 5, "CURRENT TARGET", fmtPct(targetPercent, 0), C_TEXT)
-    if row4H >= 6 then
-      drawButtonRow("m_tset", outerX + 2, row4Y + 4, lowW - 4,
-        { "25%", "50%", "75%", "90%", "95%" },
-        { "targetset_25", "targetset_50", "targetset_75", "targetset_90", "targetset_95" }, C_ACCENT)
+    sectionTitle("m_preset_t", outerX, row4Y, lowW, d.activeCooled and "CHARGE POLICY" or "QUICK TARGET PRESETS")
+    if d.activeCooled then
+      kv("m_preset_v", outerX + 3, row4Y + 2, lowW - 5, "CELL BANK", fmtPct(d.energyBank.cellsPct), C_TEXT)
+      kv("m_preset_s", outerX + 3, row4Y + 3, lowW - 5, "STATE", d.chargeState, d.chargeActive and C_ACTION or C_MUTED)
+      if row4H >= 7 then
+        drawButton("m_energy_open", outerX + 2, row4Y + 5, lowW - 4, 3, "ENERGY CONTROL", C_ACTION, C_TEXT, "tab_energy_control")
+      end
+    else
+      kv("m_preset_v", outerX + 3, row4Y + 2, lowW - 5, "CURRENT TARGET", fmtPct(targetPercent, 0), C_TEXT)
+      if row4H >= 6 then
+        drawButtonRow("m_tset", outerX + 2, row4Y + 4, lowW - 4,
+          { "25%", "50%", "75%", "90%", "95%" },
+          { "targetset_25", "targetset_50", "targetset_75", "targetset_90", "targetset_95" }, C_ACCENT)
+      end
     end
 
     cardSurface(lowRightX, row4Y, lowRightW, row4H, C_ACCENT)
@@ -944,27 +1345,20 @@ local function drawManual(d)
       end
     else
       sectionTitle("m_info_t", lowRightX, row4Y, lowRightW, "NOTES & SAFETY")
-      local lines = {
-        "AUTO MODE CONTROLS STORED ENERGY, NOT DIRECT RF/T OUTPUT.",
-        "MANUAL ROD CONTROLS ARE LOCKED WHILE AUTO IS ON.",
-        "REACTIVITY " .. (d.reactivity ~= nil and fmtPct(d.reactivity) or "N/A") .. " | CASING " .. (d.casingTemp ~= nil and fmtTemp(d.casingTemp) or "N/A") .. " | WASTE " .. (d.waste ~= nil and formatAmount(d.waste, "MB") or "N/A"),
-      }
-      local maxLines = row4H - 3
-      for i = 1, math.min(#lines, maxLines) do
-        ui.field("m_info_" .. i, lowRightX + 3, row4Y + i + 1, lowRightW - 5, lines[i], C_MUTED, C_INSET)
-      end
+      local notes =
+        "AUTO MODE CONTROLS STORED ENERGY, NOT DIRECT RF/T OUTPUT. " ..
+        "MANUAL ROD CONTROLS ARE LOCKED WHILE AUTO IS ON. " ..
+        "REACTIVITY " .. (d.reactivity ~= nil and fmtPct(d.reactivity) or "N/A") ..
+        " | CASING " .. (d.casingTemp ~= nil and fmtTemp(d.casingTemp) or "N/A") ..
+        " | WASTE " .. (d.waste ~= nil and formatAmount(d.waste, "MB") or "N/A")
+      drawWrappedText("m_info", lowRightX + 3, row4Y + 2, lowRightW - 5, row4H - 3, notes, C_MUTED, C_INSET)
     end
   end
 end
 
 local function drawTurbineSelector(y)
-<<<<<<< HEAD
   local outerX = CONTENT_X
   local outerW = CONTENT_W
-=======
-  local outerX = 2
-  local outerW = W - 2
->>>>>>> f2ddb4b20b586de0e42b8f89928bfdab0ad03b9d
   local sideW = 14
   local gap = 1
   local midX = outerX + sideW + gap
@@ -982,32 +1376,24 @@ local function drawTurbineSelector(y)
 end
 
 local function drawNoTurbines(contentTop)
-<<<<<<< HEAD
   local outerX = CONTENT_X
   local outerW = CONTENT_W
-=======
-  local outerX = 2
-  local outerW = W - 2
->>>>>>> f2ddb4b20b586de0e42b8f89928bfdab0ad03b9d
   local h = H - contentTop
   cardSurface(outerX, contentTop, outerW, h, C_ACCENT)
   sectionTitle("no_tur_t", outerX, contentTop, outerW, "TURBINE SUPPORT")
-  ui.field("no_tur_1", outerX + 3, contentTop + 2, outerW - 5, "NO BIGREACTORS-TURBINE PERIPHERALS ARE CURRENTLY VISIBLE.", C_WARN, C_INSET)
-  ui.field("no_tur_2", outerX + 3, contentTop + 3, outerW - 5, "CONNECT EACH TURBINE COMPUTER PORT TO THIS COMPUTER WITH WIRED MODEMS.", C_MUTED, C_INSET)
-  ui.field("no_tur_3", outerX + 3, contentTop + 4, outerW - 5, "THEN TOUCH RESCAN TO DISCOVER THEM WITHOUT RESTARTING THE PROGRAM.", C_MUTED, C_INSET)
-  drawButton("no_tur_scan", outerX + 3, contentTop + 6, 18, 3, "RESCAN", C_ACTION, C_TEXT, "turbine_rescan")
+  local textW = outerW - 5
+  local used = 0
+  used = used + drawWrappedText("no_tur_1", outerX + 3, contentTop + 2 + used, textW, math.max(1, h - 8 - used), "NO BIGREACTORS-TURBINE PERIPHERALS ARE CURRENTLY VISIBLE.", C_WARN, C_INSET)
+  used = used + drawWrappedText("no_tur_2", outerX + 3, contentTop + 2 + used, textW, math.max(1, h - 8 - used), "CONNECT EACH TURBINE COMPUTER PORT TO THIS COMPUTER WITH WIRED MODEMS.", C_MUTED, C_INSET)
+  used = used + drawWrappedText("no_tur_3", outerX + 3, contentTop + 2 + used, textW, math.max(1, h - 8 - used), "THEN TOUCH RESCAN TO DISCOVER THEM WITHOUT RESTARTING THE PROGRAM.", C_MUTED, C_INSET)
+  local buttonY = math.min(contentTop + h - 4, contentTop + 3 + used)
+  drawButton("no_tur_scan", outerX + 3, buttonY, 18, 3, "RESCAN", C_ACTION, C_TEXT, "turbine_rescan")
 end
 
 local function drawTurbines(d)
-<<<<<<< HEAD
   local outerX = CONTENT_X
   local outerW = CONTENT_W
   local contentTop = CONTENT_TOP
-=======
-  local outerX = 2
-  local outerW = W - 2
-  local contentTop = 6
->>>>>>> f2ddb4b20b586de0e42b8f89928bfdab0ad03b9d
   drawTurbineSelector(contentTop)
   local bodyTop = contentTop + 4
   if #turbines == 0 then
@@ -1062,7 +1448,7 @@ local function drawTurbines(d)
   if detailH >= 5 then
     local d1W, d2X, d2W = splitTwo(outerX, outerW, 2)
     drawStatCard("ti_gov", outerX, detailY, d1W, detailH, "GOVERNOR DETAIL", C_ACCENT, {
-      { "RPM RATE", string.format("%+.1f RPM/C", t.rpmRate or 0), C_TEXT },
+      { "RPM RATE", ((t.rpmRate or 0) >= 0 and "+" or "") .. fmtFixed(t.rpmRate or 0, 1) .. " RPM/C", C_TEXT },
       { "FLOW STEP", string.format("%+.0f MB/T", t.lastFlowStep or 0), C_TEXT },
       { "FLOW LIMIT", formatAmount(t.flowLimit, "MB/T"), C_TEXT },
       { "MAX FLOW", formatAmount(t.flowLimitMax, "MB/T"), C_TEXT },
@@ -1077,15 +1463,9 @@ local function drawTurbines(d)
 end
 
 local function drawTurbineManual(d)
-<<<<<<< HEAD
   local outerX = CONTENT_X
   local outerW = CONTENT_W
   local contentTop = CONTENT_TOP
-=======
-  local outerX = 2
-  local outerW = W - 2
-  local contentTop = 6
->>>>>>> f2ddb4b20b586de0e42b8f89928bfdab0ad03b9d
   drawTurbineSelector(contentTop)
   local bodyTop = contentTop + 4
   if #turbines == 0 then
@@ -1124,7 +1504,7 @@ local function drawTurbineManual(d)
   cardSurface(rightX, row2Y, rightW, rowH, C_ACCENT)
   sectionTitle("tc_rpmp_t", rightX, row2Y, rightW, "RPM PRESETS")
   kv("tc_rpmp_v", rightX + 3, row2Y + 2, rightW - 5, "DEADBAND", string.format("+/- %d RPM", rpmDeadband), C_TEXT)
-  kv("tc_rpmp_pid", rightX + 3, row2Y + 3, rightW - 5, "PID", string.format("P %.2f  I %.2f  D %.1f", rpmKp, rpmKi, rpmKd), C_TEXT)
+  kv("tc_rpmp_pid", rightX + 3, row2Y + 3, rightW - 5, "PID", "P " .. fmtFixed(rpmKp, 2) .. "  I " .. fmtFixed(rpmKi, 2) .. "  D " .. fmtFixed(rpmKd, 1), C_TEXT)
   drawButtonRow("tc_rpmp", rightX + 2, row2Y + 4, rightW - 4,
     { "900 RPM", "1800 RPM" },
     { "rpmset_900", "rpmset_1800" }, { C_BRAND, C_BRAND })
@@ -1132,7 +1512,7 @@ local function drawTurbineManual(d)
   local row3Y = row2Y + rowH + 1
   cardSurface(outerX, row3Y, leftW, rowH, C_ACCENT)
   sectionTitle("tc_nudge_t", outerX, row3Y, leftW, "MANUAL FLOW LIMIT")
-  ui.field("tc_lock", outerX + 3, row3Y + 2, leftW - 5,
+  drawWrappedText("tc_lock", outerX + 3, row3Y + 2, leftW - 5, 2,
     turbineGovernorEnabled and "DISABLE GOVERNOR TO ADJUST FLOW MANUALLY." or "MANUAL FLOW CONTROL UNLOCKED.", turbineGovernorEnabled and C_WARN or C_OK, C_INSET)
   drawButtonRow("tc_nudge", outerX + 2, row3Y + 4, leftW - 4,
     { "-500", "-100", "-25", "+25", "+100", "+500" },
@@ -1150,7 +1530,7 @@ local function drawTurbineManual(d)
   if row4H >= 5 then
     cardSurface(outerX, row4Y, leftW, row4H, C_ACCENT)
     sectionTitle("tc_coil_t", outerX, row4Y, leftW, "COIL CONTROL")
-    ui.field("tc_coil_note", outerX + 3, row4Y + 2, leftW - 5,
+    drawWrappedText("tc_coil_note", outerX + 3, row4Y + 2, leftW - 5, 2,
       turbineGovernorEnabled and "GOVERNOR OWNS COIL STATE." or "MANUAL COIL CONTROL UNLOCKED.", turbineGovernorEnabled and C_WARN or C_OK, C_INSET)
     if row4H >= 6 then
       drawButtonRow("tc_coils", outerX + 2, row4Y + 4, leftW - 4,
@@ -1175,46 +1555,40 @@ local function shortPeripheralLabel(name, fallback)
 end
 
 local function drawEnergy(d)
-<<<<<<< HEAD
   local outerX = CONTENT_X
   local outerW = CONTENT_W
   local contentTop = CONTENT_TOP
-=======
-  local outerX = 2
-  local outerW = W - 2
-  local contentTop = 6
->>>>>>> f2ddb4b20b586de0e42b8f89928bfdab0ad03b9d
   local bank = d.energyBank
   local topH = 7
   local meterH = 5
   local gap = 1
   local leftW, rightX, rightW = splitTwo(outerX, outerW, 2)
 
-  drawStatCard("en_sum", outerX, contentTop, leftW, topH, "GRID ENERGY RESERVE", C_ACCENT, {
-    { "STORED", formatRF(bank.totalStored), C_TEXT },
-    { "CAPACITY", formatRF(bank.totalMax), C_TEXT },
-    { "RESERVE", fmtPct(bank.totalPct), percentColor(bank.totalPct) },
-    { "TARGET", fmtPct(targetPercent, 0), C_TEXT },
+  drawStatCard("en_sum", outerX, contentTop, leftW, topH, "OPERATING ENERGY RESERVE", C_ACCENT, {
+    { "PRIMARY CELLS", fmtPct(bank.cellsPct) .. "  " .. formatRF(bank.cellsStored), bank.primaryReadable and percentColor(bank.cellsPct) or C_WARN },
+    { "SECONDARY TURB", fmtPct(bank.turbinePct) .. "  " .. formatRF(bank.turbineStored), C_TEXT },
+    { "OPERATING TOTAL", formatRF(bank.totalStored) .. " / " .. formatRF(bank.totalMax), C_TEXT },
+    { "REACTOR EXCLUDED", formatRF(bank.reactorStored), C_MUTED },
   })
 
-  drawStatCard("en_src", rightX, contentTop, rightW, topH, "ENERGY SOURCES", C_ACCENT, {
-    { "REACTOR", formatRF(bank.reactorStored) .. " / " .. formatRF(bank.reactorMax), C_TEXT },
-    { "TURBINES", formatRF(bank.turbineStored) .. " / " .. formatRF(bank.turbineMax), C_TEXT },
-    { "TE CELLS", formatRF(bank.cellsStored) .. " / " .. formatRF(bank.cellsMax), bank.cellsReadable > 0 and C_TEXT or C_WARN },
-    { "CELLS SEEN", tostring(bank.cellsReadable) .. " / " .. tostring(bank.cellsCount) .. " READABLE", bank.cellsReadable == bank.cellsCount and C_OK or C_WARN },
+  drawStatCard("en_auto", rightX, contentTop, rightW, topH, "AUTOMATIC CHARGE POLICY", C_ACCENT, {
+    { "STATE", d.chargeState, d.chargeActive and C_ACTION or C_MUTED },
+    { "START BELOW", fmtPct(chargeStartPercent, 0) .. " CELLS", C_TEXT },
+    { "CHARGE TO", fmtPct(chargeStopPercent, 0), C_TEXT },
+    { "TRIGGER SOURCE", "CELL BANK ONLY", C_ACCENT },
   })
 
   local y1 = contentTop + topH + gap
-  drawMeterCard("en_reactor", outerX, y1, outerW, meterH, "REACTOR INTERNAL BUFFER", "REACTOR",
-    formatRF(bank.reactorStored) .. " / " .. formatRF(bank.reactorMax) .. "   " .. fmtPct(bank.reactorPct), bank.reactorPct, C_ENERGY)
+  drawMeterCard("en_cells", outerX, y1, outerW, meterH, "PRIMARY: THERMAL EXPANSION CELL BANK", "BASE POWER RESERVE",
+    formatRF(bank.cellsStored) .. " / " .. formatRF(bank.cellsMax) .. "   " .. fmtPct(bank.cellsPct), bank.cellsPct, C_FUEL)
 
   local y2 = y1 + meterH + gap
-  drawMeterCard("en_turb", outerX, y2, outerW, meterH, "TURBINE INTERNAL BUFFERS", "ALL TURBINES",
+  drawMeterCard("en_turb", outerX, y2, outerW, meterH, "SECONDARY: TURBINE INTERNAL BUFFER", "FEEDS CELL BANK",
     formatRF(bank.turbineStored) .. " / " .. formatRF(bank.turbineMax) .. "   " .. fmtPct(bank.turbinePct), bank.turbinePct, C_ACTION)
 
   local y3 = y2 + meterH + gap
-  drawMeterCard("en_cells", outerX, y3, outerW, meterH, "THERMAL EXPANSION CELL BANK", "ALL ENERGY CELLS",
-    formatRF(bank.cellsStored) .. " / " .. formatRF(bank.cellsMax) .. "   " .. fmtPct(bank.cellsPct), bank.cellsPct, C_FUEL)
+  drawMeterCard("en_reactor", outerX, y3, outerW, meterH, "MONITOR ONLY: REACTOR INTERNAL BUFFER", "EXCLUDED FROM CONTROL TOTALS",
+    formatRF(bank.reactorStored) .. " / " .. formatRF(bank.reactorMax) .. "   " .. fmtPct(bank.reactorPct), bank.reactorPct, C_ENERGY)
 
   local listY = y3 + meterH + gap
   local listH = H - listY
@@ -1224,17 +1598,17 @@ local function drawEnergy(d)
 
   local rows = listH - 3
   local entries = {}
-  entries[#entries + 1] = { "REACTOR", bank.reactorStored, bank.reactorMax, bank.reactorPct, true }
-  for i = 1, #turbines do
-    local t = getTurbineSnapshot(i)
-    if t then entries[#entries + 1] = { "TURBINE " .. tostring(i), t.stored, t.storedMax, t.storedPct, t.storedMax > 0 } end
-  end
   for i = 1, #bank.cells do
     local c = bank.cells[i]
     local suffix = c.name and tostring(c.name):match("_(%d+)$") or nil
     local label = suffix and ("ENERGY CELL " .. suffix) or ("ENERGY CELL " .. tostring(i))
     entries[#entries + 1] = { label, c.stored, c.capacity, c.pct, c.readable }
   end
+  for i = 1, #turbines do
+    local t = getTurbineSnapshot(i)
+    if t then entries[#entries + 1] = { "TURBINE " .. tostring(i), t.stored, t.storedMax, t.storedPct, t.energyReadable == true } end
+  end
+  entries[#entries + 1] = { "REACTOR MONITOR", bank.reactorStored, bank.reactorMax, bank.reactorPct, true }
 
   local useTwoCols = #entries > rows and outerW >= 70
   local colW = useTwoCols and math.floor((outerW - 7) / 2) or (outerW - 5)
@@ -1246,7 +1620,6 @@ local function drawEnergy(d)
     if row <= rows then
       local e = entries[i]
       local x = col == 0 and (outerX + 3) or rightColX
-      local label = e[1]
       local value
       local color
       if e[5] and e[3] > 0 then
@@ -1256,42 +1629,122 @@ local function drawEnergy(d)
         value = "UNREADABLE"
         color = C_WARN
       end
-      kv("en_item_" .. tostring(i), x, listY + 1 + row, colW, label, value, color)
+      kv("en_item_" .. tostring(i), x, listY + 1 + row, colW, e[1], value, color)
+    end
+  end
+end
+
+local function drawEnergyControl(d)
+  local outerX = CONTENT_X
+  local outerW = CONTENT_W
+  local contentTop = CONTENT_TOP
+  local gap = 1
+  local rowH = 9
+  local leftW, rightX, rightW = splitTwo(outerX, outerW, 2)
+
+  cardSurface(outerX, contentTop, leftW, rowH, C_ACCENT)
+  sectionTitle("ec_start_t", outerX, contentTop, leftW, "START THRESHOLD")
+  kv("ec_start_v", outerX + 3, contentTop + 2, leftW - 5, "START BELOW", fmtPct(chargeStartPercent, 0), C_TEXT)
+  kv("ec_start_now", outerX + 3, contentTop + 3, leftW - 5, "CELL BANK NOW", fmtPct(d.energyBank.cellsPct), percentColor(d.energyBank.cellsPct))
+  drawButtonRow("ec_start_n", outerX + 2, contentTop + 5, leftW - 4,
+    { "-10", "-5", "-1", "+1", "+5", "+10" },
+    { "chargestart_-10", "chargestart_-5", "chargestart_-1", "chargestart_1", "chargestart_5", "chargestart_10" }, C_FUEL)
+
+  cardSurface(rightX, contentTop, rightW, rowH, C_ACCENT)
+  sectionTitle("ec_stop_t", rightX, contentTop, rightW, "CHARGE TARGET")
+  kv("ec_stop_v", rightX + 3, contentTop + 2, rightW - 5, "CHARGE TO", fmtPct(chargeStopPercent, 0), C_TEXT)
+  kv("ec_stop_sec", rightX + 3, contentTop + 3, rightW - 5, "TURBINE NOW", fmtPct(d.energyBank.turbinePct), percentColor(d.energyBank.turbinePct))
+  drawButtonRow("ec_stop_n", rightX + 2, contentTop + 5, rightW - 4,
+    { "-10", "-5", "-1", "+1", "+5", "+10" },
+    { "chargestop_-10", "chargestop_-5", "chargestop_-1", "chargestop_1", "chargestop_5", "chargestop_10" }, C_ACTION)
+
+  local row2Y = contentTop + rowH + gap
+  cardSurface(outerX, row2Y, leftW, rowH, C_ACCENT)
+  sectionTitle("ec_start_p_t", outerX, row2Y, leftW, "START PRESETS")
+  kv("ec_start_p_v", outerX + 3, row2Y + 2, leftW - 5, "CURRENT", fmtPct(chargeStartPercent, 0), C_TEXT)
+  drawButtonRow("ec_start_p", outerX + 2, row2Y + 5, leftW - 4,
+    { "10%", "15%", "20%", "25%", "30%" },
+    { "chargestartset_10", "chargestartset_15", "chargestartset_20", "chargestartset_25", "chargestartset_30" }, C_FUEL)
+
+  cardSurface(rightX, row2Y, rightW, rowH, C_ACCENT)
+  sectionTitle("ec_stop_p_t", rightX, row2Y, rightW, "TARGET PRESETS")
+  kv("ec_stop_p_v", rightX + 3, row2Y + 2, rightW - 5, "CURRENT", fmtPct(chargeStopPercent, 0), C_TEXT)
+  drawButtonRow("ec_stop_p", rightX + 2, row2Y + 5, rightW - 4,
+    { "60%", "70%", "80%", "90%", "95%" },
+    { "chargestopset_60", "chargestopset_70", "chargestopset_80", "chargestopset_90", "chargestopset_95" }, C_ACTION)
+
+  local row3Y = row2Y + rowH + gap
+  local row3H = H - row3Y
+  if row3H >= 7 then
+    cardSurface(outerX, row3Y, leftW, row3H, C_ACCENT)
+    sectionTitle("ec_policy_t", outerX, row3Y, leftW, "CONTROL POLICY")
+    kv("ec_policy_state", outerX + 3, row3Y + 2, leftW - 5, "STATE", d.chargeState, d.chargeActive and C_ACTION or C_MUTED)
+    kv("ec_policy_auto", outerX + 3, row3Y + 3, leftW - 5, "PLANT AUTO", autoEnabled and "ENABLED" or "MANUAL", autoEnabled and C_OK or C_WARN)
+    kv("ec_policy_trigger", outerX + 3, row3Y + 4, leftW - 5, "TRIGGER", "ENERGY CELLS ONLY", C_ACCENT)
+    if row3H >= 8 then
+      drawButton("ec_auto", outerX + 2, row3Y + row3H - 4, leftW - 4, 3, autoEnabled and "PLANT AUTO ON" or "PLANT AUTO OFF", autoEnabled and C_ACTION or C_WARN, C_TEXT, "toggle_auto")
+    end
+
+    cardSurface(rightX, row3Y, rightW, row3H, C_ACCENT)
+    sectionTitle("ec_rules_t", rightX, row3Y, rightW, "PRIORITY / STOP RULE")
+    local rules = {
+      "1. ENERGY CELLS ARE THE PRIMARY BASE RESERVE.",
+      "2. TURBINE BUFFER IS SECONDARY AND FEEDS THE CELLS.",
+      "3. REACTOR BUFFER IS MONITORED BUT NEVER COUNTS TOWARD CONTROL.",
+      "4. TURBINE DEPLETION ALONE NEVER STARTS THE PLANT.",
+      "5. ONCE STARTED, CHARGING CONTINUES UNTIL CELLS AND TURBINE REACH THE TARGET.",
+    }
+    local maxLines = row3H - 3
+    local lineY = row3Y + 2
+    local remaining = maxLines
+    for i = 1, #rules do
+      if remaining <= 0 then break end
+      local used = drawWrappedText("ec_rule_" .. tostring(i), rightX + 3, lineY, rightW - 5, remaining, rules[i], C_MUTED, C_INSET)
+      lineY = lineY + used
+      remaining = remaining - used
     end
   end
 end
 
 local function draw()
   clearHotspots()
-  if forceFullRedraw or lastRenderedPage ~= currentPage then
-    ui.clearAll()
-    barCache = {}
-    lastRenderedPage = currentPage
-    forceFullRedraw = false
-  end
-  local d = getSnapshot()
-  drawHeader()
-  drawTaskbar(d)
-  ui.field("hdr_state", 2, 1, 11, d.stateText, d.stateColor, C_HEADER)
-  if currentPage == "manual" then
-    drawManual(d)
-  elseif currentPage == "turbines" then
-    drawTurbines(d)
-  elseif currentPage == "turbine_manual" then
-    drawTurbineManual(d)
-  elseif currentPage == "energy" then
-    drawEnergy(d)
+  ui.beginFrame()
+
+  if currentPage == "idle" then
+    drawIdleScreen()
   else
-    drawOverview(d)
+    local d = getSnapshot()
+    drawHeader()
+    drawTaskbar(d)
+    ui.field("hdr_state", 2, 1, 11, d.stateText, d.stateColor, C_HEADER)
+    if currentPage == "manual" then
+      drawManual(d)
+    elseif currentPage == "turbines" then
+      drawTurbines(d)
+    elseif currentPage == "turbine_manual" then
+      drawTurbineManual(d)
+    elseif currentPage == "energy" then
+      drawEnergy(d)
+    elseif currentPage == "energy_control" then
+      drawEnergyControl(d)
+    else
+      drawOverview(d)
+    end
   end
-  sleep(0)
+
+  local force = forceFullRedraw
+  forceFullRedraw = false
+  lastRenderedPage = currentPage
+  ui.flush(force)
 end
 
 local function getControlEnergy()
   local activeCooled = callOptional("isActivelyCooled") == true
   local fleet = getTurbineFleet()
   local bank = getEnergyBankSnapshot(activeCooled, fleet)
-  return bank.totalStored, bank.totalMax
+  if bank.primaryReadable then return bank.cellsStored, bank.cellsMax end
+  if bank.totalMax > 0 then return bank.totalStored, bank.totalMax end
+  return bank.reactorStored, bank.reactorMax
 end
 
 local function runPassiveEnergyControl()
@@ -1334,12 +1787,10 @@ local function runPassiveEnergyControl()
   end
 end
 
-local function runTurbineGovernor()
+local function runTurbineGovernor(powerDemand)
   local totalDemand = 0
   local bank = getEnergyBankSnapshot(true, getTurbineFleet())
-  local gridPct = bank.totalPct
-  local highBuffer = clamp(targetPercent + 3, 5, 98)
-  local lowBuffer = clamp(targetPercent - 3, 2, 95)
+  local cellPct = bank.cellsPct
   local spinupThreshold = targetRPM - 100
   local overspeedThreshold = targetRPM + 100
   local criticalThreshold = targetRPM + 200
@@ -1373,21 +1824,26 @@ local function runTurbineGovernor()
           control.rpmIntegral = 0
           control.state = "OVERSPEED CUT"
         else
-          if t.rpm < spinupThreshold then
+          if not powerDemand then
+            desiredCoil = false
+            newFlow = 0
+          elseif t.rpm < spinupThreshold then
             desiredCoil = false
           elseif t.rpm > overspeedThreshold then
             desiredCoil = true
           elseif t.storedPct >= 98 then
             desiredCoil = false
-          elseif gridPct >= highBuffer then
-            desiredCoil = false
-          elseif gridPct <= lowBuffer and t.rpm >= targetRPM - 50 then
+          elseif t.rpm >= targetRPM - 50 then
             desiredCoil = true
           end
 
           local rpmError = targetRPM - t.rpm
-          control.rpmIntegral = clamp((control.rpmIntegral or 0) + rpmError, -rpmIntegralLimit, rpmIntegralLimit)
-          local rawStep = rpmKp * rpmError + rpmKi * control.rpmIntegral - rpmKd * rpmRate
+          if not powerDemand then
+            control.rpmIntegral = 0
+          else
+            control.rpmIntegral = clamp((control.rpmIntegral or 0) + rpmError, -rpmIntegralLimit, rpmIntegralLimit)
+          end
+          local rawStep = powerDemand and (rpmKp * rpmError + rpmKi * control.rpmIntegral - rpmKd * rpmRate) or 0
           local absError = math.abs(rpmError)
           local stepCap = rpmBaseFlowStep
           if absError > 400 then
@@ -1414,10 +1870,12 @@ local function runTurbineGovernor()
           local flowStep = roundNearest(clamp(rawStep, -stepCap, stepCap))
           newFlow = clamp(baseFlow + flowStep, 0, maximum)
 
-          if t.rpm < spinupThreshold then
+          if not powerDemand then
+            control.state = "STANDBY"
+          elseif t.rpm < spinupThreshold then
             control.state = "SPINNING UP"
-          elseif (gridPct >= highBuffer or t.storedPct >= 98) and not desiredCoil then
-            control.state = "GRID HOLD"
+          elseif t.storedPct >= 98 and not desiredCoil then
+            control.state = "BUFFER HOLD"
           elseif t.rpm > overspeedThreshold then
             control.state = "BRAKING"
           elseif math.abs(rpmError) <= rpmDeadband then
@@ -1551,10 +2009,74 @@ local function runSteamReactorControl(steamDemand, controlRods)
   end
 end
 
+local function runAutomaticStandby()
+  if safeCall(r, "getActive") == true then safeCall(r, "setActive", false) end
+  lastSteamDemand = 0
+  lastSteamProduced = callOptional("getHotFluidProducedLastTick") or 0
+  lastSteamBalance = lastSteamProduced
+  local hotAmount = callOptional("getHotFluidAmount")
+  local hotMax = callOptional("getHotFluidAmountMax")
+  if hotAmount ~= nil and hotMax ~= nil and hotMax > 0 then
+    lastSteamBufferPct = clamp(hotAmount / hotMax * 100, 0, 100)
+  else
+    lastSteamBufferPct = 0
+  end
+  for i = 1, #turbines do
+    local t = getTurbineSnapshot(i)
+    local device = turbines[i]
+    if t then
+      safeCall(device, "setFluidFlowRateMax", 0)
+      if t.rpm >= targetRPM + 100 then
+        safeCall(device, "setInductorEngaged", true)
+      else
+        safeCall(device, "setInductorEngaged", false)
+      end
+      safeCall(device, "setActive", false)
+      local control = turbineControl[turbineNames[i]]
+      if control then
+        control.rpmIntegral = 0
+        control.lastFlowStep = -(t.flowLimit or 0)
+        control.state = "STANDBY"
+      end
+    end
+  end
+  previousSteamError = nil
+  steamIntegral = 0
+  previousPercent = nil
+  lastControlStep = 0
+  lastControlRate = 0
+  plantControlState = "STANDBY / CELL BANK OK"
+end
+
+local function startAutomaticPlant()
+  if safeCall(r, "getActive") ~= true then safeCall(r, "setActive", true) end
+  for i = 1, #turbines do
+    if safeCall(turbines[i], "getActive") ~= true then safeCall(turbines[i], "setActive", true) end
+  end
+end
+
 local function autoControl()
   if callOptional("isActivelyCooled") == true then
-    local steamDemand = runTurbineGovernor()
-    runSteamReactorControl(steamDemand, autoEnabled)
+    local bank = getEnergyBankSnapshot(true, getTurbineFleet())
+    local shouldCharge = updateChargeState(bank)
+    if autoEnabled then
+      if shouldCharge then
+        startAutomaticPlant()
+        local steamDemand = runTurbineGovernor(true)
+        runSteamReactorControl(steamDemand, true)
+        if chargeState == "TOPPING TURBINE" then
+          plantControlState = "TOPPING TURBINE BUFFER"
+        else
+          plantControlState = "AUTOMATIC CHARGE"
+        end
+      else
+        runAutomaticStandby()
+      end
+    else
+      local steamDemand = runTurbineGovernor(true)
+      runSteamReactorControl(steamDemand, false)
+      plantControlState = "MANUAL / " .. chargeState
+    end
     previousPercent = nil
   else
     if autoEnabled then
@@ -1615,6 +2137,13 @@ local function applyAction(action)
   elseif action == "tab_energy" then
     currentPage = "energy"
     return
+  elseif action == "tab_energy_control" then
+    currentPage = "energy_control"
+    return
+  elseif action == "tab_idle" then
+    currentPage = "idle"
+    forceFullRedraw = true
+    return
   elseif action == "start" then
     r.setActive(true)
     return
@@ -1633,10 +2162,7 @@ local function applyAction(action)
     discoverTurbines()
     discoverEnergyCells()
     previousPercent = nil
-<<<<<<< HEAD
     forceFullRedraw = true
-=======
->>>>>>> f2ddb4b20b586de0e42b8f89928bfdab0ad03b9d
     return
   elseif action == "turbine_prev" then
     if #turbines > 0 then
@@ -1677,6 +2203,34 @@ local function applyAction(action)
     return
   end
 
+
+  local chargeStartDelta = action:match("^chargestart_([%+%-]?%d+)$")
+  if chargeStartDelta then
+    chargeStartPercent = clamp(chargeStartPercent + (tonumber(chargeStartDelta) or 0), 0, math.max(0, chargeStopPercent - 5))
+    chargeInitialized = false
+    return
+  end
+
+  local chargeStartSet = action:match("^chargestartset_(%d+)$")
+  if chargeStartSet then
+    chargeStartPercent = clamp(tonumber(chargeStartSet) or chargeStartPercent, 0, math.max(0, chargeStopPercent - 5))
+    chargeInitialized = false
+    return
+  end
+
+  local chargeStopDelta = action:match("^chargestop_([%+%-]?%d+)$")
+  if chargeStopDelta then
+    chargeStopPercent = clamp(chargeStopPercent + (tonumber(chargeStopDelta) or 0), math.min(100, chargeStartPercent + 5), 100)
+    chargeInitialized = false
+    return
+  end
+
+  local chargeStopSet = action:match("^chargestopset_(%d+)$")
+  if chargeStopSet then
+    chargeStopPercent = clamp(tonumber(chargeStopSet) or chargeStopPercent, math.min(100, chargeStartPercent + 5), 100)
+    chargeInitialized = false
+    return
+  end
   local targetDelta = action:match("^target_([%+%-]?%d+)$")
   if targetDelta then
     targetPercent = clamp(targetPercent + (tonumber(targetDelta) or 0), 0, 100)
@@ -1786,27 +2340,43 @@ local function hotspotActionAt(x, y)
   return nil
 end
 
+local function restartRefreshTimer()
+  if timerId ~= nil and os.cancelTimer then
+    pcall(os.cancelTimer, timerId)
+  end
+  timerId = os.startTimer(checkInterval)
+end
+
 discoverTurbines()
 discoverEnergyCells()
+updateChargeState(getEnergyBankSnapshot(callOptional("isActivelyCooled") == true, getTurbineFleet()))
 primePlantTelemetry()
 updateStorageDelta()
 draw()
-timerId = os.startTimer(checkInterval)
+restartRefreshTimer()
 
 local ok, err = pcall(function()
   while true do
     local event, a, b, c = os.pullEvent()
     if event == "monitor_touch" then
-      local action = hotspotActionAt(b, c)
-      if action then
-        applyAction(action)
+      if currentPage == "idle" then
+        currentPage = "overview"
+        forceFullRedraw = true
         draw()
+        restartRefreshTimer()
+      else
+        local action = hotspotActionAt(b, c)
+        if action then
+          applyAction(action)
+          draw()
+          restartRefreshTimer()
+        end
       end
     elseif event == "timer" and a == timerId then
       autoControl()
       updateStorageDelta()
       draw()
-      timerId = os.startTimer(checkInterval)
+      restartRefreshTimer()
     end
   end
 end)
