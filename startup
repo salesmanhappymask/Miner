@@ -116,9 +116,9 @@ end
 
 local function runFile(path,role,autoRecover)
     local ok,err
-    if autoRecover and parallel and parallel.waitForAll then
+    if autoRecover and parallel and parallel.waitForAny then
         local finished=false
-        parallel.waitForAll(function()
+        parallel.waitForAny(function()
             ok,err=pcall(dofile,path)
             finished=true
         end,function()
@@ -126,12 +126,18 @@ local function runFile(path,role,autoRecover)
             if not finished and fs.exists(".runtime_crash_count") then
                 fs.delete(".runtime_crash_count")
             end
+            while not finished do
+                sleep(60)
+            end
         end)
     else
         ok,err=pcall(dofile,path)
     end
 
-    if ok then
+    if ok and autoRecover then
+        ok=false
+        err=tostring(role) .. " runtime exited unexpectedly"
+    elseif ok then
         return
     end
 
