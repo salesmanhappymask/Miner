@@ -678,8 +678,8 @@ local function main()
 
   local W, H = mon.getSize()
 
-  if W < 70 or H < 45 then
-    printError("Monitor is too small for the 3x3 ZelOS layout at scale 0.5.")
+  if W < 55 or H < 36 then
+    printError("Monitor is too small for the ZelOS layout at scale 0.5.")
     print("Detected: " .. tostring(W) .. "x" .. tostring(H))
     return
   end
@@ -801,7 +801,7 @@ local function main()
     ui.rect(1, 1, W, 1, ui.C_HEADER)
     ui.rect(1, 2, W, 1, ui.C_DIV)
 
-    local title = "Solar Reserve Control v1.1"
+    local title = "Solar Reserve Control v1.2"
     ui.field("hdr_title", 1 + math.floor((W - #title) / 2), 1, #title, title, ui.C_TEXT, ui.C_HEADER)
     ui.field("hdr_brand", W - 5, 1, 5, "ZelOS", ui.C_BRAND, ui.C_HEADER)
   end
@@ -861,23 +861,23 @@ local function main()
         local number = suffixNumber(device.name) or slot
         local state, stateColor = generatorState(device)
         local pct = device.readable and clamp(device.stored / device.maximum * 100, 0, 100) or 0
-        local label = "GEN " .. string.format("%02d", number)
-        local amount = device.readable and formatRF(device.stored) or "UNREADABLE"
+        local amount = device.readable and formatRF(device.stored):gsub(" RF$", "") or "ERR"
         local pctText = device.readable and fmtPct(pct) or "--"
+        local label = "G" .. string.format("%02d", number)
 
-        ui.field("gen_label_" .. slot, gx, gy, 8, label, ui.C_ACCENT, ui.C_INSET)
-        ui.field("gen_amount_" .. slot, gx + 9, gy, math.max(1, gw - 21), amount, ui.C_TEXT, ui.C_INSET)
-        ui.field("gen_pct_" .. slot, gx + math.max(9, gw - 12), gy, 6, pctText, ui.C_MUTED, ui.C_INSET)
-        ui.field("gen_state_" .. slot, gx + math.max(15, gw - 5), gy, 5, state, stateColor, ui.C_INSET)
+        ui.field("gen_label_" .. slot, gx, gy, 3, label, ui.C_ACCENT, ui.C_INSET)
+        ui.field("gen_amount_" .. slot, gx + 4, gy, math.max(1, gw - 10), amount, ui.C_TEXT, ui.C_INSET)
+        ui.field("gen_pct_" .. slot, gx + math.max(4, gw - 6), gy, 6, pctText, ui.C_MUTED, ui.C_INSET)
 
-        local barWidth = math.max(1, gw - 7)
-        drawBar(ui, gx, gy + 1, barWidth, pct, ui.C_SOLAR)
-        ui.field("gen_state2_" .. slot, gx + barWidth + 1, gy + 1, math.max(1, gw - barWidth - 1), state, stateColor, ui.C_INSET)
+        local stateW = math.min(5, math.max(4, gw - 8))
+        local barW = math.max(3, gw - stateW - 1)
+        drawBar(ui, gx, gy + 1, barW, pct, ui.C_SOLAR)
+        ui.field("gen_state_" .. slot, gx + barW + 1, gy + 1, stateW, state, stateColor, ui.C_INSET)
       end
     end
 
     if #solars > visible then
-      ui.field("gens_more", innerX, y + hh - 2, innerW, "+" .. tostring(#solars - visible) .. " ADDITIONAL GENERATORS", ui.C_WARN, ui.C_INSET)
+      ui.field("gens_more", innerX, y + hh - 2, innerW, "+" .. tostring(#solars - visible) .. " MORE GENERATORS", ui.C_WARN, ui.C_INSET)
     end
   end
 
