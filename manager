@@ -79,11 +79,54 @@ local function runManagerSeedBootstrap()
     local function openSeedNetwork()
         for _,side in ipairs(SIDES) do
             if peripheral.getType(side)=="modem" then
-                if not rednet.isOpen(side) then rednet.open(side) end
-                return true
+                local okOpen,isOpen=pcall(rednet.isOpen,side)
+                if okOpen then
+                    if isOpen then return true,side end
+                    local ok=pcall(rednet.open,side)
+                    if ok then
+                        local okCheck,opened=pcall(rednet.isOpen,side)
+                        if okCheck and opened then return true,side end
+                    end
+                end
             end
         end
-        return false
+        return false,nil
+    end
+
+    local function seedPeripheralSummary()
+        local lines={}
+        for _,side in ipairs(SIDES) do
+            local kind=peripheral.getType(side)
+            if kind=="modem" then
+                local ok,wireless=pcall(peripheral.call,side,"isWireless")
+                if ok then
+                    kind="modem wireless="..tostring(wireless==true)
+                end
+            end
+            lines[#lines+1]=tostring(side)..": "..tostring(kind or "none")
+        end
+        return lines
+    end
+
+    local function waitForSeedNetwork(context)
+        while true do
+            local ok,side=openSeedNetwork()
+            if ok then return side end
+            term.setBackgroundColor(colors.black)
+            term.setTextColor(colors.white)
+            term.clear()
+            term.setCursorPos(1,1)
+            print("Regional Manager Seed")
+            print("v"..tostring(VERSION))
+            print("")
+            print(tostring(context or "Wireless modem required"))
+            print("No usable modem detected.")
+            print("")
+            for _,line in ipairs(seedPeripheralSummary()) do print(line) end
+            print("")
+            print("Waiting for a wireless modem...")
+            sleep(2)
+        end
     end
 
     local function turnRightSeed()
@@ -446,6 +489,7 @@ local function runManagerSeedBootstrap()
         if seed.x~=0 or seed.y~=0 or seed.z~=-1 then
             error("Regional Manager seed pose is not at the Foreman-1 starting square")
         end
+        waitForSeedNetwork("Wireless preflight before site preparation")
         seed.phase="SITE_PREP"
         saveSeed()
     end
@@ -597,7 +641,7 @@ local function runManagerSeedBootstrap()
     end
 
     if seed.phase=="MASTER_PLACED" then
-        if not openSeedNetwork() then error("Regional Manager wireless modem is unavailable") end
+        waitForSeedNetwork("Wireless modem required for Master Foreman installation")
         show("Waiting for Master Foreman software installation")
         local ready=false
         local deadline=now()+120
@@ -615,7 +659,7 @@ local function runManagerSeedBootstrap()
     end
 
     if seed.phase=="MASTER_ACKED" then
-        if not openSeedNetwork() then error("Regional Manager wireless modem is unavailable") end
+        waitForSeedNetwork("Wireless modem required for Master Foreman cleanup")
         show("Waiting for Master Foreman installer cleanup handoff")
         local ready=false
         local deadline=now()+30
