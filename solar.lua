@@ -261,7 +261,6 @@ local function sampleDevices(devices, fallbackCapacity)
   return total, capacity, readable
 end
 
-<<<<<<< HEAD
 local controlOutputOk = true
 
 local function setControlOutput(enabled)
@@ -281,32 +280,6 @@ local function setControlOutput(enabled)
   end
 
   return controlOutputOk
-=======
-local function getBundledOutput()
-  local ok, value = pcall(redstone.getBundledOutput, CONTROL_SIDE)
-  if ok and type(value) == "number" then
-    return value
-  end
-  return 0
-end
-
-local function setControlOutput(enabled)
-  local current = getBundledOutput()
-  local nextValue
-
-  if enabled then
-    nextValue = colors.combine(current, CONTROL_COLOR)
-  else
-    nextValue = colors.subtract(current, CONTROL_COLOR)
-  end
-
-  if nextValue ~= current then
-    local ok = pcall(redstone.setBundledOutput, CONTROL_SIDE, nextValue)
-    return ok
-  end
-
-  return true
->>>>>>> b18faf7a558cca34f362f091de31f674e0f6086d
 end
 
 local function makeUI(mon)
@@ -460,12 +433,8 @@ local function printStartup(modems, monitorName, solars, cells)
   print("Monitor: " .. tostring(monitorName or "not found"))
   print("Solar generators: " .. tostring(#solars))
   print("Energy cells: " .. tostring(#cells))
-<<<<<<< HEAD
   print("Control: standard redstone on " .. CONTROL_SIDE)
   print("RedNet subnet: white, selected on cable face")
-=======
-  print("Control: " .. CONTROL_SIDE .. " / white")
->>>>>>> b18faf7a558cca34f362f091de31f674e0f6086d
   print("")
 end
 
@@ -561,7 +530,6 @@ local function main()
     if not signalOn and anyFull then
       signalOn = true
       signalStartedAt = os.clock()
-<<<<<<< HEAD
 
       if not setControlOutput(true) then
         signalOn = false
@@ -595,26 +563,6 @@ local function main()
       end
     else
       stateText = "STORING POWER"
-=======
-      setControlOutput(true)
-    elseif signalOn and allEmpty then
-      signalOn = false
-      signalStartedAt = nil
-      setControlOutput(false)
-    end
-
-    if signalOn then
-      local elapsed = os.clock() - signalStartedAt
-      if elapsed < START_DELAY then
-        stateText = string.format("ARMED %.1fs", START_DELAY - elapsed)
-        stateColor = ui.C_WARN
-      else
-        stateText = "DISCHARGING"
-        stateColor = ui.C_ACCENT
-      end
-    else
-      stateText = "CHARGING"
->>>>>>> b18faf7a558cca34f362f091de31f674e0f6086d
       stateColor = ui.C_GOOD
     end
   end
@@ -630,11 +578,7 @@ local function main()
       end
 
       if os.clock() - signalStartedAt < START_DELAY then
-<<<<<<< HEAD
         return "WAIT", ui.C_WARN
-=======
-        return "ARMED", ui.C_WARN
->>>>>>> b18faf7a558cca34f362f091de31f674e0f6086d
       end
 
       return "DRAIN", ui.C_ACCENT
@@ -644,11 +588,7 @@ local function main()
       return "FULL", ui.C_WARN
     end
 
-<<<<<<< HEAD
     return "STORE", ui.C_GOOD
-=======
-    return "CHARGE", ui.C_GOOD
->>>>>>> b18faf7a558cca34f362f091de31f674e0f6086d
   end
 
   local function box(prefix, x, y, width, height, title)
@@ -708,16 +648,10 @@ local function main()
     local controlY = topY + summaryH + 1
     ui.fill("control_top", margin, controlY, w - margin * 2, 2, ui.C_HEADER)
     ui.fill("control_accent", margin, controlY, 1, 2, ui.C_ACCENT)
-<<<<<<< HEAD
     ui.field("control_label", margin + 2, controlY, 19, "TRANSFER CONTROL", ui.C_BRAND, ui.C_HEADER)
     ui.field("control_state", margin + 22, controlY, math.max(1, w - margin * 2 - 24), stateText, stateColor, ui.C_HEADER, "right")
     ui.field("control_signal", margin + 2, controlY + 1, 24, "RedNet white / rear", ui.C_MUTED, ui.C_HEADER)
     ui.field("control_signal_state", margin + 27, controlY + 1, math.max(1, w - margin * 2 - 29), signalOn and "SIGNAL ON" or "SIGNAL OFF", signalOn and ui.C_WARN or ui.C_MUTED, ui.C_HEADER, "right")
-=======
-    ui.field("control_label", margin + 2, controlY, 18, "WHITE / BACK", ui.C_MUTED, ui.C_HEADER)
-    ui.field("control_state", margin + 21, controlY, math.max(1, w - margin * 2 - 23), stateText, stateColor, ui.C_HEADER, "right")
-    ui.field("control_output", margin + 2, controlY + 1, w - margin * 2 - 3, signalOn and "Bundled output ON" or "Bundled output OFF", ui.C_TEXT, ui.C_HEADER)
->>>>>>> b18faf7a558cca34f362f091de31f674e0f6086d
 
     local listY = controlY + 3
     local bottomY = h - 1
@@ -793,11 +727,7 @@ local function main()
     if event == "terminate" then
       setControlOutput(false)
       print("")
-<<<<<<< HEAD
       print("Stopped. Rear redstone output disabled.")
-=======
-      print("Stopped. White output disabled.")
->>>>>>> b18faf7a558cca34f362f091de31f674e0f6086d
       return
     elseif event == "timer" and a == timer then
       tick()
