@@ -685,9 +685,8 @@ local function main()
   end
 
   local ui = makeUI(mon)
-  local NAV_W = math.max(18, math.min(22, math.floor(W * 0.20)))
-  local CONTENT_X = NAV_W + 2
-  local CONTENT_W = W - CONTENT_X
+  local CONTENT_X = 2
+  local CONTENT_W = W - 2
   local CONTENT_TOP = 4
   local CONTENT_BOTTOM = H - 1
   local lastNameSignature = table.concat(names, "|")
@@ -801,32 +800,9 @@ local function main()
     ui.rect(1, 1, W, 1, ui.C_HEADER)
     ui.rect(1, 2, W, 1, ui.C_DIV)
 
-    local title = "Solar Reserve Control v1.2"
+    local title = "Solar Reserve Control v1.3"
     ui.field("hdr_title", 1 + math.floor((W - #title) / 2), 1, #title, title, ui.C_TEXT, ui.C_HEADER)
     ui.field("hdr_brand", W - 5, 1, 5, "ZelOS", ui.C_BRAND, ui.C_HEADER)
-  end
-
-  local function drawTaskbar(solarBank, cellBank)
-    ui.rect(1, 3, NAV_W, H - 2, ui.C_DIV)
-    ui.rect(2, 3, NAV_W - 2, H - 2, ui.C_INSET)
-    ui.rect(NAV_W, 3, 1, H - 2, ui.C_ACCENT)
-
-    local logoH = H >= 50 and 18 or 14
-    drawZelusLogo(ui, 2, 4, NAV_W - 2, logoH)
-
-    local tabY = 5 + logoH
-    ui.rect(3, tabY, NAV_W - 5, 2, ui.C_BRAND)
-    ui.field("nav_overview", 3, tabY + 1, NAV_W - 5, centerText("OVERVIEW", NAV_W - 5), ui.C_TEXT, ui.C_BRAND)
-
-    local statusTop = H - 11
-    ui.field("nav_status_title", 3, statusTop, NAV_W - 5, "SYSTEM STATUS", ui.C_MUTED, ui.C_INSET)
-    ui.field("nav_auto", 3, statusTop + 2, NAV_W - 5, "AUTO ENABLED", ui.C_OK, ui.C_INSET)
-    ui.field("nav_array", 3, statusTop + 3, NAV_W - 5, "ARRAY " .. solarBank.readable .. "/" .. solarBank.count, solarBank.readable == solarBank.count and ui.C_OK or ui.C_WARN, ui.C_INSET)
-    ui.field("nav_cells", 3, statusTop + 4, NAV_W - 5, "CELLS " .. cellBank.readable .. "/" .. cellBank.count, cellBank.readable == cellBank.count and ui.C_OK or ui.C_WARN, ui.C_INSET)
-    ui.field("nav_rednet", 3, statusTop + 5, NAV_W - 5, controlOutputOk and "REDNET READY" or "REDNET ERROR", controlOutputOk and ui.C_OK or ui.C_BAD, ui.C_INSET)
-    ui.field("nav_output", 3, statusTop + 6, NAV_W - 5, signalOn and "OUTPUT ACTIVE" or "OUTPUT IDLE", signalOn and ui.C_ACTION or ui.C_MUTED, ui.C_INSET)
-    ui.field("nav_solar_pct", 3, statusTop + 8, NAV_W - 5, "SOLAR " .. fmtPct(solarBank.pct), percentColor(ui, solarBank.pct), ui.C_INSET)
-    ui.field("nav_cell_pct", 3, statusTop + 9, NAV_W - 5, "CELLS " .. fmtPct(cellBank.pct), percentColor(ui, cellBank.pct), ui.C_INSET)
   end
 
   local function drawGeneratorBank(x, y, ww, hh)
@@ -884,7 +860,6 @@ local function main()
   local function drawDashboard(solarBank, cellBank)
     ui.beginFrame()
     drawHeader()
-    drawTaskbar(solarBank, cellBank)
 
     local outerX = CONTENT_X
     local outerW = CONTENT_W
@@ -939,7 +914,7 @@ local function main()
       tostring(cellBank.readable) .. "/" .. tostring(cellBank.count) .. " CELLS ONLINE",
       formatRF(cellBank.total) .. " / " .. formatRF(cellBank.capacity) .. "   " .. fmtPct(cellBank.pct),
       cellBank.pct,
-      ui.C_ENERGY
+      ui.C_DIV
     )
 
     local generatorY = cellMeterY + meterH + gap
