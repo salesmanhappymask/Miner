@@ -1,3 +1,5 @@
+-- version 1
+
 local CONTROL_SIDE = "back"
 local CONTROL_COLOR = colors.white
 local SOLAR_PREFIX = "extrautils_generatorsolar"
