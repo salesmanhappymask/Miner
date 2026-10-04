@@ -1,4 +1,15 @@
 local SEED_PROTOCOL="miner_swarm_seed_v121"
+local RM_MODEM_SIDE="left"
+
+local function openRegionalManagerNetwork()
+    local okOpen,isOpen=pcall(rednet.isOpen,RM_MODEM_SIDE)
+    if okOpen and isOpen then return true,RM_MODEM_SIDE end
+    local ok=pcall(rednet.open,RM_MODEM_SIDE)
+    if not ok then return false,nil end
+    local okCheck,opened=pcall(rednet.isOpen,RM_MODEM_SIDE)
+    if okCheck and opened then return true,RM_MODEM_SIDE end
+    return false,nil
+end
 
 local function runManagerSeedBootstrap()
     local seed=loadTable("manager_seed.cfg")
@@ -77,16 +88,7 @@ local function runManagerSeedBootstrap()
     end
 
     local function openSeedNetwork()
-        for _,side in ipairs(SIDES) do
-            local okOpen,isOpen=pcall(rednet.isOpen,side)
-            if okOpen and isOpen then return true,side end
-            local ok=pcall(rednet.open,side)
-            if ok then
-                local okCheck,opened=pcall(rednet.isOpen,side)
-                if okCheck and opened then return true,side end
-            end
-        end
-        return false,nil
+        return openRegionalManagerNetwork()
     end
 
     local function seedSend(id,packet)
@@ -99,17 +101,12 @@ local function runManagerSeedBootstrap()
 
     local function seedPeripheralSummary()
         local lines={}
-        for _,side in ipairs(SIDES) do
-            local kind=peripheral.getType(side)
-            local okOpen,isOpen=pcall(rednet.isOpen,side)
-            if kind=="modem" then
-                local ok,wireless=pcall(peripheral.call,side,"isWireless")
-                if ok then kind="modem wireless="..tostring(wireless==true) end
-            elseif okOpen and isOpen then
-                kind="rednet-open"
-            end
-            lines[#lines+1]=tostring(side)..": "..tostring(kind or "none")
-        end
+        local kind=peripheral.getType(RM_MODEM_SIDE)
+        local okOpen,isOpen=pcall(rednet.isOpen,RM_MODEM_SIDE)
+        lines[#lines+1]="expected modem: left"
+        lines[#lines+1]="left peripheral: "..tostring(kind or "unreported")
+        lines[#lines+1]="left rednet: "..tostring(okOpen and isOpen and "open" or "closed")
+        lines[#lines+1]="expected tool: right diamond pickaxe"
         return lines
     end
 
@@ -125,11 +122,11 @@ local function runManagerSeedBootstrap()
             print("v"..tostring(VERSION))
             print("")
             print(tostring(context or "Wireless modem required"))
-            print("No usable modem detected.")
+            print("Left wireless modem unavailable.")
             print("")
             for _,line in ipairs(seedPeripheralSummary()) do print(line) end
             print("")
-            print("Waiting for a wireless modem...")
+            print("Waiting for the left wireless modem...")
             sleep(2)
         end
     end
@@ -817,12 +814,12 @@ local function runManagerSeedBootstrap()
 end
 
 local function runRegionalManager()
-    while not openNetwork() do
+    while not openRegionalManagerNetwork() do
         term.setBackgroundColor(colors.black)
         term.setTextColor(colors.white)
         term.clear()
         term.setCursorPos(1,1)
-        print("Regional Manager waiting for wireless modem...")
+        print("Regional Manager waiting for left wireless modem...")
         sleep(1)
     end
 
