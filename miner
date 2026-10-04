@@ -31,7 +31,7 @@ local function runMinerCommissioning(cfg)
         orientationCalibrated=false
     }
 
-    local bootHadIntent=state.motionIntent or state.orientationTurnIntent
+    local bootHadIntent=state.motionIntent or state.orientationTurnIntent or state.recoveryProbeIntent
 
     state.row=cfg.row
     state.phase="COMMISSIONING"
@@ -65,8 +65,26 @@ local function runMinerCommissioning(cfg)
         end
     end
 
+    if state.recoveryProbeIntent and not state.recoveryLocked then
+        local recoveredDir,recoveryReason=recoverFacingByGPS(state,cfg.worldOrigin,function()
+            state.fuelWitness=turtle.getFuelLevel()
+            return saveTableLight("miner.tmp",state)
+        end)
+        if recoveredDir~=nil then
+            state.dir=recoveredDir
+            state.orientationCalibrated=false
+            state.orientationAnchor=nil
+            state.recoveryReason=nil
+        else
+            state.recoveryLocked=true
+            state.recoveryReason="Interrupted deployment orientation recovery failed: "..tostring(recoveryReason)
+            state.phase="RECOVERY_LOCK"
+        end
+    end
+
     if bootHadIntent and not state.recoveryLocked and
-        not state.motionIntent and not state.orientationTurnIntent then
+        not state.motionIntent and not state.orientationTurnIntent and
+        not state.recoveryProbeIntent then
         state.fuelWitness=turtle.getFuelLevel()
     end
     if not saveTableLight("miner.tmp",state) then error("Miner commissioning state write failed") end
@@ -119,7 +137,26 @@ local function runMinerCommissioning(cfg)
         state.orientationAnchor=nil
         state.orientationTurnIntent=nil
         state.orientationTurns=0
+        state.chunkIndex=tonumber(state.chunkIndex) or 0
+        state.x=cfg.row
+        state.y=0
+        state.z=0
+        state.depth=0
+        state.pos=0
         save()
+
+        local recoveredDir=nil
+        if state.recoveryProbeIntent then
+            local pendingReason=nil
+            recoveredDir,pendingReason=recoverFacingByGPS(state,cfg.worldOrigin,function()
+                return save()
+            end)
+            if recoveredDir==nil then
+                state.recoveryReason="Miner deployment GPS recovery failed: "..tostring(pendingReason)
+                save()
+                return false
+            end
+        end
 
         local expected=cfg.placementGps
         if type(expected)~="table" then
@@ -134,36 +171,51 @@ local function runMinerCommissioning(cfg)
             return false
         end
 
-        for attempt=1,4 do
-            local ok,behind=pcall(peripheral.call,"back","getID")
-            if ok and tonumber(behind)==tonumber(cfg.foremanId) then
-                state.dir=DIR_N
-                state.orientationTurns=attempt-1
-                state.orientationAnchor="FOREMAN_BACK"
-                state.orientationCalibrated=true
-                state.recoveryLocked=false
-                state.recoveryReason=nil
+        if recoveredDir==nil then
+            local facingReason=nil
+            recoveredDir,facingReason=recoverFacingByGPS(state,cfg.worldOrigin,function()
+                return save()
+            end)
+            if recoveredDir==nil then
+                state.recoveryReason="Miner deployment GPS orientation failed: "..tostring(facingReason)
                 save()
-                return true
-            end
-            if attempt<4 then
-                state.orientationTurnIntent={attempt=attempt}
-                save()
-                if not turtle.turnRight() then
-                    state.orientationTurnIntent=nil
-                    state.recoveryReason="Could not rotate while locating assigned Foreman behind miner"
-                    save()
-                    return false
-                end
-                state.orientationTurns=attempt
-                state.orientationTurnIntent=nil
-                save()
+                return false
             end
         end
 
-        state.recoveryReason="Assigned Foreman was not detected behind miner at verified GPS placement"
+        state.dir=recoveredDir
         save()
-        return false
+
+        while state.dir~=DIR_N do
+            local intent={from=state.dir,to=(state.dir+1)%4}
+            state.orientationTurnIntent=intent
+            save()
+            if not turtle.turnRight() then
+                state.orientationTurnIntent=nil
+                state.recoveryReason="Could not rotate Miner-"..tostring(cfg.row).." to north after GPS orientation"
+                save()
+                return false
+            end
+            state.dir=intent.to
+            state.orientationTurns=(tonumber(state.orientationTurns) or 0)+1
+            state.orientationTurnIntent=nil
+            save()
+        end
+
+        local finalValid,finalReason=verifyWorldPlacement(expected)
+        if not finalValid then
+            state.recoveryReason="Miner moved away from placement during GPS orientation: "..tostring(finalReason)
+            save()
+            return false
+        end
+
+        state.dir=DIR_N
+        state.orientationAnchor="FOREMAN_BACK"
+        state.orientationCalibrated=true
+        state.recoveryLocked=false
+        state.recoveryReason=nil
+        save()
+        return true
     end
 
     local function faceCommissioning(target)
