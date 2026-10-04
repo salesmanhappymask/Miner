@@ -1760,32 +1760,12 @@ local function runMiner(cfg)
         if state.y~=cfg.homeY+1 then
             return false,"GPS orientation correction reached an unexpected height"
         end
-        local recoveredDir=nil
-        for attempt=1,4 do
-            local bx,by,bz=locateWorldPose(2)
-            if not bx then return false,"GPS unavailable before orientation probe" end
-            local kind=peripheral.getType("front")
-            local okId,id=pcall(peripheral.call,"front","getID")
-            if not kind and not (okId and tonumber(id)) then
-                pcall(turtle.dig)
-                pcall(turtle.attack)
-            end
-            if not peripheral.getType("front") and not turtle.detect() then
-                if attemptForward() then
-                    local ax,ay,az=locateWorldPose(2)
-                    if not ax then return false,"GPS unavailable after orientation probe" end
-                    recoveredDir=directionFromWorldDelta(ax-bx,az-bz)
-                    ok,reason=orientationAdoptGpsPose()
-                    if not ok then return false,reason end
-                    if not recoveredDir then return false,"GPS orientation probe produced an invalid displacement" end
-                    state.dir=recoveredDir
-                    save()
-                    break
-                end
-            end
-            if not turnStep(true) then return false,"GPS orientation correction could not rotate to find a probe path" end
+        local recoveredDir,facingReason=recoverFacingByGPS(state,cfg.worldOrigin,function() return save() end)
+        if not recoveredDir then
+            return false,"GPS orientation correction could not establish facing: "..tostring(facingReason)
         end
-        if not recoveredDir then return false,"GPS orientation correction could not find an open probe path" end
+        state.dir=recoveredDir
+        save()
         ok,reason=orientationMoveHorizontal(cfg.homeX,cfg.homeZ)
         if not ok then return false,reason end
         if not face(DIR_N) then return false,"GPS orientation correction could not establish north" end

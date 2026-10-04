@@ -3019,7 +3019,7 @@ local function runForeman(cfg)
             confirm=confirm,
             session=cfg.session
         }
-        local deadline=now()+12
+        local deadline=now()+20
         local lastSend=0
         repeat
             if now()-lastSend>=1 then

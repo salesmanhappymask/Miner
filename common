@@ -1,4 +1,4 @@
-VERSION = 155
+VERSION = 157
 RELEASE_VERSION = VERSION
 STATE_SCHEMA_VERSION = 155
 PROTOCOL_VERSION = 121
@@ -527,7 +527,7 @@ local function safeNetworkSend(id,packet,protocol,broadcastMode)
     else
         ok,result=pcall(fn,id,packet,protocol)
     end
-    if ok then return result~=false end
+    if ok and result~=false then return true end
     if not openNetwork() then return false end
     if broadcastMode then
         ok,result=pcall(fn,packet,protocol)
@@ -1441,9 +1441,9 @@ function recoverFacingByGPS(state,origin,saveFn)
         return ok and result~=false
     end
 
-    local function verifyBase(base)
+    local function atPoint(point)
         local x,y,z=locateWorldPose(2)
-        return x and near(x,base.x) and near(y,base.y) and near(z,base.z)
+        return x and near(x,point.x) and near(y,point.y) and near(z,point.z),x,y,z
     end
 
     local function finishReturn(command,base,facing)
@@ -1452,7 +1452,8 @@ function recoverFacingByGPS(state,origin,saveFn)
         end
         local moved=command=="back" and turtle.back() or turtle.forward()
         if not moved then return nil,"GPS facing recovery could not return from probe" end
-        if not verifyBase(base) then return nil,"GPS facing recovery could not verify probe return" end
+        local verified=atPoint(base)
+        if not verified then return nil,"GPS facing recovery could not verify probe return" end
         if not clearIntent() then return nil,"GPS facing recovery could not clear return intent" end
         return facing
     end
@@ -1460,64 +1461,96 @@ function recoverFacingByGPS(state,origin,saveFn)
     local x,y,z=locateWorldPose(2)
     if not x then return nil,"GPS unavailable for facing recovery" end
 
+    local searchAttempt=1
     local pending=state.recoveryProbeIntent
     if type(pending)=="table" and type(pending.base)=="table" then
         local base=pending.base
-        if near(x,base.x) and near(y,base.y) and near(z,base.z) then
-            local completedFacing=pending.kind=="return" and tonumber(pending.facing) or nil
-            if not clearIntent() then return nil,"GPS facing recovery could not clear completed probe intent" end
-            if completedFacing then return completedFacing end
-        elseif pending.kind=="forward" or pending.kind=="back" then
-            local movedDir=directionFromWorldDelta(x-base.x,z-base.z)
-            if not movedDir or not near(y,base.y) then
-                return nil,"GPS facing recovery found an unexpected interrupted probe position"
+        local atBase=near(x,base.x) and near(y,base.y) and near(z,base.z)
+        if pending.kind=="return" then
+            if atBase then
+                local facing=tonumber(pending.facing)
+                if not clearIntent() then return nil,"GPS facing recovery could not clear completed return intent" end
+                return facing
             end
-            local facing=pending.kind=="forward" and movedDir or ((movedDir+2)%4)
-            return finishReturn(pending.kind=="forward" and "back" or "forward",base,facing)
-        elseif pending.kind=="return" then
             local command=pending.command
             if command~="back" and command~="forward" then
                 return nil,"GPS facing recovery return intent is invalid"
             end
             local moved=command=="back" and turtle.back() or turtle.forward()
             if not moved then return nil,"GPS facing recovery could not resume interrupted return" end
-            if not verifyBase(base) then return nil,"GPS facing recovery resumed return but did not reach base" end
+            local verified=atPoint(base)
+            if not verified then return nil,"GPS facing recovery resumed return but did not reach base" end
             local facing=tonumber(pending.facing)
             if not clearIntent() then return nil,"GPS facing recovery could not clear completed return intent" end
             return facing
+        elseif pending.kind=="forward" or pending.kind=="back" then
+            if not atBase then
+                local movedDir=directionFromWorldDelta(x-base.x,z-base.z)
+                if not movedDir or not near(y,base.y) then
+                    return nil,"GPS facing recovery found an unexpected interrupted probe position"
+                end
+                local facing=pending.kind=="forward" and movedDir or ((movedDir+2)%4)
+                return finishReturn(pending.kind=="forward" and "back" or "forward",base,facing)
+            end
+            searchAttempt=tonumber(pending.searchAttempt) or 1
+            if not clearIntent() then return nil,"GPS facing recovery could not clear incomplete probe intent" end
+        elseif pending.kind=="rotate" then
+            if not atBase then return nil,"GPS facing recovery rotated from an unexpected position" end
+            searchAttempt=tonumber(pending.searchAttempt) or 1
+            if not clearIntent() then return nil,"GPS facing recovery could not clear rotation intent" end
+        else
+            return nil,"GPS facing recovery found an unknown transaction intent"
         end
     end
 
+    x,y,z=locateWorldPose(2)
+    if not x then return nil,"GPS unavailable for facing recovery" end
     if not near(x,ex) or not near(y,ey) or not near(z,ez) then
         return nil,"GPS facing recovery requires the saved pose before probing"
     end
-
     local base={x=x,y=y,z=z}
-    if not persistIntent({kind="forward",base=base,fuelBefore=turtle.getFuelLevel()}) then
-        return nil,"GPS facing recovery could not persist probe intent"
-    end
-    local command="forward"
-    if not turtle.forward() then
-        if not persistIntent({kind="back",base=base,fuelBefore=turtle.getFuelLevel()}) then
-            return nil,"GPS facing recovery could not persist alternate probe intent"
+
+    while searchAttempt<=8 do
+        if not persistIntent({kind="forward",base=base,searchAttempt=searchAttempt,fuelBefore=turtle.getFuelLevel()}) then
+            return nil,"GPS facing recovery could not persist probe intent"
         end
-        command="back"
-        if not turtle.back() then
-            if not clearIntent() then return nil,"GPS facing recovery could not clear blocked probe intent" end
-            return nil,"GPS facing recovery front and rear are blocked"
+        local command="forward"
+        local moved=turtle.forward()
+        if not moved then
+            if not persistIntent({kind="back",base=base,searchAttempt=searchAttempt,fuelBefore=turtle.getFuelLevel()}) then
+                return nil,"GPS facing recovery could not persist alternate probe intent"
+            end
+            command="back"
+            moved=turtle.back()
         end
+
+        if moved then
+            local ax,ay,az=locateWorldPose(2)
+            if not ax then return nil,"GPS unavailable after facing recovery probe" end
+            local movedDir=directionFromWorldDelta(ax-base.x,az-base.z)
+            if not movedDir or not near(ay,base.y) then
+                return nil,"Facing recovery probe produced an invalid displacement"
+            end
+            local facing=command=="forward" and movedDir or ((movedDir+2)%4)
+            return finishReturn(command=="forward" and "back" or "forward",base,facing)
+        end
+
+        if not clearIntent() then return nil,"GPS facing recovery could not clear blocked probe intent" end
+        if searchAttempt>=8 then break end
+        local nextAttempt=searchAttempt+1
+        if not persistIntent({kind="rotate",base=base,searchAttempt=nextAttempt}) then
+            return nil,"GPS facing recovery could not persist rotation intent"
+        end
+        if not turtle.turnRight() then
+            clearIntent()
+            return nil,"GPS facing recovery could not rotate toward an open probe lane"
+        end
+        searchAttempt=nextAttempt
+        if not clearIntent() then return nil,"GPS facing recovery could not commit rotation intent" end
     end
 
-    local ax,ay,az=locateWorldPose(2)
-    if not ax then return nil,"GPS unavailable after facing recovery probe" end
-    local movedDir=directionFromWorldDelta(ax-base.x,az-base.z)
-    if not movedDir or not near(ay,base.y) then
-        return nil,"Facing recovery probe produced an invalid displacement"
-    end
-    local facing=command=="forward" and movedDir or ((movedDir+2)%4)
-    return finishReturn(command=="forward" and "back" or "forward",base,facing)
+    return nil,"GPS facing recovery could not find an open horizontal probe lane"
 end
-
 function verifyBootWitness(state,origin,hadIntent)
     local fuel=turtle.getFuelLevel()
     local fuelMismatch=not hadIntent and type(state.fuelWitness)=="number" and

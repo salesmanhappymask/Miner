@@ -49,6 +49,37 @@ local function runningFromDisk()
     return p:sub(1,5)=="disk/" or p:sub(1,6)=="/disk/"
 end
 
+local function loadNewestState(paths)
+    local best,bestGeneration=nil,-1
+    for _,path in ipairs(paths) do
+        local raw=readFile(path)
+        if raw then
+            local ok,value=pcall(textutils.unserialize,raw)
+            if ok and type(value)=="table" then
+                local generation=tonumber(value.__saveGeneration) or 0
+                if generation>bestGeneration then
+                    best=value
+                    bestGeneration=generation
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function managerHasLiveSwarmState()
+    local state=loadNewestState({"regional_manager.tmp","regional_manager.tmp.new","regional_manager.tmp.bak"})
+    if not state then return false end
+    if state.paired or state.masterForemanId or state.swarmStarted or state.commissioningComplete then return true end
+    if type(state.nodes)=="table" and next(state.nodes)~=nil then return true end
+    if type(state.foremen)=="table" and next(state.foremen)~=nil then return true end
+    if type(state.miners)=="table" and next(state.miners)~=nil then return true end
+    if type(state.navigators)=="table" and next(state.navigators)~=nil then return true end
+    if type(state.advance)=="table" then return true end
+    if type(state.recall)=="table" and (state.recall.active or (state.recall.state and state.recall.state~="NORMAL")) then return true end
+    return false
+end
+
 local function managerAutoUpdate()
     if REGIONAL_MANAGER~=1 or runningFromDisk() then return end
     local localVersion=tonumber((readFile("version") or ""):match("^%s*(%d+)%s*$")) or 0
@@ -65,6 +96,12 @@ local function managerAutoUpdate()
         return
     end
     if remoteVersion>localVersion then
+        if managerHasLiveSwarmState() then
+            print("Release "..tostring(remoteVersion).." available, but a live swarm is registered.")
+            print("Automatic Regional Manager update deferred to avoid a mixed-version swarm.")
+            sleep(1)
+            return
+        end
         print("Release "..tostring(remoteVersion).." available. Updating automatically...")
         if not shell.run("update","manager","--auto-reboot","--preserve-state") then
             error("Automatic Regional Manager update failed")

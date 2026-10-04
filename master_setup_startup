@@ -1,4 +1,4 @@
-local VERSION=155
+local VERSION=157
 local SEED_PROTOCOL="miner_swarm_seed_v121"
 
 local function writeFile(path,data)
@@ -19,11 +19,25 @@ local function openSeedNetwork()
     return false
 end
 
+local function orientWithRegionalManagerBehind()
+    for attempt=1,4 do
+        local ok,id=pcall(peripheral.call,"back","getID")
+        if ok and tonumber(id) then return tonumber(id) end
+        if attempt<4 and not turtle.turnRight() then
+            error("Could not rotate Master Foreman during physical orientation scan")
+        end
+    end
+    error("Regional Manager was not detected behind the Master Foreman")
+end
+
 term.setBackgroundColor(colors.black)
 term.setTextColor(colors.white)
 term.clear()
 term.setCursorPos(1,1)
 print("Master Foreman setup disk")
+print("Verifying physical orientation...")
+local seedManagerId=orientWithRegionalManagerBehind()
+print("Regional Manager behind: "..tostring(seedManagerId))
 print("Installing permanent updater...")
 
 writeFile("world_anchor",textutils.serialize({x=0,y=0,z=1}))

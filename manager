@@ -80,13 +80,11 @@ local function runManagerSeedBootstrap()
         for _,side in ipairs(SIDES) do
             if peripheral.getType(side)=="modem" then
                 local okOpen,isOpen=pcall(rednet.isOpen,side)
-                if okOpen then
-                    if isOpen then return true,side end
-                    local ok=pcall(rednet.open,side)
-                    if ok then
-                        local okCheck,opened=pcall(rednet.isOpen,side)
-                        if okCheck and opened then return true,side end
-                    end
+                if okOpen and isOpen then return true,side end
+                local ok=pcall(rednet.open,side)
+                if ok then
+                    local okCheck,opened=pcall(rednet.isOpen,side)
+                    if not okCheck or opened then return true,side end
                 end
             end
         end
@@ -853,14 +851,16 @@ local function runRegionalManager()
 
     local function findMonitor()
         for _,side in ipairs({"left","right","top","bottom","front","back"}) do
-            if peripheral.getType(side)=="monitor" then
-                return side,peripheral.wrap(side)
+            local okType,kind=pcall(peripheral.getType,side)
+            if okType and kind=="monitor" then
+                local okWrap,wrapped=pcall(peripheral.wrap,side)
+                if okWrap and wrapped then return side,wrapped end
             end
         end
         return nil,nil
     end
     local monitorSide,mon=findMonitor()
-    if mon then mon.setTextScale(0.5) end
+    if mon then pcall(mon.setTextScale,0.5) end
 
     local seedConfig=loadTable("manager_seed.cfg")
     local data=loadTableLight("regional_manager.tmp")
@@ -960,6 +960,21 @@ local function runRegionalManager()
             data.managerPose.z=intent.fromZ
             data.managerPose.dir=intent.dir
             data.recall.packMoveIntent=nil
+        end
+        saveTableLight("regional_manager.tmp",data)
+    end
+    if data.recall and (data.recall.packTurnIntent or data.managerPose.recoveryProbeIntent) then
+        local recoveredDir,reason=recoverFacingByGPS(data.managerPose,data.worldOrigin,function()
+            return saveTableLight("regional_manager.tmp",data)
+        end)
+        if recoveredDir then
+            data.managerPose.dir=recoveredDir
+            data.managerPose.recoveryLocked=nil
+            data.managerPose.recoveryReason=nil
+            data.recall.packTurnIntent=nil
+        else
+            data.managerPose.recoveryLocked=true
+            data.managerPose.recoveryReason=reason or "Cannot resolve interrupted Regional Manager pack turn"
         end
         saveTableLight("regional_manager.tmp",data)
     end
@@ -1116,7 +1131,17 @@ local function runRegionalManager()
         end
     end
 
-    local IS_COLOR=(mon and mon.isColor and mon.isColor()) or (term.isColor and term.isColor()) or false
+    local monitorColor=false
+    if mon and mon.isColor then
+        local ok,value=pcall(mon.isColor)
+        monitorColor=ok and value==true
+    end
+    local terminalColor=false
+    if term.isColor then
+        local ok,value=pcall(term.isColor)
+        terminalColor=ok and value==true
+    end
+    local IS_COLOR=monitorColor or terminalColor
     local C_BG=colors.black
     local C_HEADER=IS_COLOR and colors.lightGray or colors.black
     local C_DIV=IS_COLOR and colors.gray or colors.black
@@ -1506,15 +1531,15 @@ local function runRegionalManager()
 
     local function sendObserverSnapshot(force)
         if not force and now()-lastObserverSend<1 then return end
-        local ok=pcall(rednet.broadcast,observerSnapshot(),OBSERVER_PROTOCOL)
-        if not ok then
+        local ok,result=pcall(rednet.broadcast,observerSnapshot(),OBSERVER_PROTOCOL)
+        if not ok or result==false then
             openNetwork()
             pcall(rednet.broadcast,observerSnapshot(),OBSERVER_PROTOCOL)
         end
         lastObserverSend=now()
     end
 
-    local function drawMonitor()
+    local function drawMonitorUnsafe()
         local side,attached=findMonitor()
         if not attached then
             monitorSide=nil
@@ -1609,6 +1634,16 @@ local function runRegionalManager()
             errorText and C_FAULT or missing and #missing>0 and C_WARN or C_SUBTXT,C_BG)
         monitorButtons={}
         drawActions(mon,w,h,monitorButtons,false)
+    end
+
+    local function drawMonitor()
+        local ok,err=pcall(drawMonitorUnsafe)
+        if not ok then
+            monitorSide=nil
+            mon=nil
+            monitorButtons={}
+            if debugLog then pcall(debugLog,"PERIPHERAL","Monitor redraw unavailable: "..tostring(err),"WARN") end
+        end
     end
 
     local function drawTerminal()
@@ -1743,6 +1778,14 @@ local function runRegionalManager()
             return false
         end
 
+        local existingSender=data.nodes and data.nodes[sender] or nil
+        if existingSender then
+            if existingSender.role~=message.role then return false end
+            if message.role=="miner" and tonumber(existingSender.row)~=tonumber(message.row) then return false end
+            if message.role=="foreman" and tonumber(existingSender.number)~=tonumber(message.number) then return false end
+            if message.role=="navigator" and tonumber(existingSender.number)~=tonumber(message.number) then return false end
+        end
+
         if data.session and message.session~=data.session then
             return false
         end
@@ -1767,6 +1810,8 @@ local function runRegionalManager()
         if message.role=="foreman" then
             local n=tonumber(message.number)
             if not n or n<1 or n>4 then return false end
+            local existing=data.foremen and data.foremen[n] or nil
+            if existing and existing.id and tonumber(existing.id)~=tonumber(sender) then return false end
             if n==1 and sender~=data.masterForemanId then return false end
             if tonumber(message.rowStart)~=((n-1)*4+1) or tonumber(message.rowEnd)~=(n*4) then
                 return false
@@ -1775,6 +1820,8 @@ local function runRegionalManager()
         elseif message.role=="miner" then
             local row=tonumber(message.row)
             if not row or row<1 or row>16 then return false end
+            local existing=data.miners and data.miners[row] or nil
+            if existing and existing.id and tonumber(existing.id)~=tonumber(sender) then return false end
             local n=expectedForemanForRow(row)
             if tonumber(message.foremanNumber)~=n then return false end
             local f=data.foremen[n]
@@ -1784,6 +1831,8 @@ local function runRegionalManager()
             return true
         elseif message.role=="navigator" then
             local n=tonumber(message.number)
+            local existing=data.navigators and data.navigators[n] or nil
+            if existing and existing.id and tonumber(existing.id)~=tonumber(sender) then return false end
             local site=NAVIGATOR_SITES[n]
             if not site then return false end
             return tonumber(message.x)==site.x and
@@ -2970,8 +3019,23 @@ local function runRegionalManager()
     end
 
     local function managerPackTurnRight()
-        if not turtle.turnRight() then return false,"turn failed" end
-        data.managerPose.dir=((tonumber(data.managerPose.dir) or DIR_N)+1)%4
+        if data.managerPose.recoveryLocked then
+            return false,data.managerPose.recoveryReason or "Regional Manager pose is recovery locked"
+        end
+        local from=tonumber(data.managerPose.dir) or DIR_N
+        local to=(from+1)%4
+        data.recall.packTurnIntent={from=from,to=to}
+        save()
+        flushManager(true)
+        if not turtle.turnRight() then
+            data.recall.packTurnIntent=nil
+            save()
+            flushManager(true)
+            return false,"turn failed"
+        end
+        data.managerPose.dir=to
+        data.managerPose.seq=(tonumber(data.managerPose.seq) or 0)+1
+        data.recall.packTurnIntent=nil
         save()
         flushManager(true)
         return true
@@ -2987,6 +3051,9 @@ local function runRegionalManager()
     end
 
     local function managerPackForward()
+        if data.managerPose.recoveryLocked then
+            return false,data.managerPose.recoveryReason or "Regional Manager pose is recovery locked"
+        end
         local fromX=data.managerPose.x
         local fromZ=data.managerPose.z
         local toX=fromX
@@ -4274,7 +4341,8 @@ local function runRegionalManager()
 
                 elseif message.type=="pose_checkpoint" and sender==message.id and
                     message.version==VERSION and message.role and message.snapshot and
-                    message.session==data.session then
+                    message.session==data.session and data.nodes[sender] and
+                    data.nodes[sender].role==message.role then
                     local snapshot=message.snapshot
                     local exactPose=
                         type(snapshot.x)=="number" and type(snapshot.y)=="number" and
@@ -4304,7 +4372,8 @@ local function runRegionalManager()
                     end
 
                 elseif message.type=="recovery_request" and sender==message.id and
-                    message.version==VERSION and message.role and message.session==data.session then
+                    message.version==VERSION and message.role and message.session==data.session and
+                    data.nodes[sender] and data.nodes[sender].role==message.role then
                     local key=tostring(message.role) .. ":" .. tostring(message.id)
                     local entry=data.authority[key]
 

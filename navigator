@@ -24,6 +24,12 @@ local function runNavigator(cfg)
         if not saveTableLight(statePath,state) then error("Navigator state write failed") end
     end
 
+    if not state.orientationCalibrated and (state.orientationScanIntent or (state.turnIntent and not state.deployed)) then
+        state.orientationScanIntent=nil
+        state.turnIntent=nil
+        if not saveTableLight(statePath,state) then error("Navigator orientation recovery write failed") end
+    end
+
     local bootHadIntent=state.motionIntent or state.turnIntent or state.chunkMoveIntent or
         state.loaderIntent or state.recoveryProbeIntent
 
@@ -137,6 +143,7 @@ local function runNavigator(cfg)
         local snapshot=textutils.unserialize(raw)
         snapshot.motionIntent=nil
         snapshot.turnIntent=nil
+        snapshot.orientationScanIntent=nil
         snapshot.recoveryProbeIntent=nil
         snapshot.chunkMoveIntent=nil
         snapshot.loaderIntent=nil
@@ -558,7 +565,8 @@ local function runNavigator(cfg)
             return true
         end
 
-        state.dir=tonumber(cfg.startDir) or state.dir or DIR_S
+        state.dir=tonumber(cfg.startDir) or state.dir or DIR_N
+        state.orientationScanIntent=nil
         local anchored=false
         for attempt=1,4 do
             local ok,behind=pcall(peripheral.call,"back","getID")
@@ -566,7 +574,17 @@ local function runNavigator(cfg)
                 anchored=true
                 break
             end
-            if attempt<4 and not turnRight() then return false end
+            if attempt<4 then
+                state.orientationScanIntent={attempt=attempt}
+                save()
+                if not turtle.turnRight() then
+                    state.orientationScanIntent=nil
+                    save()
+                    return false
+                end
+                state.orientationScanIntent=nil
+                save()
+            end
         end
         if not anchored then
             state.recoveryLocked=true
