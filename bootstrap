@@ -83,7 +83,8 @@ local function bootstrap()
             startZ = 0,
             placementMode = detectedPlacementMode,
             placementSupported = placementSupported,
-            startDir = detectedStartDir,
+            startDir = detectedStartDir or DIR_N,
+            startDirTrusted = false,
             placementGps = configured.expectedGps,
             worldOrigin = configured.worldOrigin,
             master = false,
@@ -105,7 +106,7 @@ local function bootstrap()
                 number = cfg.number,
                 placementSupported = cfg.placementSupported,
                 placementMode = cfg.placementMode,
-                detectedStartDir = cfg.startDir
+                detectedStartDir = nil
             })
             sleep(0.1)
         end
@@ -346,7 +347,8 @@ local function bootstrap()
             startZ=0,
             placementSupported=placementSupported,
             placementMode=detectedPlacementMode,
-            startDir=detectedStartDir,
+            startDir=detectedStartDir or DIR_N,
+            startDirTrusted=false,
             worldOrigin=configured.worldOrigin,
             deployed=false,
             managerId=configured.managerId,
@@ -403,7 +405,7 @@ local function bootstrap()
             row=cfg.row,
             depth=0,
             pos=0,
-            dir=cfg.placementSupported and DIR_N or DIR_S,
+            dir=DIR_N,
             phase="COMMISSIONING",
             request=nil,
             requestSeq=0,
@@ -428,7 +430,7 @@ local function bootstrap()
                 row=cfg.row,
                 placementSupported=cfg.placementSupported,
                 placementMode=cfg.placementMode,
-                detectedStartDir=cfg.placementSupported and DIR_N or DIR_S
+                detectedStartDir=nil
             })
             sleep(0.1)
         end

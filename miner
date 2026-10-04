@@ -5,9 +5,14 @@ local function runMinerCommissioning(cfg)
     end
     ensureManagerRegistration(cfg)
 
-    local initialDir=cfg.placementSupported and DIR_N or DIR_S
+    local initialDir=DIR_N
 
-    local state=loadTableLight("miner.tmp") or {
+    local state=loadTableLight("miner.tmp")
+    if state then
+        state.lastPackSend=nil
+        state.lastPackAssetSend=nil
+    end
+    state=state or {
         row=cfg.row,
         depth=0,
         pos=0,
@@ -105,63 +110,60 @@ local function runMinerCommissioning(cfg)
     end
 
     local function establishPlacedMinerNorth()
-        if state.orientationCalibrated then
-            if state.dir==DIR_N and state.orientationAnchor=="FOREMAN_BACK" then
-                return true
-            end
-            state.orientationCalibrated=false
-            state.orientationAnchor=nil
+        if state.orientationCalibrated and not state.orientationTurnIntent and
+            state.dir==DIR_N and state.orientationAnchor=="FOREMAN_BACK" then
+            return true
         end
 
-        if state.orientationTurnIntent then
-            state.orientationTurnIntent=nil
-            state.orientationCalibrated=false
-            state.orientationAnchor=nil
-        end
+        state.orientationCalibrated=false
+        state.orientationAnchor=nil
+        state.orientationTurnIntent=nil
+        state.orientationTurns=0
+        save()
 
-        local startDir=tonumber(cfg.detectedStartDir)
-        if startDir==nil then
-            startDir=cfg.placementSupported and DIR_N or DIR_S
+        local expected=cfg.placementGps
+        if type(expected)~="table" then
+            state.recoveryReason="Miner placement GPS anchor is missing"
+            save()
+            return false
         end
-        if startDir<DIR_N or startDir>DIR_W then
-            state.recoveryReason="Miner placement orientation metadata is invalid"
+        local valid,reason=verifyWorldPlacement(expected)
+        if not valid then
+            state.recoveryReason="Miner placement GPS verification failed: "..tostring(reason)
             save()
             return false
         end
 
-        state.dir=startDir
-        local needed=(DIR_N-state.dir)%4
-        state.orientationTurns=0
-
-        for i=1,needed do
-            local intent={
-                from=state.dir,
-                to=(state.dir+1)%4,
-                turnNumber=i
-            }
-            state.orientationTurnIntent=intent
-            save()
-            if not turtle.turnRight() then
-                state.orientationTurnIntent=nil
-                state.recoveryReason="Could not turn Miner-"..tostring(cfg.row)..
-                    " while aligning north from recorded placement orientation"
+        for attempt=1,4 do
+            local ok,behind=pcall(peripheral.call,"back","getID")
+            if ok and tonumber(behind)==tonumber(cfg.foremanId) then
+                state.dir=DIR_N
+                state.orientationTurns=attempt-1
+                state.orientationAnchor="FOREMAN_BACK"
+                state.orientationCalibrated=true
+                state.recoveryLocked=false
+                state.recoveryReason=nil
                 save()
-                return false
+                return true
             end
-            state.dir=intent.to
-            state.orientationTurns=i
-            state.orientationTurnIntent=nil
-            save()
+            if attempt<4 then
+                state.orientationTurnIntent={attempt=attempt}
+                save()
+                if not turtle.turnRight() then
+                    state.orientationTurnIntent=nil
+                    state.recoveryReason="Could not rotate while locating assigned Foreman behind miner"
+                    save()
+                    return false
+                end
+                state.orientationTurns=attempt
+                state.orientationTurnIntent=nil
+                save()
+            end
         end
 
-        state.dir=DIR_N
-        state.orientationTurns=needed
-        state.orientationAnchor="FOREMAN_BACK"
-        state.orientationCalibrated=true
-        state.recoveryLocked=false
-        state.recoveryReason=nil
+        state.recoveryReason="Assigned Foreman was not detected behind miner at verified GPS placement"
         save()
-        return true
+        return false
     end
 
     local function faceCommissioning(target)
@@ -169,8 +171,16 @@ local function runMinerCommissioning(cfg)
             if not establishPlacedMinerNorth() then return false end
         end
         while state.dir~=target do
-            if not turtle.turnRight() then return false end
-            state.dir=(state.dir+1)%4
+            local intent={from=state.dir,to=(state.dir+1)%4}
+            state.orientationTurnIntent=intent
+            save()
+            if not turtle.turnRight() then
+                state.orientationTurnIntent=nil
+                save()
+                return false
+            end
+            state.dir=intent.to
+            state.orientationTurnIntent=nil
             save()
         end
         return true
@@ -680,6 +690,11 @@ local function runMiner(cfg)
     local path="miner.tmp"
     local state=loadTableLight(path)
 
+    if state then
+        state.lastPackSend=nil
+        state.lastPackAssetSend=nil
+    end
+
     if not state then
         local monitorState=requestPoseBackup("miner",5,cfg.session)
         local exactMonitorPose=monitorState and
@@ -719,7 +734,7 @@ local function runMiner(cfg)
     end
 
     local bootHadIntent=state.motionIntent or state.turnIntent or
-        state.chunkMoveIntent or state.packStepIntent
+        state.chunkMoveIntent or state.packStepIntent or state.recoveryProbeIntent
 
     cfg.homeX=tonumber(cfg.homeX) or cfg.row
     cfg.homeY=tonumber(cfg.homeY) or 0
@@ -729,6 +744,7 @@ local function runMiner(cfg)
     cfg.shaftMaxZ=tonumber(cfg.shaftMaxZ) or 15
 
     local savedSession=state.session
+    local savedPoseSchema=tonumber(state.poseSchema) or 1
     local savedDepth=tonumber(state.depth)
     local savedPos=tonumber(state.pos)
     local savedY=tonumber(state.y)
@@ -771,14 +787,23 @@ local function runMiner(cfg)
     state.resumeY=tonumber(state.resumeY) or -(tonumber(state.resumeDepth) or 0)
     state.resumeZ=tonumber(state.resumeZ) or (tonumber(state.resumePos) or 0)
     state.resumeDir=tonumber(state.resumeDir) or DIR_N
-    if (savedSession and savedSession~=cfg.session) or
-        (savedDepth and savedY and savedDepth~=-savedY) or
-        (savedPos and savedZ and savedPos~=savedZ) then
+    if savedSession and savedSession~=cfg.session then
         state.recoveryLocked=true
-        state.recoveryReason="Miner saved coordinates disagree with their redundant fields"
+        state.recoveryReason="Miner saved session disagrees with assigned session"
+        state.phase="RECOVERY_LOCK"
+        saveTableLight(path,state)
+    elseif savedPoseSchema<MINER_POSE_SCHEMA and
+        ((savedDepth and savedY and savedDepth~=-savedY) or
+         (savedPos and savedZ and savedPos~=savedZ)) then
+        state.recoveryLocked=true
+        state.recoveryReason="Legacy miner pose fields disagree during schema migration"
         state.phase="RECOVERY_LOCK"
         saveTableLight(path,state)
     end
+    state.poseSchema=MINER_POSE_SCHEMA
+    state.depth=-state.y
+    state.pos=state.z
+    saveTableLight(path,state)
 
     if cfg.row==WORKER_COUNT and state.phase=="PACK_DONE" and
         state.recallMode=="PACK" and (state.x>1 or state.packDeposited~=true) then
@@ -1025,7 +1050,7 @@ local function runMiner(cfg)
             end
             saveTableLight(path,state)
         else
-            local recoveredDir,reason=recoverFacingByGPS(state,cfg.worldOrigin)
+            local recoveredDir,reason=recoverFacingByGPS(state,cfg.worldOrigin,function() return saveTableLight(path,state) end)
             if recoveredDir then
                 state.dir=recoveredDir
                 state.seq=math.max(state.seq,intentSeq)
@@ -1062,6 +1087,13 @@ local function runMiner(cfg)
         state.recoveryLocked=false
         state.recoveryReason=nil
         state.phase="RECALLED_PAUSED"
+        saveTableLight(path,state)
+    end
+
+    if state.recoveryProbeIntent and not state.recoveryLocked then
+        state.recoveryLocked=true
+        state.recoveryReason="Interrupted transactional facing probe"
+        state.phase="RECOVERY_LOCK"
         saveTableLight(path,state)
     end
 
@@ -1109,6 +1141,7 @@ local function runMiner(cfg)
     local prepareForForemanService
 
     local function save()
+        state.poseSchema=MINER_POSE_SCHEMA
         state.depth=-state.y
         state.pos=state.z
         state.fuelWitness=turtle.getFuelLevel()
@@ -1468,28 +1501,36 @@ local function runMiner(cfg)
 
     local orientationMovementActive=false
 
-    local function beginTranslation(kind,toX,toY,toZ)
-        if state.y==cfg.homeY and not orientationMovementActive and not verifySurfaceGps() then return nil end
-        local chestMove=state.advanceStage=="CHEST" and
-            toX==cfg.row and toY==0 and toZ>=-2 and toZ<=0
-        local packAssetMove=state.packAssetProgress and state.recallMode=="PACK" and
+    local function minerTranslationMode(toX,toY,toZ)
+        if state.advanceStage=="CHEST" and toX==cfg.row and toY==0 and
+            toZ>=-2 and toZ<=0 then return "CHEST" end
+        if state.packAssetProgress and state.recallMode=="PACK" and
             isChestCollector(cfg.row) and cfg.row~=WORKER_COUNT and
-            packAssetPoseValid(state.x,state.y,state.z) and packAssetPoseValid(toX,toY,toZ)
-        local packOverflowMove=cfg.row==WORKER_COUNT and state.recallMode=="PACK" and
+            packAssetPoseValid(state.x,state.y,state.z) and packAssetPoseValid(toX,toY,toZ) then
+            return "PACK_ASSET"
+        end
+        if cfg.row==WORKER_COUNT and state.recallMode=="PACK" and
             state.phase=="PACK_COLLECT" and state.packOverflowTrip==true and
             state.y==0 and toY==0 and state.x>=0 and state.x<=WORKER_COUNT and
             state.z>=-1 and state.z<=0 and toX>=0 and toX<=WORKER_COUNT and
-            toZ>=-1 and toZ<=0
-        local orientationMove=orientationMovementActive and
-            toX>=1 and toX<=WORKER_COUNT and
-            toY>=cfg.homeY and toY<=cfg.homeY+1 and
-            toZ>=0 and toZ<=15
-        local supplyPlacementMove=cfg.row==1 and state.advanceStage=="MOVE" and
+            toZ>=-1 and toZ<=0 then return "PACK_OVERFLOW" end
+        if orientationMovementActive and toX>=0 and toX<=WORKER_COUNT+1 and
+            toY>=cfg.homeY and toY<=cfg.homeY+1 and toZ>=-1 and toZ<=16 then
+            return "ORIENTATION"
+        end
+        if cfg.row==1 and state.advanceStage=="MOVE" and
             tonumber(state.supplyChestTarget)==tonumber(state.chunkIndex) and
-            state.y==0 and toY==0 and toZ==0 and toX>=0 and toX<=1
-        if not chestMove and not packAssetMove and not packOverflowMove and not orientationMove and
-            not supplyPlacementMove and
-            (toX~=cfg.row or toY>0 or toZ<0 or toZ>15) then
+            state.y==0 and toY==0 and toZ==0 and toX>=0 and toX<=1 then
+            return "SUPPLY"
+        end
+        if toX==cfg.row and toY<=0 and toZ>=0 and toZ<=15 then return "SHAFT" end
+        return nil
+    end
+
+    local function beginTranslation(kind,toX,toY,toZ)
+        if state.y==cfg.homeY and not orientationMovementActive and not verifySurfaceGps() then return nil end
+        local movementMode=minerTranslationMode(toX,toY,toZ)
+        if not movementMode then
             state.recoveryLocked=true
             state.recoveryReason="Movement would leave assigned miner shaft"
             state.phase="RECOVERY_LOCK"
@@ -1500,6 +1541,7 @@ local function runMiner(cfg)
 
         local intent={
             kind=kind,
+            mode=movementMode,
             seq=state.seq+1,
             fuelBefore=turtle.getFuelLevel(),
             from={x=state.x,y=state.y,z=state.z,dir=state.dir},
@@ -1718,21 +1760,32 @@ local function runMiner(cfg)
         if state.y~=cfg.homeY+1 then
             return false,"GPS orientation correction reached an unexpected height"
         end
-        for i=1,4 do
+        local recoveredDir=nil
+        for attempt=1,4 do
+            local bx,by,bz=locateWorldPose(2)
+            if not bx then return false,"GPS unavailable before orientation probe" end
             local kind=peripheral.getType("front")
             local okId,id=pcall(peripheral.call,"front","getID")
             if not kind and not (okId and tonumber(id)) then
                 pcall(turtle.dig)
                 pcall(turtle.attack)
             end
-            if not turnStep(true) then return false,"GPS orientation correction could not clear its probe layer" end
+            if not peripheral.getType("front") and not turtle.detect() then
+                if attemptForward() then
+                    local ax,ay,az=locateWorldPose(2)
+                    if not ax then return false,"GPS unavailable after orientation probe" end
+                    recoveredDir=directionFromWorldDelta(ax-bx,az-bz)
+                    ok,reason=orientationAdoptGpsPose()
+                    if not ok then return false,reason end
+                    if not recoveredDir then return false,"GPS orientation probe produced an invalid displacement" end
+                    state.dir=recoveredDir
+                    save()
+                    break
+                end
+            end
+            if not turnStep(true) then return false,"GPS orientation correction could not rotate to find a probe path" end
         end
-        ok,reason=orientationAdoptGpsPose()
-        if not ok then return false,reason end
-        local recoveredDir,dirReason=recoverFacingByGPS(state,cfg.worldOrigin)
-        if not recoveredDir then return false,dirReason or "GPS could not determine miner facing" end
-        state.dir=recoveredDir
-        save()
+        if not recoveredDir then return false,"GPS orientation correction could not find an open probe path" end
         ok,reason=orientationMoveHorizontal(cfg.homeX,cfg.homeZ)
         if not ok then return false,reason end
         if not face(DIR_N) then return false,"GPS orientation correction could not establish north" end
@@ -1975,16 +2028,7 @@ local function runMiner(cfg)
         end
 
         local function changedSlot(before)
-            local best=nil
-            local delta=0
-            for slot=1,16 do
-                local change=turtle.getItemCount(slot)-(tonumber(before[slot]) or 0)
-                if change>delta then
-                    best=slot
-                    delta=change
-                end
-            end
-            return best,delta
+            return inventoryPositiveDelta(before)
         end
 
         if cfg.row==1 and state.chunkIndex<target then
@@ -2008,8 +2052,7 @@ local function runMiner(cfg)
                         sendState("Miner-1 needs one free slot to move the Black Blue Blue supply chest")
                         return false
                     end
-                    local before={}
-                    for slot=1,16 do before[slot]=turtle.getItemCount(slot) end
+                    local before=turtleInventorySnapshot()
                     intent={before=before,target=target}
                     state.supplyChestIntent=intent
                     save()
@@ -2918,7 +2961,7 @@ local function runMiner(cfg)
         state.chunkMoveIntent=nil
         state.packStepIntent=nil
 
-        local recoveredDir,dirReason=recoverFacingByGPS(state,cfg.worldOrigin)
+        local recoveredDir,dirReason=recoverFacingByGPS(state,cfg.worldOrigin,function() save(); return true end)
         if not recoveredDir then
             local phase=recoverPhaseFromAuthority(authority)
             if phase=="MINING" and lz==cfg.shaftMinZ then
@@ -2950,6 +2993,7 @@ local function runMiner(cfg)
     local function attemptMinerRecovery()
         local priorReason=state.recoveryLocked and state.recoveryReason or nil
         local hadPending=state.motionIntent or state.turnIntent or state.chunkMoveIntent or
+            state.recoveryProbeIntent or
             (state.packStepIntent and state.packStepIntent.stage=="MOVING")
         local authority,authoritySeq=requestPoseBackup("miner",2,cfg.session)
         if not authority then
@@ -2983,8 +3027,16 @@ local function runMiner(cfg)
         end
 
         local unresolvedTurn=false
+        if state.recoveryProbeIntent and not state.turnIntent and not unresolvedMove then
+            local recoveredDir=recoverFacingByGPS(state,cfg.worldOrigin,function() save(); return true end)
+            if recoveredDir==nil then
+                unresolvedTurn=true
+            else
+                state.dir=recoveredDir
+            end
+        end
         if state.turnIntent and not unresolvedMove then
-            local recoveredDir=recoverFacingByGPS(state,cfg.worldOrigin)
+            local recoveredDir=recoverFacingByGPS(state,cfg.worldOrigin,function() save(); return true end)
             if recoveredDir==nil then
                 unresolvedTurn=true
             else

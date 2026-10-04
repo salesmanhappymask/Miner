@@ -4,8 +4,12 @@ local function openNetwork()
     local opened=false
     for _,side in ipairs({"left","right","top","bottom","front","back"}) do
         if peripheral.getType(side)=="modem" then
-            rednet.open(side)
-            opened=true
+            local okOpen,isOpen=pcall(rednet.isOpen,side)
+            if okOpen and isOpen then
+                opened=true
+            elseif pcall(rednet.open,side) then
+                opened=true
+            end
         end
     end
     return opened

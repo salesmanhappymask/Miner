@@ -24,7 +24,8 @@ local function runNavigator(cfg)
         if not saveTableLight(statePath,state) then error("Navigator state write failed") end
     end
 
-    local bootHadIntent=state.motionIntent or state.turnIntent or state.chunkMoveIntent or state.loaderIntent
+    local bootHadIntent=state.motionIntent or state.turnIntent or state.chunkMoveIntent or
+        state.loaderIntent or state.recoveryProbeIntent
 
     local function save()
         state.fuelWitness=turtle.getFuelLevel()
@@ -136,6 +137,7 @@ local function runNavigator(cfg)
         local snapshot=textutils.unserialize(raw)
         snapshot.motionIntent=nil
         snapshot.turnIntent=nil
+        snapshot.recoveryProbeIntent=nil
         snapshot.chunkMoveIntent=nil
         snapshot.loaderIntent=nil
         return snapshot
@@ -147,7 +149,8 @@ local function runNavigator(cfg)
 
     local function attemptNavigatorRecovery()
         local priorLock=state.recoveryLocked and state.recoveryReason or nil
-        local hadPending=state.motionIntent or state.turnIntent or state.chunkMoveIntent
+        local hadPending=state.motionIntent or state.turnIntent or state.chunkMoveIntent or
+            state.recoveryProbeIntent
         if state.chunkMoveIntent then
             resolveChunkMove(state,function() save() end,cfg.worldOrigin)
             if state.chunkMoveIntent then return false end
@@ -172,8 +175,19 @@ local function runNavigator(cfg)
             state.motionIntent=nil
         end
 
+        if state.recoveryProbeIntent and not state.turnIntent then
+            local recoveredDir,reason=recoverFacingByGPS(state,cfg.worldOrigin,function() save(); return true end)
+            if not recoveredDir then
+                state.recoveryLocked=true
+                state.recoveryReason=reason or "Navigator interrupted facing probe could not recover"
+                save()
+                return false
+            end
+            state.dir=recoveredDir
+        end
+
         if state.turnIntent then
-            local recoveredDir,reason=recoverFacingByGPS(state,cfg.worldOrigin)
+            local recoveredDir,reason=recoverFacingByGPS(state,cfg.worldOrigin,function() save(); return true end)
             if not recoveredDir then
                 state.recoveryLocked=true
                 state.recoveryReason=reason or "Navigator interrupted turn has an uncertain direction"
@@ -223,7 +237,13 @@ local function runNavigator(cfg)
         return true
     end
 
-    if state.motionIntent or state.turnIntent or state.recoveryLocked then
+    if state.recoveryProbeIntent and not state.recoveryLocked then
+        state.recoveryLocked=true
+        state.recoveryReason="Interrupted transactional facing probe"
+        save()
+    end
+
+    if state.motionIntent or state.turnIntent or state.recoveryProbeIntent or state.recoveryLocked then
         attemptNavigatorRecovery()
     else
         local verified,reason,witnessUpdated=verifyBootWitness(state,cfg.worldOrigin,bootHadIntent)

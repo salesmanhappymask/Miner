@@ -1,4 +1,4 @@
-local VERSION=154
+local VERSION=155
 local SEED_PROTOCOL="miner_swarm_seed_v121"
 
 local function writeFile(path,data)
@@ -11,8 +11,9 @@ end
 local function openSeedNetwork()
     for _,side in ipairs({"left","right","top","bottom","front","back"}) do
         if peripheral.getType(side)=="modem" then
-            if not rednet.isOpen(side) then rednet.open(side) end
-            return true
+            local okOpen,isOpen=pcall(rednet.isOpen,side)
+            if okOpen and isOpen then return true end
+            if pcall(rednet.open,side) then return true end
         end
     end
     return false
@@ -46,7 +47,7 @@ print("Waiting for Regional Manager fuel and reboot...")
 local acknowledged=false
 while not acknowledged do
     if openSeedNetwork() then
-        rednet.broadcast({
+        pcall(rednet.broadcast,{
             type="seed_master_ready",
             version=VERSION,
             id=os.getComputerID()
@@ -66,7 +67,7 @@ print("Waiting for installer cleanup and reboot...")
 
 while true do
     if openSeedNetwork() then
-        rednet.broadcast({
+        pcall(rednet.broadcast,{
             type="seed_master_cleanup_ready",
             version=VERSION,
             id=os.getComputerID()

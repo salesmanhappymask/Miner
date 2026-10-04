@@ -93,6 +93,14 @@ local function runManagerSeedBootstrap()
         return false,nil
     end
 
+    local function seedSend(id,packet)
+        local ok,result=pcall(rednet.send,id,packet,SEED_PROTOCOL)
+        if ok and result~=false then return true end
+        if not openSeedNetwork() then return false end
+        ok,result=pcall(rednet.send,id,packet,SEED_PROTOCOL)
+        return ok and result~=false
+    end
+
     local function seedPeripheralSummary()
         local lines={}
         for _,side in ipairs(SIDES) do
@@ -653,7 +661,7 @@ local function runManagerSeedBootstrap()
             end
         end
         if not ready then error("Master Foreman setup disk did not report installation complete") end
-        rednet.send(seed.masterId,{type="seed_master_ack",target=seed.masterId},SEED_PROTOCOL)
+        seedSend(seed.masterId,{type="seed_master_ack",target=seed.masterId})
         seed.phase="MASTER_ACKED"
         saveSeed()
     end
@@ -669,7 +677,7 @@ local function runManagerSeedBootstrap()
                 if message.type=="seed_master_cleanup_ready" and tonumber(message.version)==VERSION then
                     ready=true
                 elseif message.type=="seed_master_ready" and tonumber(message.version)==VERSION then
-                    rednet.send(seed.masterId,{type="seed_master_ack",target=seed.masterId},SEED_PROTOCOL)
+                    seedSend(seed.masterId,{type="seed_master_ack",target=seed.masterId})
                 end
             end
         end
@@ -765,7 +773,7 @@ local function runManagerSeedBootstrap()
             saveSeed()
         end
         if openSeedNetwork() then
-            rednet.send(seed.masterId,{type="seed_master_cleanup_done",target=seed.masterId,version=VERSION},SEED_PROTOCOL)
+            seedSend(seed.masterId,{type="seed_master_cleanup_done",target=seed.masterId,version=VERSION})
         end
         local ok=pcall(peripheral.call,"front","reboot")
         if not ok then
@@ -863,8 +871,13 @@ local function runRegionalManager()
     end
 
     local savedManagerVersion=tonumber(data and data.version)
+    local savedStateSchema=tonumber(data and data.schemaVersion) or savedManagerVersion
+    if data and savedStateSchema and savedStateSchema>STATE_SCHEMA_VERSION then
+        error("Regional Manager state schema is newer than this release")
+    end
     if data and savedManagerVersion and savedManagerVersion>=56 and savedManagerVersion<VERSION then
         data.version=VERSION
+        data.schemaVersion=STATE_SCHEMA_VERSION
         for _,entry in pairs(data.authority or {}) do
             if type(entry)=="table" then entry.version=VERSION end
         end
@@ -875,6 +888,7 @@ local function runRegionalManager()
         not next(data.miners or {}) and not next(data.navigators or {}) and
         not (data.foremen and (data.foremen[2] or data.foremen[3] or data.foremen[4])) then
         data.version=VERSION
+        data.schemaVersion=STATE_SCHEMA_VERSION
         if not saveTableLight("regional_manager.tmp",data) then
             error("Regional Manager migration write failed")
         end
@@ -883,9 +897,11 @@ local function runRegionalManager()
     if data and data.version~=VERSION then
         error("Unsupported Regional Manager state version; refusing to reset the swarm")
     end
+    if data then data.schemaVersion=STATE_SCHEMA_VERSION end
     if not data then
         data={
             version=VERSION,
+            schemaVersion=STATE_SCHEMA_VERSION,
             managerId=managerId,
             session=nil,
             masterForemanId=nil,
@@ -1041,6 +1057,15 @@ local function runRegionalManager()
     end
 
     local bootNow=now()
+    data.lastManagerFuelAttempt=nil
+    if data.advance then
+        data.advance.lastSend=nil
+        if data.advance.navMove then
+            data.advance.navMove.lastProbe=nil
+            data.advance.navMove.lastSend=nil
+            data.advance.navMove.started=nil
+        end
+    end
     if data.recall.state=="PACK_COLLECT" then
         data.recall.collectAfter=bootNow+2
     end
@@ -1481,7 +1506,11 @@ local function runRegionalManager()
 
     local function sendObserverSnapshot(force)
         if not force and now()-lastObserverSend<1 then return end
-        rednet.broadcast(observerSnapshot(),OBSERVER_PROTOCOL)
+        local ok=pcall(rednet.broadcast,observerSnapshot(),OBSERVER_PROTOCOL)
+        if not ok then
+            openNetwork()
+            pcall(rednet.broadcast,observerSnapshot(),OBSERVER_PROTOCOL)
+        end
         lastObserverSend=now()
     end
 
@@ -1894,6 +1923,18 @@ local function runRegionalManager()
             role=="navigator" and data.navigators
         local node=registry and registry[index]
         return node and node.id==sender or false
+    end
+
+    local function registeredMessageIdentity(sender,message)
+        if type(message)~="table" then return false end
+        if message.role=="miner" then
+            return registeredNodeSender("miner",message.row,sender)
+        elseif message.role=="foreman" then
+            return registeredNodeSender("foreman",message.number,sender)
+        elseif message.role=="navigator" then
+            return registeredNodeSender("navigator",message.number,sender)
+        end
+        return false
     end
 
     local function upsertServiceRequest(sender,message)
@@ -3167,17 +3208,7 @@ local function runRegionalManager()
                     end
 
                     local function recoveredSlotFromIntent()
-                        local beforeSlots=type(intent.beforeSlots)=="table" and intent.beforeSlots or {}
-                        local bestSlot=nil
-                        local bestDelta=0
-                        for i=1,16 do
-                            local delta=turtle.getItemCount(i)-(tonumber(beforeSlots[i]) or 0)
-                            if delta>bestDelta then
-                                bestDelta=delta
-                                bestSlot=i
-                            end
-                        end
-                        return bestSlot,bestDelta
+                        return inventoryPositiveDelta(intent.beforeSlots or {})
                     end
 
                     local slot,delta=recoveredSlotFromIntent()
@@ -3731,6 +3762,20 @@ local function runRegionalManager()
         return nil
     end
 
+    local ADVANCE_TRANSITIONS={
+        STAGE_F="COLLECT_M",
+        COLLECT_M="N3_PICKUP",
+        N3_PICKUP="N3_MOVE",
+        N3_MOVE="N3_PLACE",
+        N3_PLACE="MOVE_G",
+        MOVE_G="MOVE_M",
+        MOVE_M="MOVE_F",
+        MOVE_F="MOVE_RM",
+        N1_PICKUP="N1_MOVE",
+        N1_MOVE="N1_PLACE",
+        N1_PLACE="RELEASE"
+    }
+
     local function runChunkAdvance()
         if not data.advance then
             beginChunkAdvance()
@@ -3862,17 +3907,12 @@ local function runRegionalManager()
                 return
             end
         elseif advanceStageDone(stage) then
-            local nextStage=stage=="STAGE_F" and "COLLECT_M" or
-                stage=="COLLECT_M" and "N3_PICKUP" or
-                stage=="N3_PICKUP" and "N3_MOVE" or
-                stage=="N3_MOVE" and "N3_PLACE" or
-                stage=="N3_PLACE" and "MOVE_G" or
-                stage=="MOVE_G" and "MOVE_M" or
-                stage=="MOVE_M" and "MOVE_F" or
-                stage=="MOVE_F" and "MOVE_RM" or
-                stage=="N1_PICKUP" and "N1_MOVE" or
-                stage=="N1_MOVE" and "N1_PLACE" or
-                stage=="N1_PLACE" and "RELEASE" or "MOVE_RM"
+            local nextStage=ADVANCE_TRANSITIONS[stage]
+            if not nextStage then
+                advance.error="Invalid chunk-advance state transition from "..tostring(stage)
+                save()
+                return
+            end
             advance.phase=nextStage
             advance.acks={}
             advance.lastSend=0
@@ -4092,7 +4132,8 @@ local function runRegionalManager()
                 elseif message.type=="node_register" then
                     registerNode(sender,message)
 
-                elseif message.type=="node_online" and message.session==data.session then
+                elseif message.type=="node_online" and message.session==data.session and
+                    registeredMessageIdentity(sender,message) then
                     if sender==data.masterForemanId and message.role=="foreman" and tonumber(message.number)==1 and message.session==data.session then
                         masterLastSeen=now()
                     end
@@ -4199,7 +4240,8 @@ local function runRegionalManager()
                     save()
                     releaseSwarm()
 
-                elseif message.type=="status" and message.session==data.session then
+                elseif message.type=="status" and message.session==data.session and
+                    registeredMessageIdentity(sender,message) then
                     if sender==data.masterForemanId and message.role=="foreman" and tonumber(message.number)==1 and message.session==data.session then
                         masterLastSeen=now()
                     end

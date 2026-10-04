@@ -1,5 +1,9 @@
-VERSION = 154
-PROTOCOL = "miner_swarm_v121"
+VERSION = 155
+RELEASE_VERSION = VERSION
+STATE_SCHEMA_VERSION = 155
+PROTOCOL_VERSION = 121
+MINER_POSE_SCHEMA = 2
+PROTOCOL = "miner_swarm_v" .. tostring(PROTOCOL_VERSION)
 WORKER_COUNT = 16
 FOREMAN_COUNT = 4
 NAVIGATOR_COUNT = 4
@@ -92,11 +96,11 @@ end
 
 function detectPlacement()
     if not turtle then
-        return true,"SUPPORTED",DIR_N
+        return true,"SUPPORTED",nil
     end
 
     local supported=turtle.detectDown() and true or false
-    return supported,supported and "SUPPORTED" or "AIR",supported and DIR_N or DIR_S
+    return supported,supported and "SUPPORTED" or "AIR",nil
 end
 
 function verifyWorldPlacement(expected)
@@ -132,7 +136,7 @@ function now()
     return os.clock()
 end
 
-DEBUG_PROTOCOL = "miner_swarm_debug_v121"
+DEBUG_PROTOCOL = "miner_swarm_debug_v" .. tostring(PROTOCOL_VERSION)
 DEBUG_LOG_DIR = "logs"
 DEBUG_LOG_MAX = 65536
 DEBUG_ERROR_LOG_MAX = 16384
@@ -502,29 +506,71 @@ function loadTableLight(path)
 end
 
 function openNetwork()
-    local opened = false
-    for i = 1, #SIDES do
-        local side = SIDES[i]
-        if peripheral.getType(side) == "modem" then
-            rednet.open(side)
-            opened = true
+    local opened=false
+    for i=1,#SIDES do
+        local side=SIDES[i]
+        if peripheral.getType(side)=="modem" then
+            local already=false
+            local okOpen,isOpen=pcall(rednet.isOpen,side)
+            if okOpen and isOpen then already=true end
+            if already or pcall(rednet.open,side) then opened=true end
         end
     end
     return opened
 end
 
-function send(id, packet)
-    if id and id ~= os.getComputerID() then
-        rednet.send(id, packet, PROTOCOL)
+local function safeNetworkSend(id,packet,protocol,broadcastMode)
+    local fn=broadcastMode and rednet.broadcast or rednet.send
+    local ok,result
+    if broadcastMode then
+        ok,result=pcall(fn,packet,protocol)
+    else
+        ok,result=pcall(fn,id,packet,protocol)
     end
+    if ok then return result~=false end
+    if not openNetwork() then return false end
+    if broadcastMode then
+        ok,result=pcall(fn,packet,protocol)
+    else
+        ok,result=pcall(fn,id,packet,protocol)
+    end
+    return ok and result~=false
+end
+
+function send(id,packet)
+    if id and id~=os.getComputerID() then
+        return safeNetworkSend(id,packet,PROTOCOL,false)
+    end
+    return true
 end
 
 function broadcast(packet)
-    rednet.broadcast(packet, PROTOCOL)
+    return safeNetworkSend(nil,packet,PROTOCOL,true)
 end
 
 function lower(value)
     return string.lower(tostring(value or ""))
+end
+
+function turtleInventorySnapshot()
+    local out={}
+    if not turtle then return out end
+    for slot=1,16 do out[slot]=turtle.getItemCount(slot) end
+    return out
+end
+
+function inventoryPositiveDelta(before)
+    local bestSlot=nil
+    local bestDelta=0
+    for slot=1,16 do
+        local current=turtle and turtle.getItemCount(slot) or 0
+        local delta=current-(tonumber(before and before[slot]) or 0)
+        if delta>bestDelta then
+            bestDelta=delta
+            bestSlot=slot
+        end
+    end
+    return bestSlot,bestDelta
 end
 
 function itemText(item)
@@ -1365,7 +1411,7 @@ function movementFromGPS(intent,chunkIndex,origin,timeout)
     return nil
 end
 
-local function directionFromWorldDelta(dx,dz)
+function directionFromWorldDelta(dx,dz)
     if math.abs(dx)<0.25 and math.abs(dz+1)<0.25 then return DIR_N end
     if math.abs(dx-1)<0.25 and math.abs(dz)<0.25 then return DIR_E end
     if math.abs(dx)<0.25 and math.abs(dz-1)<0.25 then return DIR_S end
@@ -1373,46 +1419,103 @@ local function directionFromWorldDelta(dx,dz)
     return nil
 end
 
-function recoverFacingByGPS(state,origin)
+function recoverFacingByGPS(state,origin,saveFn)
     if not turtle or not origin or type(state)~="table" then return nil,"GPS facing recovery unavailable" end
+    if type(saveFn)~="function" then return nil,"GPS facing recovery requires transactional persistence" end
     local ex,ey,ez=worldPose(state.x,state.y,state.z,state.chunkIndex,origin)
     if not ex then return nil,"GPS facing recovery has no world anchor" end
+
+    local function near(a,b)
+        return type(a)=="number" and type(b)=="number" and math.abs(a-b)<0.25
+    end
+
+    local function persistIntent(intent)
+        state.recoveryProbeIntent=intent
+        local ok,result=pcall(saveFn)
+        return ok and result~=false
+    end
+
+    local function clearIntent()
+        state.recoveryProbeIntent=nil
+        local ok,result=pcall(saveFn)
+        return ok and result~=false
+    end
+
+    local function verifyBase(base)
+        local x,y,z=locateWorldPose(2)
+        return x and near(x,base.x) and near(y,base.y) and near(z,base.z)
+    end
+
+    local function finishReturn(command,base,facing)
+        if not persistIntent({kind="return",command=command,base=base,facing=facing}) then
+            return nil,"GPS facing recovery could not persist return intent"
+        end
+        local moved=command=="back" and turtle.back() or turtle.forward()
+        if not moved then return nil,"GPS facing recovery could not return from probe" end
+        if not verifyBase(base) then return nil,"GPS facing recovery could not verify probe return" end
+        if not clearIntent() then return nil,"GPS facing recovery could not clear return intent" end
+        return facing
+    end
+
     local x,y,z=locateWorldPose(2)
     if not x then return nil,"GPS unavailable for facing recovery" end
-    if math.abs(y-ey)>0.25 then return nil,"GPS facing recovery found an unexpected height" end
-    local dx=x-ex
-    local dz=z-ez
-    if math.abs(dx)>0.25 or math.abs(dz)>0.25 then
-        local dir=directionFromWorldDelta(dx,dz)
-        if not dir then return nil,"GPS facing recovery found an unexpected position" end
-        if not turtle.back() then return nil,"GPS facing recovery could not return from an interrupted probe" end
-        local rx,ry,rz=locateWorldPose(2)
-        if not rx or math.abs(rx-ex)>=0.25 or math.abs(ry-ey)>=0.25 or math.abs(rz-ez)>=0.25 then
-            return nil,"GPS facing recovery could not verify its return position"
-        end
-        return dir
-    end
-    for attempt=1,4 do
-        local bx,by,bz=locateWorldPose(1)
-        if not bx then return nil,"GPS unavailable during facing recovery" end
-        if turtle.forward() then
-            local ax,ay,az=locateWorldPose(2)
-            if not ax then
-                if not turtle.back() then return nil,"GPS failed during facing recovery and the probe could not retreat" end
-                return nil,"GPS unavailable after facing recovery probe"
+
+    local pending=state.recoveryProbeIntent
+    if type(pending)=="table" and type(pending.base)=="table" then
+        local base=pending.base
+        if near(x,base.x) and near(y,base.y) and near(z,base.z) then
+            local completedFacing=pending.kind=="return" and tonumber(pending.facing) or nil
+            if not clearIntent() then return nil,"GPS facing recovery could not clear completed probe intent" end
+            if completedFacing then return completedFacing end
+        elseif pending.kind=="forward" or pending.kind=="back" then
+            local movedDir=directionFromWorldDelta(x-base.x,z-base.z)
+            if not movedDir or not near(y,base.y) then
+                return nil,"GPS facing recovery found an unexpected interrupted probe position"
             end
-            local dir=directionFromWorldDelta(ax-bx,az-bz)
-            if not turtle.back() then return nil,"Facing recovery probe could not return to its starting tile" end
-            local rx,ry,rz=locateWorldPose(2)
-            if not rx or math.abs(rx-ex)>=0.25 or math.abs(ry-ey)>=0.25 or math.abs(rz-ez)>=0.25 then
-                return nil,"Facing recovery probe return position did not verify"
+            local facing=pending.kind=="forward" and movedDir or ((movedDir+2)%4)
+            return finishReturn(pending.kind=="forward" and "back" or "forward",base,facing)
+        elseif pending.kind=="return" then
+            local command=pending.command
+            if command~="back" and command~="forward" then
+                return nil,"GPS facing recovery return intent is invalid"
             end
-            if dir then return dir end
-            return nil,"Facing recovery probe produced an invalid displacement"
+            local moved=command=="back" and turtle.back() or turtle.forward()
+            if not moved then return nil,"GPS facing recovery could not resume interrupted return" end
+            if not verifyBase(base) then return nil,"GPS facing recovery resumed return but did not reach base" end
+            local facing=tonumber(pending.facing)
+            if not clearIntent() then return nil,"GPS facing recovery could not clear completed return intent" end
+            return facing
         end
-        if not turtle.turnRight() then return nil,"Facing recovery could not rotate for another probe" end
     end
-    return nil,"Facing recovery could not find an open adjacent tile"
+
+    if not near(x,ex) or not near(y,ey) or not near(z,ez) then
+        return nil,"GPS facing recovery requires the saved pose before probing"
+    end
+
+    local base={x=x,y=y,z=z}
+    if not persistIntent({kind="forward",base=base,fuelBefore=turtle.getFuelLevel()}) then
+        return nil,"GPS facing recovery could not persist probe intent"
+    end
+    local command="forward"
+    if not turtle.forward() then
+        if not persistIntent({kind="back",base=base,fuelBefore=turtle.getFuelLevel()}) then
+            return nil,"GPS facing recovery could not persist alternate probe intent"
+        end
+        command="back"
+        if not turtle.back() then
+            if not clearIntent() then return nil,"GPS facing recovery could not clear blocked probe intent" end
+            return nil,"GPS facing recovery front and rear are blocked"
+        end
+    end
+
+    local ax,ay,az=locateWorldPose(2)
+    if not ax then return nil,"GPS unavailable after facing recovery probe" end
+    local movedDir=directionFromWorldDelta(ax-base.x,az-base.z)
+    if not movedDir or not near(ay,base.y) then
+        return nil,"Facing recovery probe produced an invalid displacement"
+    end
+    local facing=command=="forward" and movedDir or ((movedDir+2)%4)
+    return finishReturn(command=="forward" and "back" or "forward",base,facing)
 end
 
 function verifyBootWitness(state,origin,hadIntent)

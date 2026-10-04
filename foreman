@@ -15,6 +15,12 @@ local function runForeman(cfg)
     local queuePath = "foreman" .. tostring(number) .. "_queue.tmp"
     local state=loadTableLight(statePath)
 
+    if state then
+        state.installerConsolidationStartedAt=nil
+        state.installerSupplyRetryAt=nil
+        state.lastPackSend=nil
+    end
+
     if not state then
         local monitorState=requestPoseBackup("foreman",5,cfg.session)
         state=monitorState or {
@@ -36,7 +42,7 @@ local function runForeman(cfg)
     end
 
     local bootHadIntent=state.motionIntent or state.verticalIntent or
-        state.turnIntent or state.chunkMoveIntent
+        state.turnIntent or state.chunkMoveIntent or state.recoveryProbeIntent
 
     state.session=cfg.session
     state.y=tonumber(state.y) or 0
@@ -98,7 +104,7 @@ local function runForeman(cfg)
         state.verticalIntent=nil
         state.turnIntent=nil
         state.chunkMoveIntent=nil
-        local recoveredDir,reason=recoverFacingByGPS(state,cfg.worldOrigin)
+        local recoveredDir,reason=recoverFacingByGPS(state,cfg.worldOrigin,function() return saveTableLight(statePath,state) end)
         if not recoveredDir then
             state.recoveryReason=reason or "Could not recover Foreman facing after world rollback"
             return false
@@ -128,7 +134,8 @@ local function runForeman(cfg)
 
     local function recoverForemanState()
         local priorLock=state.recoveryLocked and state.recoveryReason or nil
-        local hadPending=state.motionIntent or state.verticalIntent or state.turnIntent or state.chunkMoveIntent
+        local hadPending=state.motionIntent or state.verticalIntent or state.turnIntent or
+            state.chunkMoveIntent or state.recoveryProbeIntent
         local managerState,managerSeq=requestPoseBackup("foreman",2,cfg.session)
         if not managerState then
             managerState=bootManagerState
@@ -140,8 +147,20 @@ local function runForeman(cfg)
             end,cfg.worldOrigin)
             if state.chunkMoveIntent and not foremanRecoveryReasonIsPositional(priorLock) then return false end
         end
+        if state.recoveryProbeIntent and not state.turnIntent then
+            local recoveredDir,reason=recoverFacingByGPS(state,cfg.worldOrigin,function() return saveTableLight(statePath,state) end)
+            if not recoveredDir then
+                state.recoveryLocked=true
+                state.recoveryReason=reason or "Foreman interrupted facing probe could not recover"
+                state.phase="RECOVERY_LOCK"
+                saveTableLight(statePath,state)
+                return false
+            end
+            state.dir=recoveredDir
+        end
+
         if state.turnIntent then
-            local recoveredDir=recoverFacingByGPS(state,cfg.worldOrigin)
+            local recoveredDir=recoverFacingByGPS(state,cfg.worldOrigin,function() return saveTableLight(statePath,state) end)
             if recoveredDir then
                 state.dir=recoveredDir
                 state.seq=math.max(tonumber(state.seq) or 0,tonumber(state.turnIntent.seq) or 0)
@@ -239,13 +258,22 @@ local function runForeman(cfg)
         return true
     end
 
-    if state.motionIntent or state.verticalIntent or state.turnIntent or state.recoveryLocked then
+    if state.recoveryProbeIntent and not state.recoveryLocked then
+        state.recoveryLocked=true
+        state.recoveryReason="Interrupted transactional facing probe"
+        state.phase="RECOVERY_LOCK"
+        saveTableLight(statePath,state)
+    end
+
+    if state.motionIntent or state.verticalIntent or state.turnIntent or
+        state.recoveryProbeIntent or state.recoveryLocked then
         recoverForemanState()
     end
 
     if bootHadIntent and not state.recoveryLocked and
         not state.motionIntent and not state.verticalIntent and
-        not state.turnIntent and not state.chunkMoveIntent then
+        not state.turnIntent and not state.chunkMoveIntent and
+        not state.recoveryProbeIntent then
         state.fuelWitness=turtle.getFuelLevel()
         saveTableLight(statePath,state)
     end
@@ -318,6 +346,7 @@ local function runForeman(cfg)
         snapshot.motionIntent=nil
         snapshot.verticalIntent=nil
         snapshot.turnIntent=nil
+        snapshot.recoveryProbeIntent=nil
         return snapshot
     end
 
@@ -3038,46 +3067,10 @@ local function runForeman(cfg)
     local function verifyAssignedMinerOrientation()
         if state.orientationCheckDone then return true end
         state.orientationCheckToken=(tonumber(state.orientationCheckToken) or 0)+1
-        local resumed=state.orientationCheckStarted and true or false
         state.orientationCheckStarted=true
         state.phase="VERIFYING_ORIENTATION"
         saveState()
-        if resumed then
-            return repairAssignedMinerOrientation("Orientation verification was interrupted; correcting all four miners by GPS")
-        end
-        local r1=cfg.rowStart
-        local r2=r1+1
-        local r3=r1+2
-        local r4=r1+3
-        local sequence={
-            {r1,"forward",1},
-            {r2,"check",2,true,false,true},
-            {r2,"forward",3},
-            {r1,"check",4,true,false,true},
-            {r1,"home",5},
-            {r3,"check",6,true,false,true},
-            {r3,"forward",7},
-            {r2,"check",8,true,false,true},
-            {r2,"home",9},
-            {r4,"forward",10},
-            {r3,"check",11,true,false,true},
-            {r4,"check",12,false,true,true},
-            {r3,"home",13},
-            {r4,"home",14},
-        }
-        for _,entry in ipairs(sequence) do
-            local ok,why=minerOrientationCommand(entry[1],entry[2],entry[3],entry[4],entry[5],entry[6])
-            if not ok then
-                return repairAssignedMinerOrientation("Peer orientation verification failed: "..tostring(why))
-            end
-        end
-        state.orientationCheckDone=true
-        state.orientationCheckStarted=nil
-        state.setupBlockReason=nil
-        state.phase="COMMISSIONING"
-        saveState()
-        sendState("All assigned miners physically confirmed north")
-        return true
+        return repairAssignedMinerOrientation("GPS-authoritative orientation verification")
     end
 
     local function loadCommissionFuel()

@@ -141,6 +141,12 @@ local function runFile(path,role,autoRecover)
         return
     end
 
+    if tostring(err)=="Terminated" then
+        if debugLog then pcall(debugLog,"STOP","Manual termination","INFO") end
+        if debugFlush then pcall(debugFlush) end
+        return
+    end
+
     if debugLog then pcall(debugLog,"CRASH",tostring(err),"ERROR") end
     if debugFlush then pcall(debugFlush) end
     local f=fs.open(role .. "_error.log","w")
