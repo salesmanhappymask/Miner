@@ -5586,18 +5586,7 @@ local function runForeman(cfg)
         end
     end
 
-    local gpsModemSide=nil
-    local gpsModem=nil
-    for _,side in ipairs(SIDES) do
-        if peripheral.getType(side)=="modem" then
-            local ok,wireless=pcall(peripheral.call,side,"isWireless")
-            if ok and wireless then
-                gpsModemSide=side
-                gpsModem=peripheral.wrap(side)
-                break
-            end
-        end
-    end
+    local gpsModemSide,gpsModem=findWirelessModemSide()
     if gpsModem then gpsModem.open(gps.CHANNEL_GPS) end
 
     local function recoveryGpsLoop()

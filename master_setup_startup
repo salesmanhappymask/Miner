@@ -1,4 +1,4 @@
-local VERSION=157
+local VERSION=158
 local SEED_PROTOCOL="miner_swarm_seed_v121"
 
 local function writeFile(path,data)
@@ -10,10 +10,12 @@ end
 
 local function openSeedNetwork()
     for _,side in ipairs({"left","right","top","bottom","front","back"}) do
-        if peripheral.getType(side)=="modem" then
-            local okOpen,isOpen=pcall(rednet.isOpen,side)
-            if okOpen and isOpen then return true end
-            if pcall(rednet.open,side) then return true end
+        local okOpen,isOpen=pcall(rednet.isOpen,side)
+        if okOpen and isOpen then return true end
+        local ok=pcall(rednet.open,side)
+        if ok then
+            local okCheck,opened=pcall(rednet.isOpen,side)
+            if okCheck and opened then return true end
         end
     end
     return false

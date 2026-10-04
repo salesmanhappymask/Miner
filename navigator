@@ -1159,22 +1159,12 @@ local function runNavigator(cfg)
     cfg.deployed=state.deployed and true or false
     saveTable("node.cfg",cfg)
 
-    local modemSide=nil
-    for _,side in ipairs(SIDES) do
-        if peripheral.getType(side)=="modem" then
-            local ok,wireless=pcall(peripheral.call,side,"isWireless")
-            if ok and wireless then
-                modemSide=side
-                break
-            end
-        end
-    end
+    local modemSide,modem=findWirelessModemSide()
 
-    if not modemSide then
+    if not modemSide or not modem then
         error("Navigator requires a Wireless Modem")
     end
 
-    local modem=peripheral.wrap(modemSide)
     modem.open(gps.CHANNEL_GPS)
 
     local function sendNavigatorStatus()

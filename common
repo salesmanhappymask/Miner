@@ -1,4 +1,4 @@
-VERSION = 157
+VERSION = 158
 RELEASE_VERSION = VERSION
 STATE_SCHEMA_VERSION = 155
 PROTOCOL_VERSION = 121
@@ -509,14 +509,32 @@ function openNetwork()
     local opened=false
     for i=1,#SIDES do
         local side=SIDES[i]
-        if peripheral.getType(side)=="modem" then
-            local already=false
-            local okOpen,isOpen=pcall(rednet.isOpen,side)
-            if okOpen and isOpen then already=true end
-            if already or pcall(rednet.open,side) then opened=true end
+        local okOpen,isOpen=pcall(rednet.isOpen,side)
+        if okOpen and isOpen then
+            opened=true
+        else
+            local ok=pcall(rednet.open,side)
+            if ok then
+                local okCheck,nowOpen=pcall(rednet.isOpen,side)
+                if okCheck and nowOpen then opened=true end
+            end
         end
     end
     return opened
+end
+
+function findWirelessModemSide()
+    for i=1,#SIDES do
+        local side=SIDES[i]
+        local modem=peripheral.wrap(side)
+        if modem and type(modem.open)=="function" and type(modem.transmit)=="function" then
+            local ok,wireless=pcall(function()
+                return type(modem.isWireless)=="function" and modem.isWireless()
+            end)
+            if ok and wireless==true then return side,modem end
+        end
+    end
+    return nil,nil
 end
 
 local function safeNetworkSend(id,packet,protocol,broadcastMode)

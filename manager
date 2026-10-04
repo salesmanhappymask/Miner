@@ -78,14 +78,12 @@ local function runManagerSeedBootstrap()
 
     local function openSeedNetwork()
         for _,side in ipairs(SIDES) do
-            if peripheral.getType(side)=="modem" then
-                local okOpen,isOpen=pcall(rednet.isOpen,side)
-                if okOpen and isOpen then return true,side end
-                local ok=pcall(rednet.open,side)
-                if ok then
-                    local okCheck,opened=pcall(rednet.isOpen,side)
-                    if not okCheck or opened then return true,side end
-                end
+            local okOpen,isOpen=pcall(rednet.isOpen,side)
+            if okOpen and isOpen then return true,side end
+            local ok=pcall(rednet.open,side)
+            if ok then
+                local okCheck,opened=pcall(rednet.isOpen,side)
+                if okCheck and opened then return true,side end
             end
         end
         return false,nil
@@ -103,11 +101,12 @@ local function runManagerSeedBootstrap()
         local lines={}
         for _,side in ipairs(SIDES) do
             local kind=peripheral.getType(side)
+            local okOpen,isOpen=pcall(rednet.isOpen,side)
             if kind=="modem" then
                 local ok,wireless=pcall(peripheral.call,side,"isWireless")
-                if ok then
-                    kind="modem wireless="..tostring(wireless==true)
-                end
+                if ok then kind="modem wireless="..tostring(wireless==true) end
+            elseif okOpen and isOpen then
+                kind="rednet-open"
             end
             lines[#lines+1]=tostring(side)..": "..tostring(kind or "none")
         end

@@ -3,12 +3,14 @@ local PROTOCOL="miner_swarm_monitor_v121"
 local function openNetwork()
     local opened=false
     for _,side in ipairs({"left","right","top","bottom","front","back"}) do
-        if peripheral.getType(side)=="modem" then
-            local okOpen,isOpen=pcall(rednet.isOpen,side)
-            if okOpen and isOpen then
-                opened=true
-            elseif pcall(rednet.open,side) then
-                opened=true
+        local okOpen,isOpen=pcall(rednet.isOpen,side)
+        if okOpen and isOpen then
+            opened=true
+        else
+            local ok=pcall(rednet.open,side)
+            if ok then
+                local okCheck,nowOpen=pcall(rednet.isOpen,side)
+                if okCheck and nowOpen then opened=true end
             end
         end
     end
